@@ -124,7 +124,16 @@ if [ -d src ]; then
     ok 'src/ references no host outside instagram.com'
   fi
 
-  IMPURE=$(grep -rnE '\bchrome\.|\bdocument\.|\bwindow\.|localStorage' src/core src/storage 2>/dev/null || true)
+  # Comments are stripped first: prose may name chrome.storage.local while the
+  # code passes the adapter in. A local variable called `window` is not the
+  # browser global, and the gate must not punish clear naming elsewhere.
+  IMPURE=$(find src/core src/storage -name '*.js' 2>/dev/null | xargs -r awk '
+    /\/\*/ { incomment = 1 }
+    incomment && /\*\// { incomment = 0; next }
+    incomment { next }
+    /^[[:space:]]*(\/\/|\*)/ { next }
+    /\bchrome\.|\bdocument\.|\bwindow\.|localStorage/ { print FILENAME ":" FNR ": " $0 }
+  ' || true)
   if [ -n "$IMPURE" ]; then
     bad 'browser API inside a pure module:'
     printf '%s\n' "$IMPURE" | sed 's/^/          /'
