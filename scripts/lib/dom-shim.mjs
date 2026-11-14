@@ -98,6 +98,12 @@ class Element {
     for (const n of nodes) {
       if (n === null || n === undefined || n === false) continue;
       const node = typeof n === 'object' ? n : this.ownerDocument.createTextNode(String(n));
+      // A document fragment contributes its children, as in a real DOM.
+      if (node instanceof Element && node.tagName === '#fragment') {
+        this.append(...node.children);
+        node.children = [];
+        continue;
+      }
       node.parentNode = this;
       this.children.push(node);
       this._text = null;
@@ -138,6 +144,13 @@ class Element {
   }
   scrollBy(delta) { this.scrollTop += typeof delta === 'object' ? (delta?.top ?? 0) : delta; }
   scrollIntoView(_options) { this._scrolledIntoView = (this._scrolledIntoView ?? 0) + 1; }
+  /** Replaces every child in one operation. Never `innerHTML = ''`. */
+  replaceChildren(...nodes) {
+    this.children = [];
+    this._text = null;
+    this._rawHtml = null;
+    this.append(...nodes);
+  }
   getBoundingClientRect() {
     const r = this._rect ?? { x: 0, y: 0, width: 0, height: 0 };
     return { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height, ...r };

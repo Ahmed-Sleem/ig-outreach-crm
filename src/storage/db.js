@@ -170,6 +170,79 @@ export function updateWorkspace(workspaceId, patch) {
 
 /* --------------------------------------------------------------------- leads */
 
+/**
+ * The one place a lead record's shape is written down.
+ *
+ * Every writer (the collector, the importer, the funnel) builds its row through
+ * this, so a field cannot exist in one code path and be undefined in another —
+ * which is how a table ends up sorting `undefined` against `0` and a filter ends
+ * up hiding rows.
+ *
+ * @param {{workspaceId: string, username: string}} identity
+ * @param {object} patch
+ */
+export function leadRecord(identity, patch = {}) {
+  const username = String(identity?.username ?? '');
+  const workspaceId = String(identity?.workspaceId ?? '');
+  if (!username) throw new Error('a lead needs a username');
+  if (!workspaceId) throw new Error('a lead needs a workspace');
+  const now = Date.now();
+  return {
+    leadKey: `${workspaceId}:${username.toLowerCase()}`,
+    workspaceId,
+    username,
+    igUserId: null,
+    fullName: '',
+    biography: '',
+    profilePicUrl: '',
+    isPrivate: false,
+    isVerified: false,
+    isBusiness: false,
+    followers: null,
+    following: null,
+
+    /** Two-axis lifecycle. Values of RelState / DmState in core/lifecycle.js. */
+    relState: 'NONE',
+    dmState: 'NONE',
+
+    /** Ranking. core/scoring.js writes these; the table sorts on them. */
+    priorityScore: 0,
+    warmthTier: 'cold',
+    scoreParts: {},
+
+    /** Provenance: which source accounts and edge types produced this lead. */
+    sourceAccounts: [],
+    edgeTypes: [],
+    edgeCount: 0,
+    intentLabel: null,
+
+    /** Funnel bookkeeping. */
+    groupIds: [],
+    followedAt: null,
+    requestedAt: null,
+    acceptedAt: null,
+    messagedAt: null,
+    repliedAt: null,
+    unfollowedAt: null,
+    nextEligibleAt: null,
+    attempts: 0,
+    lastError: null,
+
+    /** Protections honoured by lifecycle.js and the cleaner. */
+    isWhitelisted: false,
+    isProtectedBaseline: false,
+    doNotContactReason: null,
+
+    firstSeenAt: now,
+    lastSeenAt: now,
+    ...patch,
+    leadKey: String(patch.leadKey ?? `${workspaceId}:${username.toLowerCase()}`),
+    workspaceId,
+    username,
+    igUserId: patch.igUserId === undefined || patch.igUserId === null ? null : String(patch.igUserId),
+  };
+}
+
 export function upsertLead(lead) {
   const row = {
     firstSeenAt: Date.now(),
