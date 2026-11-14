@@ -64,6 +64,15 @@ class Element {
     return this.children.map((c) => c.textContent ?? '').join('');
   }
 
+  /** Rendered text: <br> and block boxes become newlines, as a browser shows them. */
+  get innerText() {
+    if (this._text !== null) return this._text;
+    if (this.tagName === 'br') return '\n';
+    return this.children
+      .map((child) => (child instanceof Element ? child.innerText : String(child.textContent ?? '')))
+      .join(this.tagName === 'div' || this.tagName === 'p' ? '\n' : '');
+  }
+
   set innerHTML(v) { this._rawHtml = String(v); this.children = []; this._text = null; }
   get innerHTML() { return this._rawHtml ?? this.children.map((c) => (c.outerHTML ?? escapeHtml(c.textContent ?? ''))).join(''); }
 
@@ -128,6 +137,7 @@ class Element {
     this.scrollTop = typeof optionsOrTop === 'object' ? (optionsOrTop?.top ?? this.scrollTop) : (optionsOrTop ?? this.scrollTop);
   }
   scrollBy(delta) { this.scrollTop += typeof delta === 'object' ? (delta?.top ?? 0) : delta; }
+  scrollIntoView(_options) { this._scrolledIntoView = (this._scrolledIntoView ?? 0) + 1; }
   getBoundingClientRect() {
     const r = this._rect ?? { x: 0, y: 0, width: 0, height: 0 };
     return { left: r.x, top: r.y, right: r.x + r.width, bottom: r.y + r.height, ...r };
@@ -252,6 +262,39 @@ function matchesChain(node, group, ancestors) {
   return index < 0;
 }
 
+class ShimRange {
+  constructor(doc) {
+    this._doc = doc;
+    this.startContainer = null;
+    this.startOffset = 0;
+    this.endContainer = null;
+    this.endOffset = 0;
+    this.collapsed = true;
+  }
+  setStart(node, offset = 0) { this.startContainer = node; this.startOffset = offset; this._sync(); }
+  setEnd(node, offset = 0) { this.endContainer = node; this.endOffset = offset; this._sync(); }
+  selectNodeContents(node) { this.setStart(node, 0); this.setEnd(node, node.children?.length ?? 0); }
+  collapse(toStart = false) {
+    if (toStart) { this.endContainer = this.startContainer; this.endOffset = this.startOffset; }
+    else { this.startContainer = this.endContainer; this.startOffset = this.endOffset; }
+    this.collapsed = true;
+  }
+  _sync() {
+    this.collapsed = this.startContainer === this.endContainer && this.startOffset === this.endOffset;
+  }
+}
+
+class ShimSelection {
+  constructor(doc) { this._doc = doc; this.ranges = []; this._anchor = null; }
+  get rangeCount() { return this.ranges.length; }
+  get anchorNode() { return this._anchor; }
+  get isCollapsed() { return this.ranges.length === 0 ? true : Boolean(this.ranges[0].collapsed); }
+  addRange(range) { this.ranges.push(range); this._anchor = range.startContainer ?? range.endContainer; }
+  removeAllRanges() { this.ranges = []; this._anchor = null; }
+  collapse(node) { this.removeAllRanges(); const range = new ShimRange(this._doc); range.setStart(node, 0); range.collapse(); this.addRange(range); }
+  getRangeAt(index = 0) { return this.ranges[index] ?? null; }
+}
+
 class TextNode {
   constructor(text) { this.textContent = String(text); this.parentNode = null; }
   get outerHTML() { return escapeHtml(this.textContent); }
@@ -265,9 +308,41 @@ class Doc {
     this.head = new Element('head', this);
   }
   _register(id, node) { this._ids.set(id, node); }
-  execCommand(command) {
+  get selection() { return (this._selection ??= new ShimSelection(this)); }
+  createRange() { return new ShimRange(this); }
+  /**
+   * A small but REAL implementation of the four commands the DM composer uses.
+   * Recording the command names is not enough: the composer test has to see the
+   * text land in the editor, exactly as Lexical would leave it.
+   */
+  execCommand(command, _ui = false, value = null) {
     (this._execCommands ??= []).push(command);
-    return true;
+    const selection = this.selection;
+    const anchor = selection.anchorNode;
+    if (command === 'selectAll') {
+      if (anchor) {
+        const range = new ShimRange(this);
+        range.selectNodeContents(anchor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      return Boolean(anchor);
+    }
+    if (!anchor) return false;
+    if (command === 'delete') {
+      anchor.children = [];
+      anchor._text = '';
+      return true;
+    }
+    if (command === 'insertText') {
+      anchor.append(this.createTextNode(String(value ?? '')));
+      return true;
+    }
+    if (command === 'insertLineBreak') {
+      anchor.append(this.createElement('br'));
+      return true;
+    }
+    return false;
   }
   createElement(tag) { return new Element(String(tag).toLowerCase(), this); }
   // SVG elements behave identically for serialisation purposes; the namespace is
@@ -296,6 +371,7 @@ export function installDom({ chromeResponses = {}, manifest = {}, visibilityStat
   doc.dir = 'ltr';
 
   globalThis.document = doc;
+  globalThis.getSelection = () => doc.selection;
   globalThis.Node = Element;
   globalThis.Element = Element;
   globalThis.window = {
