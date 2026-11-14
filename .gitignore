@@ -1,0 +1,47 @@
+# Dependencies (this project has none at runtime, but keep tooling out)
+node_modules/
+package-lock.json
+
+# Build and cache
+dist/
+build/
+.cache/
+*.tsbuildinfo
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# SECRETS — never commit a token, a cookie or a real workspace
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+secrets.json
+**/*secret*
+**/*credential*
+cookies.json
+
+# Real Instagram data — a workspace backup or a lead dump is personal data
+*.igcrm.json
+*.csv
+workspaces/
+leads/
+
+# Packaged extension
+*.zip
+*.crx
+
+# Internal working records (never published)
+_working_docs/
+**/thinking/

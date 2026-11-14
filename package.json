@@ -1,0 +1,11 @@
+{
+  "name": "ig-outreach-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Instagram outreach CRM — Chrome MV3 extension (core logic is dependency-free and Node-testable)",
+  "scripts": {
+    "icons": "node scripts/gen-icons.mjs",
+    "verify": "bash scripts/verify.sh"
+  }
+}
