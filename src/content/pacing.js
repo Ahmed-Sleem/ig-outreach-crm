@@ -10,7 +10,7 @@
  * the safety model for writes stays in one module while the mechanics of waiting
  * stay in one function.
  *
- * Threat model (KB §2.4). Because the extension runs inside the user's logged-in
+ * Threat model. Because the extension runs inside the user's logged-in
  * browser, IP reputation and TLS fingerprinting — the two layers commercial
  * scrapers spend money on — are already passed. What remains is BEHAVIOURAL
  * detection, and the asset at risk is not a disposable IP but the user's actual
@@ -18,7 +18,7 @@
  * make it faster is capped.
  *
  * Vendor-published figures (~200 req/h per IP) were measured against server-side
- * clients and do NOT transfer to this context (G-002: unverified here). Absent
+ * clients and do NOT transfer to this context: they were never measured here. Absent
  * trustworthy numbers, defaults approximate human reading speed rather than any
  * published ceiling.
  *
@@ -83,7 +83,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Clamp user-supplied pacing to the guard rails and repair inverted ranges.
  * Exported because Settings shows the corrected values back to the user rather
- * than silently accepting a number it will not honour (GUI law §17.3).
+ * than silently accepting a number it will not honour.
  */
 export function clampPacing(input = {}) {
   const o = { ...DEFAULT_PACING, ...input };

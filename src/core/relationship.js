@@ -9,7 +9,7 @@
  * single field you can trust. The only reliable answer is the intersection of
  * who they follow and who follows you, which is why a sync is always two paged
  * reads — their following, then your followers — and why the second read exists
- * at all (GAP-08: without it every accept detection is a guess).
+ * at all: without it every accept detection is a guess.
  */
 
 import { RelState } from './lifecycle.js';

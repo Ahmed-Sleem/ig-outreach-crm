@@ -88,7 +88,7 @@ fi
 # The gate itself is excluded: it has to spell the forbidden names in order to
 # forbid them. .gitignore is excluded because it lists the same names as ignore
 # rules. Both remain covered by the token and path scans above.
-INTERNAL_HITS=$(tracked_text | grep -vE '^(\.gitignore|scripts/verify\.sh)$' | xargs -r grep -nE 'AGENT_RULES|IMPLEMENTATION_LOG|AUDIT_AND_TODO|NEXT_SESSIONS_ROADMAP|chunking mechanism|GAP-[0-9]{2}|DEC-0[0-9]|REQUIREMENTS_AND_PRODUCTION_VISION|CODE_COLLECTION_AND_ADAPTATION_PLAN' 2>/dev/null || true)
+INTERNAL_HITS=$(tracked_text | grep -vE '^(\.gitignore|scripts/verify\.sh)$' | xargs -r grep -nE 'AGENT_RULES|IMPLEMENTATION_LOG|AUDIT_AND_TODO|NEXT_SESSIONS_ROADMAP|CHANGELOG|thinking/|chunking mechanism|GAP-[0-9]{2}|DEC-0[0-9]|H-[0-9]{2}|Q[1-6] *=|G-0[0-9]{2}|KB §|GUI law|§[0-9]|REQUIREMENTS_AND_PRODUCTION_VISION|CODE_COLLECTION_AND_ADAPTATION_PLAN|donor|D1[0-2]? |model name' 2>/dev/null || true)
 if [ -n "$INTERNAL_HITS" ]; then
   bad 'internal process reference in public text:'
   printf '%s\n' "$INTERNAL_HITS" | sed 's/^/          /'

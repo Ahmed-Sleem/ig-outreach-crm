@@ -2,10 +2,10 @@
  * Comment intelligence: buyer intent, objections, voice-of-customer.
  *
  * Why this module exists: the comment corpus is the only voice-of-customer dataset
- * available about a competitor (KB §3.9). For the owner's stated use case — learn
+ * available about a competitor. For the owner's stated use case — learn
  * the market and how rivals sell — it carries more signal than any count.
  *
- * Privacy posture (KB §6.2): classification works on TEXT ONLY. Usernames are
+ * Privacy posture: classification works on TEXT ONLY. Usernames are
  * accepted for owner-reply detection and then discarded by `aggregate()`. Nothing
  * in this module's output identifies a natural person unless the caller explicitly
  * asks for `keepAuthors`.
@@ -203,7 +203,7 @@ const STOPWORDS = new Set([
   'في','من','على','الى','إلى','عن','مع','هذا','هذه','ذلك','التي','الذي','ما','لا','نعم','هو','هي','انا','أنا','انت','أنت','نحن','هم','كان','كانت','يكون','بس','كده','ده','دي','اللي','علي','عند','كل','بعد','قبل','يا','ان','أن','إن','لو','هل','ايه','إيه',
 ]);
 
-/** Frequent terms in the customer's own words — ad-copy goldmine (KB §3.9). */
+/** Frequent terms in the customer's own words — ad-copy goldmine. */
 export function vocLexicon(texts, { minLength = 3, top = 40 } = {}) {
   const counts = new Map();
   texts.forEach((raw) => {
@@ -226,7 +226,7 @@ export function vocLexicon(texts, { minLength = 3, top = 40 } = {}) {
 /**
  * Aggregate a comment corpus into an analysis.
  *
- * `ownerUsername` enables reply-rate measurement (KB §3.9): whether the business
+ * `ownerUsername` enables reply-rate measurement: whether the business
  * answers its customers publicly is a direct measure of service posture.
  *
  * PRIVACY: usernames are used for owner detection and mention extraction, then
@@ -337,13 +337,13 @@ export function analyseComments(comments, { ownerUsername = null, keepAuthors = 
     total,
     fromOwner: ownerReplies,
     fromOthers: nonOwner.length,
-    /** Direct measure of service posture (KB §3.9). */
+    /** Direct measure of service posture. */
     ownerReplyRate: nonOwner.length ? Number((ownerReplies / nonOwner.length).toFixed(3)) : null,
     questionRate: nonOwner.length ? Number((questions / nonOwner.length).toFixed(3)) : null,
     byIntent,
     commercialSignalCount: commercialCount,
     commercialSignalRate: nonOwner.length ? Number((commercialCount / nonOwner.length).toFixed(3)) : null,
-    /** High generic-praise share is a comment-quality fraud signal (KB §3.7). */
+    /** High generic-praise share is a comment-quality fraud signal. */
     genericPraiseShare: Number(genericShare.toFixed(3)),
     qualityNote:
       genericShare > 0.6
