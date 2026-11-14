@@ -2,7 +2,7 @@
 
 **A local Chrome extension that collects warm Instagram leads from profiles you already have open, and runs a human-paced follow, accept-detect and message funnel from your own logged-in session.**
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green)
+![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-128%20passing-brightgreen)
 
 ## Why
 
@@ -20,32 +20,63 @@ There is no server, no API key and no account. Everything is stored in IndexedDB
 - **It does not scrape what Instagram withholds.** Liker lists stop at roughly 100 per post, third-party follower lists are server-capped, and hidden counts stay hidden. The app reports the truncation instead of guessing around it.
 - **Your account, your responsibility.** Automated following and messaging conflicts with Instagram's Terms of Use. Use it on an account you can afford to lose, at the lowest settings that still work, and stop immediately if Instagram shows you a checkpoint or an action block.
 
+## What the code in this tree does
+
+The extension is being built engine-first: every rule is written as a pure, unit-tested module before the UI that exposes it exists.
+
+| Module | Behaviour |
+|---|---|
+| `core/random.js` | `EntropyPoolRNG`: a CSPRNG seed mixed with cursor movement, two clocks and a draw counter, so a hands-free run still produces unmodellable intervals. Lemire-rejected integers, log-normal delays. |
+| `core/templates.js` | Nested `{a|{b|c}}` spintax plus `{{first_name|fallback}}` variables, resolved in the order that keeps the two syntaxes from colliding. |
+| `core/linter.js` | Pre-flight message checks: the 1000-byte limit, link shorteners, hidden-word phrasing, pool size and pairwise trigram similarity. |
+| `core/lifecycle.js` | The `(relState, dmState)` state machine, the one-message lock on unaccepted requests, and unfollow eligibility with its protections. |
+| `core/governor.js` | Hourly, daily, shared-mutation and cold-invite caps, the circadian window with a 14-hour active cap, the warm-up ramp and the 48-hour circuit breaker. |
+| `core/scoring.js` | Priority ranking from provenance edges, per-post deduplicated, with a breakdown behind every rank. |
+| `core/text.js`, `core/comments.js` | Language-agnostic normalisation, similarity, and the Arabic/English buyer-intent comment classifier. |
+| `storage/db.js` | The IndexedDB workspace: eight stores, idempotent provenance writes, and startup reconciliation of interrupted actions. |
+| `storage/settings.js` | One settings key in `chrome.storage.local`, clamped against the hard ceilings on every read and write, with credential redaction on export. |
+| `storage/sync.js` | `BroadcastChannel` bus so two open tabs never disagree about a lead. |
+
+## Requirements
+
+- Node.js 20 or newer, for the tests and the verification gate. The extension itself will need no build step and no dependencies.
+- Chrome 116 or newer, once the loadable build lands.
+
+## Quick start
+
+```bash
+git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
+cd ig-outreach-crm
+npm test          # 128 tests, no dependencies
+npm run verify    # 24 checks: shape, hygiene, code invariants, links, tests
+```
+
+The loadable `EXTENSION/` folder is not published yet — see Status. Installation steps will live in `INSTALL.md` when it is.
+
 ## Status
 
 | Area | State |
 |---|---|
 | Repository, licence, docs, verification gate | Done |
 | Icon and asset generation | Done |
-| Core engines and local storage | Not started |
+| Core engines and local storage | Done, unit-tested |
 | Instagram read layer | Not started |
 | Follow, accept-detect and DM execution | Not started |
 | Dashboard UI | Not started |
 | Loadable `EXTENSION/` build | Not started |
 | Run against a live Instagram account | Not performed |
 
-The build is not loadable yet. What is in the tree today is the source scaffold, the documentation and the checks that the rest of the code has to pass.
-
 ## Repository layout
 
 ```text
 src/
-├── manifest.json      # MV3, no service worker (lands with the first runnable build)
-├── core/              # pure functions — no browser APIs, unit-tested in plain Node
+├── core/              # pure functions — no browser APIs, unit-tested in Node
 ├── storage/           # IndexedDB workspace, clamped settings, cross-tab sync
-├── content/           # runs on instagram.com: reading, pacing, real-UI actions
-└── app/               # the dashboard: two tabs, one design system
-scripts/               # icon generation, build, verification gate
-tests/                 # node:test suites, including negative controls
+├── assets/            # icons and logo, regenerated by scripts/gen-icons.mjs
+├── content/           # runs on instagram.com (lands with the read layer)
+└── app/               # the dashboard: two tabs, one design system (later)
+scripts/               # icon generation and the verification gate
+tests/                 # node:test suites, including mutation negative controls
 docs/                  # architecture and safety
 ```
 
@@ -55,6 +86,7 @@ docs/                  # architecture and safety
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime topology, module map, data model, and why there is no background service worker. |
 | [docs/SAFETY.md](docs/SAFETY.md) | The account-risk model, the limits the code enforces, and what the tool refuses to do. |
+| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Upstream projects this code adapts, pinned by commit, with their licences. |
 | [SECURITY.md](SECURITY.md) | How to report a problem privately, and the three properties the code defends. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The rules this codebase follows, and what has to pass before a PR. |
 
