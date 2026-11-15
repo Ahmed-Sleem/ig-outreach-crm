@@ -229,17 +229,22 @@ export function createApp(deps = {}) {
 
   /* ------------------------------------------------------------ routing */
 
-  function navigate(tab) {
-    if (!views[tab] || tab === activeTab) { if (tab === activeTab) return; }
-    activeTab = tab;
-    renderTabs();
+  // Mount the active view into the live root. Both views stay alive across
+  // switches so a tab change never loses a scroll position, a filter or a
+  // half-written template; only the active one is attached to the DOM.
+  function mountActive() {
     const root = $('#view-root', doc);
     if (!root) return;
-    // Tear down nothing: both views stay alive so switching tabs never loses a
-    // scroll position, a filter or a half-written template. Only one is mounted.
     clear(root);
-    const view = views[tab];
-    view.mount(root);
+    views[activeTab].mount(root);
+  }
+
+  function navigate(tab) {
+    if (!views[tab]) return;          // unknown tab: ignore rather than crash
+    if (tab === activeTab) return;    // re-clicking the active tab is a no-op
+    activeTab = tab;
+    renderTabs();
+    mountActive();
   }
 
   function openSettingsDrawer() {
@@ -337,7 +342,11 @@ export function createApp(deps = {}) {
 
     startScheduler();
     await refreshShell();
-    navigate(activeTab);
+    // Not navigate(): activeTab is already the target (possibly changed by the
+    // deep link above), and navigate() no-ops on the current tab. Render the
+    // tab bar to reflect it and mount the view directly.
+    renderTabs();
+    mountActive();
   }
 
   function destroy() {
