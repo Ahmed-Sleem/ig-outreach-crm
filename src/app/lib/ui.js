@@ -274,17 +274,48 @@ export function slider(label, value, { min = 0, max = 100, step = 1, onChange = 
   ]);
 }
 
-/** A text/textarea field with a label and an optional validation message. */
-export function field(label, { value = '', type = 'text', rows = null, placeholder = null, onInput = null, hint = null, name = null } = {}) {
+let fieldSeq = 0;
+
+/**
+ * A text/textarea field: label above, input, then helper text below.
+ *
+ * `hint` is always-visible helper text (not a tooltip). `error` replaces it with
+ * a red message and marks the input `aria-invalid`. The returned node carries a
+ * small `.field` controller so a view can flip between helper / confirmation /
+ * error live as the owner types, without rebuilding the field.
+ */
+export function field(label, { value = '', type = 'text', rows = null, placeholder = null, onInput = null, hint = null, name = null, error = null } = {}) {
+  const helpId = `field-help-${++fieldSeq}`;
   const input = rows
-    ? el('textarea', { class: 'input input--area', rows: String(rows), placeholder })
-    : el('input', { class: 'input', type, placeholder, name });
+    ? el('textarea', { class: 'input input--area', rows: String(rows), placeholder, name, 'aria-describedby': helpId })
+    : el('input', { class: 'input', type, placeholder, name, 'aria-describedby': helpId });
   input.value = String(value ?? '');
-  if (onInput) input.addEventListener('input', () => onInput(input.value, input));
-  return el('label', { class: 'field' }, [
-    el('span', { class: 'field__label' }, [label, hint ? el('span', { class: 'faint', title: hint, text: ' ⓘ' }) : null]),
+  const helperText = hint ?? '';
+  const help = el('span', { class: 'field__help', id: helpId, text: helperText });
+  const err = el('span', { class: 'field__error', role: 'alert', text: error ?? '' });
+  err.hidden = !error;
+  if (error) input.setAttribute('aria-invalid', 'true');
+  const node = el('label', { class: 'field' }, [
+    el('span', { class: 'field__label', text: label }),
     input,
+    help,
+    err,
   ]);
+  const setInvalid = (on) => { if (on) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid'); };
+  node.field = {
+    input,
+    /** Neutral helper text (the default state). */
+    setHelper(text) { help.className = 'field__help'; help.textContent = text ?? ''; err.textContent = ''; err.hidden = true; setInvalid(false); },
+    /** Green confirmation, e.g. "Account: @nike". */
+    setOk(text) { help.className = 'field__help field__help--ok'; help.textContent = text ?? ''; err.textContent = ''; err.hidden = true; setInvalid(false); },
+    /** Red error; replaces the helper text. */
+    setError(text) { help.className = 'field__help'; help.textContent = ''; err.textContent = text ?? ''; err.hidden = !text; setInvalid(Boolean(text)); },
+    /** Back to the original hint. */
+    reset() { help.className = 'field__help'; help.textContent = helperText; err.textContent = ''; err.hidden = true; setInvalid(false); },
+  };
+  if (error) node.field.setError(error);
+  if (onInput) input.addEventListener('input', () => onInput(input.value, input));
+  return node;
 }
 
 /** Filter chips. `values` is the current selection; clicking toggles membership. */
@@ -388,4 +419,104 @@ export function warmthBadge(tier, score = null) {
     title: score === null ? null : `Priority score ${Math.round(score)}`,
     text: key,
   });
+}
+
+/**
+ * A segmented control: a small set of mutually exclusive choices rendered as one
+ * joined row. Used for the "how" under each collect group. `items` are strings or
+ * `{ id, label }`; `onSelect` receives the chosen id.
+ */
+export function segmented(items, activeId, { onSelect = null } = {}) {
+  const wrap = el('div', { class: 'segmented', role: 'group' });
+  const idOf = (item) => (typeof item === 'string' ? item : item.id);
+  const labelOf = (item) => (typeof item === 'string' ? item : item.label);
+  const buttons = items.map((item) => el('button', {
+    class: `segmented__btn ${idOf(item) === activeId ? 'segmented__btn--on' : ''}`.trim(),
+    type: 'button',
+    'aria-pressed': idOf(item) === activeId ? 'true' : 'false',
+    text: labelOf(item),
+  }));
+  const paint = (current) => buttons.forEach((button, index) => {
+    const on = idOf(items[index]) === current;
+    button.className = `segmented__btn ${on ? 'segmented__btn--on' : ''}`.trim();
+    button.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  buttons.forEach((button, index) => button.addEventListener('click', () => {
+    paint(idOf(items[index]));
+    onSelect?.(idOf(items[index]));
+  }));
+  wrap.append(...buttons);
+  return wrap;
+}
+
+/**
+ * A "..." overflow menu. The trigger toggles a small list; Escape or a click
+ * outside closes it and returns focus to the trigger. `items` are
+ * `{ label, onClick, danger }`. Nothing is mounted until it is opened.
+ */
+export function menu(label, items, { align = 'end', triggerLabel = null } = {}) {
+  const list = el('div', { class: `menu__list menu__list--${align}`, role: 'menu' });
+  const trigger = el('button', {
+    class: 'menu__trigger', type: 'button',
+    'aria-haspopup': 'menu', 'aria-expanded': 'false',
+    'aria-label': triggerLabel ?? label, text: label,
+  });
+  const wrap = el('div', { class: 'menu' }, [trigger, list]);
+  let open = false;
+  const onDocClick = (event) => { if (!wrap.contains(event.target)) close(); };
+  const onKey = (event) => { if (event.key === 'Escape') { close(); trigger.focus(); } };
+  function close() {
+    if (!open) return;
+    open = false;
+    wrap.classList.remove('menu--open');
+    trigger.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', onDocClick, true);
+    document.removeEventListener('keydown', onKey, true);
+  }
+  function openMenu() {
+    if (open) return;
+    open = true;
+    clear(list);
+    for (const item of items) {
+      list.append(el('button', {
+        class: `menu__item ${item.danger ? 'menu__item--danger' : ''}`.trim(),
+        type: 'button', role: 'menuitem', text: item.label,
+        onclick: () => { close(); item.onClick?.(); },
+      }));
+    }
+    wrap.classList.add('menu--open');
+    trigger.setAttribute('aria-expanded', 'true');
+    document.addEventListener('click', onDocClick, true);
+    document.addEventListener('keydown', onKey, true);
+    list.querySelector('.menu__item')?.focus();
+  }
+  trigger.addEventListener('click', (event) => { event.stopPropagation(); if (open) close(); else openMenu(); });
+  return wrap;
+}
+
+/**
+ * A collapsed line for technical detail under a human message: the owner reads one
+ * plain sentence, and the raw internal string stays available for debugging
+ * without shouting at them.
+ */
+export function detailsLine(summaryText, technicalText) {
+  return el('details', { class: 'details' }, [
+    el('summary', { class: 'details__summary', text: summaryText }),
+    el('code', { class: 'details__tech', text: technicalText ?? '' }),
+  ]);
+}
+
+/**
+ * A status banner. `role="status"` + `aria-live="polite"` so a screen reader hears
+ * a run start or stop. The returned node carries `.banner.setText()` so a view can
+ * update the line in place instead of rebuilding it (a rebuilt node never updates).
+ */
+export function banner(text, { variant = '', actions = [] } = {}) {
+  const msg = el('span', { class: 'banner__text', text });
+  const node = el('div', {
+    class: `banner ${variant ? `banner--${variant}` : ''}`.trim(),
+    role: 'status', 'aria-live': 'polite',
+  }, [msg, actions.length ? el('div', { class: 'banner__actions' }, actions) : null]);
+  node.banner = { setText(value) { msg.textContent = value ?? ''; } };
+  return node;
 }
