@@ -6,6 +6,8 @@
  * CSS file but tokens.css. Everything here consumes tokens.
  */
 
+*, *::before, *::after { box-sizing: border-box; }
+
 .popup {
   width: 280px;
   margin: 0;
@@ -49,7 +51,7 @@
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-md);
   border: 1px solid var(--c-border-strong);
-  background: var(--c-surface);
+  background: var(--c-bg-raised);
   color: var(--c-text);
   font: inherit;
   text-align: left;

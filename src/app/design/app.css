@@ -319,7 +319,7 @@ button { font-family: inherit; }
 }
 .vtable__head {
   position: sticky; top: 0; z-index: 2;
-  min-width: 560px;
+  min-width: 590px;
   background: var(--c-bg-raised);
   border-bottom: 1px solid var(--c-border-strong);
   font-size: var(--fs-xs); color: var(--c-text-dim);
@@ -327,7 +327,7 @@ button { font-family: inherit; }
 }
 .vtable__viewport {
   position: relative; overflow-y: auto; overflow-x: hidden;
-  min-width: 560px;
+  min-width: 590px;
   max-height: var(--table-max-h);
   background: var(--c-surface);
   border: 1px solid var(--c-border); border-top: none;
