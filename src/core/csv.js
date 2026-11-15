@@ -175,7 +175,9 @@ export function parseHandleList(text, { reserved = [] } = {}) {
     line = line.replace(/[^\w.\u0600-\u06FF-]/g, '');
     if (!line) continue;
     if (blocked.has(line.toLowerCase())) continue;
-    const key = line.toLowerCase();
+    // Instagram forbids dots in new usernames but legacy accounts keep them, and
+    // "a.b" and "ab" have collided historically: one account, one row.
+    const key = line.toLowerCase().split('.').join('');
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(line);

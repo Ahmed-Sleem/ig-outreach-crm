@@ -36,8 +36,10 @@ export const REVOKE_DELAY_MS = 5000;
  * @param {{document?: Document, revokeMs?: number, url?: object}} env
  */
 export function downloadBlob(content, filename, mime = MIME.csv, env = {}) {
-  const doc = env.document ?? (typeof document !== 'undefined' ? document : null);
-  const urlApi = env.url ?? (typeof URL !== 'undefined' ? URL : null);
+  // An env that names a dependency must supply it: falling back to a global the
+  // caller explicitly overrode is how a test passes for the wrong reason.
+  const doc = 'document' in env ? env.document : (typeof document !== 'undefined' ? document : null);
+  const urlApi = 'url' in env ? env.url : (typeof URL !== 'undefined' ? URL : null);
   if (!doc || !urlApi) throw new Error('downloadBlob needs a document and URL');
 
   const blob = content instanceof Blob
@@ -53,13 +55,13 @@ export function downloadBlob(content, filename, mime = MIME.csv, env = {}) {
   anchor.click();
 
   const revokeMs = Number(env.revokeMs ?? REVOKE_DELAY_MS);
-  const timer = typeof setTimeout === 'function'
-    ? setTimeout(() => {
-      urlApi.revokeObjectURL(objectUrl);
-      anchor.remove?.();
-    }, revokeMs)
-    : null;
-  return { filename: String(filename), bytes: blob.size ?? String(content).length, objectUrl, timer };
+  const release = () => {
+    urlApi.revokeObjectURL(objectUrl);
+    anchor.remove?.();
+  };
+  // A test may take the timer handle and run it itself; production always schedules.
+  const timer = env.manualRevoke ? null : (typeof setTimeout === 'function' ? setTimeout(release, revokeMs) : null);
+  return { filename: String(filename), bytes: blob.size ?? String(content).length, objectUrl, timer, release };
 }
 
 /** A CSV download, with the UTF-8 BOM Excel needs to detect Arabic correctly. */
