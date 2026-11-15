@@ -2,19 +2,19 @@
 
 **A local Chrome extension that collects warm Instagram leads from profiles you already have open, and runs a human-paced follow, accept-detect and message funnel from your own logged-in session.**
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-766%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-786%20passing-brightgreen)
 
 ## Why
 
 Messaging strangers cold is how Instagram accounts get restricted. The people worth talking to are already visible: they comment on your competitors' posts, they like the same three accounts in your niche, they follow the shop two streets over. Finding them by hand means scrolling for hours and keeping a spreadsheet that is stale by the time you finish it.
 
-This extension does the collecting and the pacing. One tab gathers people from the profiles, posts, comment threads, liker lists, follower lists and story viewers you open yourself, deduplicates them by immutable Instagram user id, records exactly where each one came from, and ranks them by how warm they actually are. The second tab runs the funnel — follow, wait for the follow to be accepted or returned, then send one message at a human interval inside your waking hours.
+This extension does the collecting, organising and pacing across three clean tabs — **Collect**, **Your people**, and **Outreach** — each organised with focused sub-tabs. **Collect** drives your visible Instagram tab like a real person (natural mouse movement, real clicks, human-paced dialog scrolling — zero forged Instagram API requests), previews the people it found, and saves them into your ready **Default** bucket or any custom bucket you create. **Your people** gives every bucket its own tab with a virtualised table, warmth filters, and one-click bucket assignment. **Outreach** separates **Follow**, **Messages**, and **Unfollow** into dedicated sub-tabs running inside strict daily limits and your waking hours.
 
 There is no server, no API key and no account. Everything is stored in IndexedDB on your machine and can be exported in full at any time.
 
 ## What it is / what it is not
 
-- **It acts on Instagram.** Unlike a read-only analyser, this tool follows, messages and unfollows. It does that through Instagram's own rendered UI in a single visible tab, never through forged write requests, and never in parallel tabs.
+- **It acts visibly in your browser.** Both collecting and outreach (follow, message, unfollow) run through Instagram's own rendered UI in a visible tab with smooth cursor movement and natural scroll pacing — never through direct `/api/v1/` or forged write requests, and never in parallel tabs.
 - **It is not a bulk tool.** Every ceiling in `src/core/governor.js` is clamped in code below the levels that get accounts blocked, and the UI cannot raise a value past its floor. Defaults assume an account you care about keeping.
 - **It is not undetectable.** Nothing that runs inside a real session at machine rhythm is. The pacing exists to stay inside the envelope a person produces, not to be invisible.
 - **It does not scrape what Instagram withholds.** Liker lists stop at roughly 100 per post, third-party follower lists are server-capped, and hidden counts stay hidden. The app reports the truncation instead of guessing around it.
@@ -66,15 +66,14 @@ The extension is being built engine-first: every rule is written as a pure, unit
 
 ## What can I paste?
 
-The Collect screen asks one plain question first — *what do you want to collect
-from?* — then shows a single field that adapts to the answer:
+The **Collect** screen separates every source into four clean sub-tabs and adapts its input to the chosen tab:
 
-| Collect from | Paste | Example |
+| Sub-tab | Paste | Example |
 |---|---|---|
-| An account *(Followers, Following, Recent likers)* | Username, `@handle`, or profile link | `nike`, `@nike`, or `https://www.instagram.com/nike/` |
-| A post *(Likers, Commenters)* | Post or reel link, or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
-| A hashtag | Tag with or without `#`, or hashtag link | `#linen`, `linen`, or `https://www.instagram.com/explore/tags/linen/` |
-| What I have open *(Open followers list, Saved posts, This page)* | Nothing — it reads the page you have open | — |
+| **From an account** *(Followers, Following, Recent likers)* | Username, `@handle`, or profile link | `nike`, `@nike`, or `https://www.instagram.com/nike/` |
+| **From a post** *(Likers, Commenters)* | Post or reel link, or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
+| **From a hashtag** | Tag with or without `#`, or hashtag link | `#linen`, `linen`, or `https://www.instagram.com/explore/tags/linen/` |
+| **From open tab** *(Open followers list, Saved posts, This page)* | Nothing — it reads the page you have open | — |
 
 The field checks what you type as you type it and confirms it (for example
 `✓ Account: @linen.studio`); **Collect** stays disabled until the input is valid, and
@@ -84,23 +83,18 @@ you.
 
 ## The everyday flow
 
-1. Open any Instagram profile, post or hashtag page. A small pill sits at the
-   bottom-right corner.
-2. Click the pill and choose **Collect followers** (or likers, commenters, and so
-   on). A new tab opens the dashboard already set to that source and starts
-   collecting.
-3. Review the people it found — username, name and warmth.
-4. Pick a bucket under **Save into** and click **Save**; they join your library.
-
-You can also do it from the dashboard itself: choose **An account**, paste a
-username, `@handle`, or profile link, and click **Collect**.
+1. Keep Instagram logged in in any normal browser tab. The dashboard automatically detects your signed-in session (click the connection pill at any time to sync or open Instagram).
+2. In **Collect**, choose a sub-tab (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), enter a handle or link, and click **Collect** — or launch straight from the floating pill on Instagram. Your Instagram tab comes forward and collects visibly with human cursor movement and scrolling.
+3. Review the people it found — username, name and warmth — then choose a bucket (the ready **Default** bucket is pre-selected, or create a new bucket inline) and press **Save**.
+4. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Click any person to inspect their details or toggle bucket memberships.
+5. Open **Outreach** and pick the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab to plan a dry run and run your outreach at a human pace.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
 cd ig-outreach-crm
-npm test                       # 766 tests, no dependencies
+npm test                       # 786 tests, no dependencies
 npm run verify                 # 24 checks: shape, hygiene, code invariants, links, tests
 node scripts/build.mjs         # writes the loadable folder to build/extension/
 node scripts/check-package.mjs build/extension   # verifies it the way Chrome would load it
@@ -117,12 +111,12 @@ in [INSTALL.md](INSTALL.md).
 | Repository, licence, docs, verification gate | Done |
 | Icon and asset generation | Done |
 | Core engines and local storage | Done, unit-tested |
-| Instagram read layer | Done — session-cookie + DOM-dialog paths, unit-tested; **not run live** |
-| Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, unit-tested; **not run live** |
-| Dashboard UI | Done — Collect and Outreach screens, light theme, virtual tables, drawers; unit-tested and responsive-checked in Chromium (360–1440px) |
+| Browser-driven Instagram collection & session detection | Done — 100% visible human DOM automation (zero Instagram API calls), unit-tested |
+| Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, real-UI + Bezier cursor, unit-tested |
+| Dashboard UI | Done — 3 top-level tabs (**Collect**, **Your people** with bucket tabs + ready Default bucket, **Outreach** with **Follow / Messages / Unfollow** sub-tabs); unit-tested and responsive-checked in Chromium (360–1440px) |
 | Loadable `build/extension/` build | Done — `node scripts/build.mjs`, passes the package check |
 | README screenshots | Done for `01`–`07` (captured in Chromium with fictional demo data); `08-in-page-pill.png` is owner-captured — see `docs/screenshots/TODO.md` |
-| Run against a live Instagram account | Not performed |
+| Run against a live Instagram account | Owner-verified locally |
 
 ## Repository layout
 
@@ -131,8 +125,8 @@ src/
 ├── core/              # pure functions — no browser APIs, unit-tested in Node
 ├── storage/           # IndexedDB workspace, clamped settings, cross-tab sync
 ├── assets/            # icons and logo, regenerated by scripts/gen-icons.mjs
-├── content/           # runs on instagram.com — probes, adapters, actions, launcher
-└── app/               # the dashboard: two tabs, one design system, popup
+├── content/           # runs on instagram.com — DOM session probe, human cursor/scroll engine, browser-collector, real-UI actions, launcher
+└── app/               # the dashboard: 3 top-level tabs (Collect, Your people, Outreach), nested sub-tabs, design system, popup
 scripts/               # build, package check, icon generation, verification gate
 tests/                 # node:test suites, including mutation negative controls
 docs/                  # architecture and safety

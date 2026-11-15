@@ -9,18 +9,18 @@ Three contexts, one database, no background service worker.
 
 ```text
 DASHBOARD TAB  (chrome-extension://<id>/app/index.html)
-├── Tab 1  People collector: source launcher, ranked lead table, provenance drawer
-├── Tab 2  Outreach autopilot: groups, funnel queue, message studio, cleaner
+├── Tab 1  Collect: 4 sub-tabs (From an account, From a post, From a hashtag, From open tab) + Preview & Save
+├── Tab 2  Your people: bucket tabs (All people, ready Default, user buckets + New bucket), virtual table, dossier drawer
+├── Tab 3  Outreach: 3 separated sub-tabs (Follow, Messages + Message studio, Unfollow), quota meters, live run log
 ├── src/core/*      pure engines: scoring, lifecycle, random, governor, templates, linter
 ├── src/storage/*   IndexedDB workspace, clamped settings, BroadcastChannel sync
 └── scheduler.worker.js   dedicated Web Worker, one wall-clock tick per second
                     │
-                    │ chrome.tabs.sendMessage (timeout-guarded, write-ahead intent)
+                    │ chrome.tabs.sendMessage (timeout-guarded, visible tab focus)
                     ▼
 INSTAGRAM TABS  (https://www.instagram.com/*)
-├── your own browsing tabs   in-page launcher pill for one-click collection
-└── one managed worker tab   paced navigation, relationship sync, real-UI follow
-                             and DM execution, post-action verification
+├── your own browsing tabs   DOM-first session probe, floating pill, visible human DOM collector
+└── one managed worker tab   human Bezier cursor & scroll engine, real-UI follow/DM/unfollow, post-action verification
 ```
 
 ## Why there is no background service worker
@@ -51,12 +51,14 @@ src/
 ├── manifest.json                # MV3, no service_worker, strict CSP, minimal permissions
 ├── content/
 │   ├── content.js               # classic dynamic-import bootstrapper + duplicate guard
-│   ├── main.js                  # message router: collect, sync, follow, message, unfollow
-│   ├── probe.js                 # live app id, asbd, csrf, doc id and signed-in viewer probe
-│   ├── adapters.js              # profile, posts, comments, likers, followers, following, stories
+│   ├── main.js                  # message router: browser-DOM collect, follow, message, unfollow
+│   ├── probe.js                 # DOM-first signed-in viewer detection (zero IG API calls)
+│   ├── human.js                 # cubic Bezier cursor engine, Shadow-DOM virtual cursor, human scrolling
+│   ├── browser-collector.js     # 100% browser-driven DOM collection (followers, likers, comments, hashtags, dialogs)
+│   ├── adapters.js              # pure row/pagination helpers (not invoked for live collection)
 │   ├── actions.js               # real-UI follow, unfollow and Lexical DM composer + verification
-│   ├── selectors.js             # single source of exact English and Arabic UI strings
-│   ├── pacing.js                # read pacer and response classification
+│   ├── selectors.js             # single source of exact English and Arabic UI selectors (2026 DOM)
+│   ├── pacing.js                # read pacer and response/block classification
 │   └── launcher.js              # closed Shadow-DOM pill on instagram.com
 ├── core/                        # pure JS: no chrome.*, no DOM, unit and mutation tested
 │   ├── scoring.js               # provenance aggregation and the tunable priority score
@@ -73,17 +75,18 @@ src/
 │   └── sync.js                  # BroadcastChannel('ig-crm-sync') pub/sub
 └── app/
     ├── index.html               # dashboard shell
-    ├── main.js                  # account guardrail banner, autopilot strip, two-tab router
+    ├── main.js                  # auto-connect session pill, three-tab router, run banner
     ├── design/{tokens,app}.css  # single source of colour, space, type, theme
     ├── lib/
     │   ├── ui.js                # el(), scannedText(), virtualTable(), modal(), drawer(), toast()
-    │   ├── api.js               # timeout-guarded tab messaging + managed worker window
+    │   ├── api.js               # timeout-guarded tab messaging, auto Default bucket, visible tab focus
     │   ├── virtual-list.js      # windowed rows for tables of tens of thousands of leads
     │   ├── export-utils.js      # BOM CSV with formula guard, .igcrm.json backup, printable HTML
     │   └── scheduler.worker.js  # unthrottled one-second tick
     └── views/
-        ├── tab1-collector.js    # source launcher, ranked table, filters, lead dossier
-        ├── tab2-outreach.js     # groups, funnel queue, message studio, autopilot, cleaner
+        ├── tab1-collector.js    # 4 source sub-tabs, visible collection launcher, preview & bucket save
+        ├── tab-people.js        # bucket sub-tabs (All people, Default, custom), virtual table, dossier drawer
+        ├── tab2-outreach.js     # 3 separated sub-tabs (Follow, Messages + studio, Unfollow), quota meters
         ├── backup-export.js     # restore points, exports, importers
         └── settings-view.js     # trust presets, limits, ranking weights, baseline snapshot
 ```
@@ -134,19 +137,23 @@ without a page refresh.
 
 ## Reading and writing on Instagram
 
-Reads use the same internal web endpoints the page itself uses, with three fallback
-paths in order — internal API, JSON embedded in the page, then the rendered DOM — and
-degrade rather than fail. Relationship status is resolved in two phases: a bulk walk
-of the signed-in account's own following and follower lists builds an index, and a
-targeted single-account lookup answers "did this one accept?". Sequential one-by-one
-friendship checks stop being safe after a few dozen requests, so they are not used
-for bulk work.
+Both collection and outreach run 100% through Instagram's rendered UI in a visible
+browser tab — never through forged `/api/v1/` or `/graphql` collection endpoints.
 
-Writes never forge a request. Follow, unfollow and DM are performed by clicking and
-typing in Instagram's real UI, so the site's own frontend signs and sends the request
-with its normal telemetry. Every write is followed by a verification window: the
-button label is re-read after 3.5 s, a rolled-back follow is recorded as not-done, and
-a message is only marked sent when the composer reports it.
+- **Session detection (`probe.js`)** reads the logged-in session strictly from the
+  open Instagram tab's own cookies (`ds_user_id`), navigation profile link, and
+  embedded hydration scripts — zero network probes.
+- **Human collection (`human.js` + `browser-collector.js`)** focuses the Instagram
+  tab visibly, navigates to the profile/post/hashtag, moves a subtle Shadow-DOM
+  cursor along cubic Bezier curves with smoothstep acceleration, clicks the real
+  Followers / Following / Likes / Next controls, scrolls dialogs in variable
+  micro-steps with reading pauses, stops before `"Suggested for you"` boundaries,
+  and halts immediately if Instagram displays an action-block dialog.
+- **Real-UI writes (`actions.js`)** click and type in Instagram's real UI so the
+  site's own frontend signs and sends every follow, unfollow, and DM with normal
+  telemetry. Every write is followed by a verification window: the button label is
+  re-read after 3.5 s, a rolled-back follow is recorded as not-done, and a message
+  is only marked sent when the composer reports it.
 
 ## Verification
 

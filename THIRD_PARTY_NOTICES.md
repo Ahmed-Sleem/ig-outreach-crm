@@ -26,6 +26,17 @@ An attribution is added here in the same commit as the code it covers.
 | `Trebuuu/fluidextension` | `59f36529` | MIT | `src/core/governor.js` — the strict week parser, calendar-field window maths and per-workspace opening jitter of the circadian schedule engine |
 | `davidarroyo1234/InstagramUnfollowers` | `86346ae7` | MIT | `src/core/scoring.js` — the default-avatar CDN markers used for the blank-picture penalty |
 
+## Clean-room algorithmic references
+
+The zero-dependency human interaction and 2026 Instagram DOM collection patterns
+in `src/content/human.js`, `src/content/selectors.js`, and
+`src/content/browser-collector.js` are original implementations informed by
+public MIT-licensed work on human cursor kinematics (Fitts's Law + cubic Bezier
+trajectories, e.g. `Xetera/ghost-cursor`) and modern Instagram DOM traversal
+(`IanLeung12/instagram-follower-extension`, `dartganan/instagram-comment-scraper`,
+`shuangying0001-beep/human-like-automation`). No third-party source code or
+runtime packages were vendored.
+
 ## Copyright notices
 
 - node-spintax — Copyright (c) Slava Fomin II, BETTER SOLUTIONS.

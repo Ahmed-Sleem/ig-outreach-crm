@@ -33,10 +33,15 @@ const { ig_crm_active_workspace_v1: active } = await chrome.storage.local.get('i
 const WS = String(active?.workspaceId || 'default');
 if (!(await db.getWorkspace(WS))) await db.putWorkspace({ workspaceId: WS, viewerUsername: 'demo' });
 
-// One demo bucket to save into.
-await db.putGroup(db.groupRecord({ workspaceId: WS, name: 'Linen & home textiles' }));
+// Ready Default bucket + two custom buckets so Your people bucket tabs shine.
+const defId = `${WS}:default`;
+await db.putGroup({ ...db.groupRecord({ workspaceId: WS, name: 'Default', note: 'Ready default bucket', groupId: defId }), isDefault: true });
+const linenGrp = db.groupRecord({ workspaceId: WS, name: 'Linen & home textiles', note: 'Warm artisan shops' });
+const cairoGrp = db.groupRecord({ workspaceId: WS, name: 'Cairo studios', note: 'Local design studios' });
+await db.putGroup(linenGrp);
+await db.putGroup(cairoGrp);
 
-// 25 invented leads, varied warmth / followers / lifecycle.
+// 25 invented leads, varied warmth / followers / lifecycle across buckets.
 const hot = ['linen.studio.demo', 'home_textiles_demo', 'cotton.and.co.demo', 'woven.home.demo'];
 const warm = ['flax.thread.demo', 'ceramic.nook.demo', 'slow.made.demo', 'loom.and.leaf.demo', 'terra.craft.demo', 'natural.dye.demo'];
 const lukewarm = ['bazaar.finds.demo', 'thrift.weave.demo', 'market.stall.demo', 'fiber.arts.demo', 'rustic.loft.demo'];
@@ -46,19 +51,24 @@ const relStates = ['NONE', 'FOLLOW_REQUESTED', 'FOLLOWING', 'MUTUAL', 'FOLLOWED_
 const dmStates  = ['NONE', 'WAITING_FOR_ACCEPT', 'DM_SENT_REQUEST', 'DM_REPLIED'];
 
 let i = 0;
-const seed = (username, warmthTier) => db.upsertLead(db.leadRecord({ workspaceId: WS, username }, {
-  fullName: username.replace(/\./g, ' ').replace(/ demo$/, '') + ' (demo)',
-  biography: `A fictional demo profile for screenshots. Seed #${++i}.`,
-  followers: 500 + ((i * 733) % 24000),
-  following: 200 + ((i * 311) % 1800),
-  warmthTier,
-  priorityScore: warmthTier === 'hot' ? 88 - i : warmthTier === 'warm' ? 68 - i : warmthTier === 'lukewarm' ? 42 - i : 20 - (i % 15),
-  relState: relStates[i % relStates.length],
-  dmState: dmStates[i % dmStates.length],
-  sourceAccounts: ['demo.source.account'],
-  edgeTypes: ['PROFILE_CAPTURE'],
-  edgeCount: 1 + (i % 4),
-}));
+const seed = (username, warmthTier) => {
+  i += 1;
+  const groupIds = i % 3 === 0 ? [defId, cairoGrp.groupId] : i % 2 === 0 ? [linenGrp.groupId] : [defId, linenGrp.groupId];
+  return db.upsertLead(db.leadRecord({ workspaceId: WS, username }, {
+    fullName: username.replace(/\./g, ' ').replace(/ demo$/, '') + ' (demo)',
+    biography: `A fictional demo profile for screenshots. Seed #${i}.`,
+    followers: 500 + ((i * 733) % 24000),
+    following: 200 + ((i * 311) % 1800),
+    warmthTier,
+    priorityScore: warmthTier === 'hot' ? 88 - i : warmthTier === 'warm' ? 68 - i : warmthTier === 'lukewarm' ? 42 - i : 20 - (i % 15),
+    relState: relStates[i % relStates.length],
+    dmState: dmStates[i % dmStates.length],
+    groupIds,
+    sourceAccounts: ['demo.source.account'],
+    edgeTypes: ['PROFILE_CAPTURE'],
+    edgeCount: 1 + (i % 4),
+  }));
+};
 
 for (const u of hot) await seed(u, 'hot');
 for (const u of warm) await seed(u, 'warm');

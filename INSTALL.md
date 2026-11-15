@@ -56,27 +56,19 @@ dashboard opens in its own tab.
 ## First run
 
 1. Log in to Instagram in a normal tab, as usual. The extension only ever acts on
-   pages you open yourself, inside your own session.
-2. Click the toolbar icon → **Open the dashboard**.
-3. In **Tab 1 · People & CRM**, pick a source (for example *Followers of an
-   account*), enter a target handle, and press **Collect**. Nothing is written to
-   your library yet — you get a **preview** first.
-4. Review the preview, give it a bucket name, and press **Save to library**. The
-   people now appear in the ranked table. Click any row to open their dossier.
-5. In **Tab 2 · Outreach**, pick a bucket, choose a mode, and press **Plan (dry
-   run)**. This costs nothing and touches no tab: it shows how many people are
-   ready, the governor's remaining budget, and whether the active window is open.
-6. Only when the plan looks right, press **Start run**. A compact managed Instagram
-   window opens beside the dashboard and does the work. **Stop** lands after the
-   current action.
+   pages inside your own browser session.
+2. Click the toolbar icon → **Open dashboard**. The top-right connection pill automatically detects your logged-in Instagram tab (if you have not opened Instagram yet, click the pill to open it).
+3. In **Collect**, choose a sub-tab (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), enter a target handle or link, and press **Collect**. Your Instagram tab comes forward and runs visibly with human cursor movement and scrolling (zero Instagram API calls). Nothing is written to your library yet — you get a **Preview** first.
+4. Review the preview, pick a bucket (the ready **Default** bucket is pre-selected, or choose **+ Create new bucket…** inline), and press **Save**.
+5. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Click **+ New bucket** at any time to create another bucket tab, or click any row to inspect details and toggle bucket memberships.
+6. Open **Outreach** and select the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab, pick a bucket, and press **Plan (dry run)**. This costs nothing and touches no tab: it shows how many people are ready, the governor's remaining budget, and whether the active window is open.
+7. Only when the plan looks right, press **Start Follow run** / **Start Messages run** / **Start Unfollow run**. **Stop** lands after the current action.
 
-**Start with the Conservative trust preset and a tiny daily cap.** The first run
-against the live site is the real test of whether Instagram's current selectors and
-endpoints match what this build expects — see **What is not proven**.
+**Start with the Conservative trust preset and a tiny daily cap.**
 
 ## Recommended settings before you run
 
-Open **Settings** (top bar) and:
+Open **Settings** (top-right `⋯` menu) and:
 
 - Pick a **trust preset**. *Conservative* (20 follows/day, 3 cold invites/day) is the
   right place to start a new or warmed-up account. The sliders are capped at the
@@ -86,7 +78,7 @@ Open **Settings** (top bar) and:
   autopilot only acts inside it, and never more than 14 hours a day.
 - Leave the **warm-up ramp** on: a new account starts at 40% of its caps and climbs
   to 100% over seven days.
-- In **Tab 2 · Message studio**, write at least **5 structurally different
+- In **Outreach → Messages → Message studio**, write at least **5 structurally different
   templates** before any DM run. The pool health panel tells you when you have
   enough variety; a single repeated opening line is exactly what a spam classifier
   looks for.
@@ -95,12 +87,13 @@ Open **Settings** (top bar) and:
 
 | Surface | What it does |
 |---|---|
-| **Tab 1 · People & CRM** | Collect a source into a preview, save it into a bucket, and browse the ranked, filterable library. Click a row for the lead dossier. |
-| **Tab 2 · Outreach** | Buckets and funnel counts, a dry-run plan, the governor budget, the live run log, the follow/DM/cleaner autopilot, and the message studio with its pre-send linter. |
-| **Top telemetry strip** | Always visible: autopilot status, the next-action countdown, today's quota meters, and a one-click **Stop**. |
+| **Tab 1 · Collect** | Four separated sub-tabs (**From an account**, **From a post**, **From a hashtag**, **From open tab**) driving visible human browser automation into a preview, ready to save into **Default** or a new bucket. |
+| **Tab 2 · Your people** | Ranked, virtualised CRM organised into bucket tabs (**All people**, ready **Default** bucket, and every custom bucket you create as its own tab) with search, warmth filters, and a lead drawer with one-click bucket toggles. |
+| **Tab 3 · Outreach** | Three cleanly separated sub-tabs — **Follow**, **Messages** (including Message studio & pool health), and **Unfollow** — with bucket filtering, dry-run planning, governor quota meters, and live run logs. |
+| **Top bar** | Brand, three-tab switcher (**Collect**, **Your people**, **Outreach**), interactive connection status pill, and overflow menu (**Settings**, **Backup & export**). |
 | **Settings** (drawer) | Trust presets, limit sliders, the active window, and ranking weights. |
 | **Backup** (drawer) | Export CSV / a printable report / a `.igcrm.json` save file, create local save points, and import or restore (merging, never replacing). |
-| **Toolbar popup** | Open the dashboard, or jump straight to Outreach. |
+| **Toolbar popup** | Jump straight to the dashboard, **Your people**, or **Outreach**. |
 
 ## Account safety — read this once
 
