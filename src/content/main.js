@@ -163,6 +163,13 @@ export function createContentRuntime(deps = {}) {
       runtime.current = kind;
       runtime.signal = controller.signal;
       runtime.status = status;
+      // Pacing events are the reason a run looks slow, so they travel to the
+      // dashboard and to the pill in this tab instead of staying in the pacer.
+      // Wired once per run: onStatus appends, and a second listener would send
+      // every wait twice.
+      if (typeof status === 'function') {
+        runtime.pacer.onStatus((event) => status({ kind: 'pacing', runKind: kind, ...event }));
+      }
       return controller.signal;
     },
     endRun() {
@@ -579,13 +586,15 @@ function mostCommon(values) {
 /* ------------------------------------------------------------------- commands */
 
 /**
- * Two-phase relationship sync (GAP-08's answer).
+ * Three-phase relationship sync.
  *
  * Phase one reads who the target follows; phase two reads who follows the
- * viewer. Only the intersection proves a follow-back, and only a follow-back
- * makes a DM a conversation rather than a request. When the viewer's follower
- * list is large and only a few accepts are in doubt, `planSync` chooses targeted
- * `?query=` lookups over a fifty-page re-read.
+ * viewer; phase three reads who the viewer follows. Only the intersection of
+ * one and two proves a follow-back, and only a follow-back makes a DM a
+ * conversation rather than a request. Phase three is what keeps "they follow me"
+ * from being reported as mutual. When the viewer's follower list is large and
+ * only a few accepts are in doubt, `planSync` chooses targeted `?query=` lookups
+ * over a fifty-page re-read.
  */
 export async function syncRelationships(runtime, {
   targetUsername = null,
@@ -941,7 +950,7 @@ function listReadWithCount(result, knownCount, phase) {
 /**
  * The logged-in viewer, probed once per tab and remembered.
  *
- * Accept detection and the two-phase sync both need the viewer's numeric id, and
+ * Accept detection and the relationship sync both need the viewer's numeric id, and
  * re-probing it on every command burns a read for something that cannot change
  * without a page reload.
  */

@@ -118,7 +118,14 @@ class Element {
     this._text = null;
   }
   replaceChildren(...nodes) { this.children = []; this._text = null; this._rawHtml = null; this.append(...nodes); }
-  removeChild(n) { this.children = this.children.filter((c) => c !== n); return n; }
+  removeChild(n) {
+    this.children = this.children.filter((c) => c !== n);
+    // A detached node has no parent. Leaving the old reference behind made
+    // "is this still in the page?" answer yes for a node the page had removed,
+    // which is exactly the check a single-page-app re-mount depends on.
+    if (n && typeof n === 'object') n.parentNode = null;
+    return n;
+  }
   remove() { this.parentNode?.removeChild(this); }
   replaceWith(n) {
     if (!this.parentNode) return;
@@ -182,6 +189,24 @@ class Element {
       if (matchesChain(this, group, ancestorsOf(this))) return true;
     }
     return false;
+  }
+
+  /**
+   * Attach a shadow root.
+   *
+   * Content-script UI lives in one so a site-wide `button { }` rule cannot
+   * destroy it. A closed root is not reachable from the host, exactly as in a
+   * browser: only whoever created it keeps the reference, which is why the
+   * launcher keeps its own and the shim does not hand one back.
+   */
+  attachShadow({ mode = 'open' } = {}) {
+    if (this._shadowRoot) throw new Error('shadow root already attached');
+    const root = new Element('#shadow-root', this.ownerDocument);
+    root.mode = mode;
+    root.host = this;
+    this._shadowRoot = root;
+    this.shadowRoot = mode === 'open' ? root : null;
+    return root;
   }
 
   /** Nearest ancestor (or self) matching the selector. */
