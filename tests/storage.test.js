@@ -5,17 +5,41 @@ import {
   DB_NAME,
   Store,
   clearAll,
+  countEnabledTemplates,
+  deleteGroup,
   edgeKeyFor,
+  endOutreachSession,
+  finishScrapeRun,
+  getGroup,
   getLead,
+  getSnapshot,
   getWorkspace,
+  groupRecord,
+  leadRecord,
   listActions,
   listEdgesForLead,
+  listGroups,
   listLeads,
+  listOutreachSessions,
+  listScrapeRuns,
+  listSnapshots,
+  listTemplates,
   logAction,
   openDb,
+  putGroup,
+  putOutreachSession,
+  putScrapeRun,
+  putSnapshot,
+  putTemplate,
   putWorkspace,
+  reconcileSessions,
   recoverIfNeeded,
   resetDb,
+  runRecord,
+  sessionRecord,
+  setLeadGroup,
+  templateRecord,
+  updateOutreachSession,
   updateWorkspace,
   upsertEdge,
   upsertLead,
@@ -35,7 +59,7 @@ after(() => {
 });
 
 describe('schema', () => {
-  test('opens the workspace database with all eight stores', async () => {
+  test('opens the workspace database with all nine stores', async () => {
     const db = await openDb();
     assert.equal(db.name, DB_NAME);
     for (const store of Object.values(Store)) {
@@ -199,5 +223,156 @@ describe('clearAll', () => {
     await clearAll();
     assert.deepEqual(await listLeads('w1'), []);
     assert.deepEqual(await listActions('w1'), []);
+  });
+});
+
+describe('buckets', () => {
+  const ws = '900';
+
+  test('a bucket needs a workspace and a name', () => {
+    assert.throws(() => groupRecord({ name: 'linen' }), /needs a workspace/);
+    assert.throws(() => groupRecord({ workspaceId: ws, name: '   ' }), /needs a name/);
+    const group = groupRecord({ workspaceId: ws, name: 'Linen suppliers' });
+    assert.match(group.groupId, /^grp_/);
+    assert.equal(group.workspaceId, ws);
+    assert.equal(group.name, 'Linen suppliers');
+  });
+
+  test('buckets round-trip per workspace, sorted by name', async () => {
+    await putWorkspace({ workspaceId: ws, viewerUsername: 'me' });
+    await putGroup(groupRecord({ workspaceId: ws, name: 'Zebra' }));
+    await putGroup(groupRecord({ workspaceId: ws, name: 'Alpha' }));
+    await putGroup(groupRecord({ workspaceId: '901', name: 'Other account' }));
+    const groups = await listGroups(ws);
+    assert.deepEqual(groups.map((group) => group.name), ['Alpha', 'Zebra']);
+    assert.equal((await getGroup(groups[0].groupId)).name, 'Alpha');
+  });
+
+  test('tagging a lead keeps its history and can be undone', async () => {
+    const lead = leadRecord({ workspaceId: ws, username: 'sara_shop' }, { followedAt: 123, priorityScore: 40 });
+    await upsertLead(lead);
+    const group = groupRecord({ workspaceId: ws, name: 'Warm' });
+    await putGroup(group);
+
+    const tagged = await setLeadGroup(lead.leadKey, group.groupId, { on: true });
+    assert.deepEqual(tagged.groupIds, [group.groupId]);
+    const reread = await getLead(lead.leadKey);
+    assert.equal(reread.followedAt, 123, 'tagging must not touch funnel history');
+    assert.equal(reread.priorityScore, 40);
+
+    await setLeadGroup(lead.leadKey, group.groupId, { on: true });
+    assert.equal((await getLead(lead.leadKey)).groupIds.length, 1, 'tagging twice is one tag');
+    const untagged = await setLeadGroup(lead.leadKey, group.groupId, { on: false });
+    assert.deepEqual(untagged.groupIds, []);
+    assert.equal(await setLeadGroup('900:nobody', group.groupId), null);
+  });
+
+  test('deleting a bucket un-tags leads and never deletes a person', async () => {
+    const lead = leadRecord({ workspaceId: ws, username: 'omar_craft' });
+    await upsertLead(lead);
+    const group = groupRecord({ workspaceId: ws, name: 'Temp' });
+    await putGroup(group);
+    await setLeadGroup(lead.leadKey, group.groupId, { on: true });
+
+    const result = await deleteGroup(group.groupId);
+    assert.deepEqual(result, { deleted: true, untagged: 1 });
+    // IndexedDB resolves a missing key to undefined, not null; the code checks
+    // for falsy so it behaves the same in a browser and against the fake.
+    assert.equal(await getGroup(group.groupId), undefined);
+    assert.deepEqual((await getLead(lead.leadKey)).groupIds, []);
+    assert.ok(await getLead(lead.leadKey), 'the lead itself survives');
+    assert.deepEqual(await deleteGroup('grp_missing'), { deleted: false, untagged: 0 });
+  });
+});
+
+describe('message templates', () => {
+  const ws = '900';
+
+  test('a template needs a body, and pools are counted separately', async () => {
+    assert.throws(() => templateRecord({ workspaceId: ws, body: '  ' }), /needs a message body/);
+    await putTemplate(templateRecord({ workspaceId: ws, body: 'Hi {{first_name}}, do you ship to Cairo?', label: 'shipping' }));
+    await putTemplate(templateRecord({ workspaceId: ws, body: 'Salam {{first_name}}، عندك كتان؟', language: 'ar', poolId: 'arabic' }));
+    await putTemplate(templateRecord({ workspaceId: ws, body: 'disabled one', enabled: false }));
+
+    assert.equal((await listTemplates(ws)).length, 3);
+    assert.equal((await listTemplates(ws, { poolId: 'arabic' })).length, 1);
+    assert.equal(await countEnabledTemplates(ws), 2);
+    assert.equal(await countEnabledTemplates(ws, { poolId: 'arabic' }), 1);
+  });
+
+  test('spintax and variables survive the round trip unrendered', async () => {
+    const body = 'Hi {{first_name|there}}, I liked your {linen|cotton} pieces.';
+    await putTemplate(templateRecord({ workspaceId: ws, body, templateId: 'tpl_keep' }));
+    const rows = await listTemplates(ws);
+    assert.equal(rows.find((row) => row.templateId === 'tpl_keep').body, body);
+  });
+});
+
+describe('collection and outreach sessions', () => {
+  const ws = '900';
+
+  test('a collection run records what came back and why it stopped', async () => {
+    const run = runRecord({ workspaceId: ws, source: 'post_likers', sourceAccount: 'comp_a', tabId: 12, runId: 'run_1' });
+    assert.equal(run.status, 'running');
+    await putScrapeRun(run);
+    assert.equal((await listScrapeRuns(ws))[0].runId, 'run_1');
+
+    const finished = await finishScrapeRun('run_1', { status: 'done', counts: { leads: 38, edges: 38, pages: 2 } });
+    assert.equal(finished.status, 'done');
+    assert.equal(finished.counts.leads, 38);
+    assert.ok(finished.finishedAt >= finished.startedAt);
+    assert.equal(await finishScrapeRun('run_missing'), null);
+  });
+
+  test('a failed collection keeps its reason and severity', async () => {
+    await putScrapeRun(runRecord({ workspaceId: ws, source: 'followers', runId: 'run_2' }));
+    const row = await finishScrapeRun('run_2', { status: 'refused', reason: 'action block', severity: 'account' });
+    assert.equal(row.status, 'refused');
+    assert.equal(row.severity, 'account');
+    const runs = await listScrapeRuns(ws, { kind: 'collect' });
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].runId, 'run_2', 'newest first');
+  });
+
+  test('an outreach session counts what it did', async () => {
+    await putOutreachSession(sessionRecord({ workspaceId: ws, mode: 'FOLLOW', tabId: 12, sessionId: 'ses_1', policy: { mutualOnly: true } }));
+    const bumped = await updateOutreachSession('ses_1', { counts: { attempted: 3, done: 2, refused: 1 }, planned: 24, lastActionAt: 5 });
+    assert.deepEqual(bumped.counts, { attempted: 3, done: 2, refused: 1, skipped: 0, failed: 0 });
+    assert.equal(bumped.status, 'running');
+    assert.equal(bumped.policy.mutualOnly, true);
+
+    const second = await updateOutreachSession('ses_1', { counts: { done: 4 } });
+    assert.equal(second.counts.done, 4, 'counts merge, they do not reset');
+    assert.equal(second.counts.refused, 1);
+
+    const ended = await endOutreachSession('ses_1', { status: 'stopped', reason: 'owner pressed stop' });
+    assert.equal(ended.status, 'stopped');
+    assert.ok(ended.endedAt >= ended.startedAt);
+    assert.equal(await updateOutreachSession('ses_missing', {}), null);
+  });
+
+  test('a session left running by a crash is marked, not hidden', async () => {
+    await putOutreachSession(sessionRecord({ workspaceId: ws, mode: 'DM', sessionId: 'ses_live' }));
+    await putOutreachSession(sessionRecord({ workspaceId: ws, mode: 'DM', sessionId: 'ses_done' }));
+    await endOutreachSession('ses_done', { status: 'done' });
+    const stale = await reconcileSessions(ws);
+    assert.equal(stale, 1);
+    const rows = await listOutreachSessions(ws);
+    assert.equal(rows.find((row) => row.sessionId === 'ses_live').status, 'interrupted');
+    assert.equal(rows.find((row) => row.sessionId === 'ses_done').status, 'done');
+    assert.equal((await listOutreachSessions(ws, { mode: 'DM' })).length, 2);
+    assert.equal((await listOutreachSessions(ws, { mode: 'FOLLOW' })).length, 1);
+  });
+});
+
+describe('snapshots', () => {
+  test('the list carries labels and sizes, the row carries the payload', async () => {
+    await putSnapshot({ snapshotId: 'snap_1', workspaceId: '900', label: 'before the Ramadan campaign', payload: { leads: [{ a: 1 }] } });
+    const list = await listSnapshots('900');
+    assert.equal(list.length, 1);
+    assert.equal(list[0].label, 'before the Ramadan campaign');
+    assert.ok(list[0].bytes > 10);
+    assert.equal(list[0].payload, undefined, 'a megabyte payload does not belong in a list');
+    assert.deepEqual((await getSnapshot('snap_1')).payload, { leads: [{ a: 1 }] });
   });
 });

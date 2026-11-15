@@ -33,6 +33,7 @@ export const Store = Object.freeze({
   GROUPS: 'groups',
   TEMPLATES: 'templates',
   SCRAPE_RUNS: 'scrape_runs',
+  OUTREACH_SESSIONS: 'outreach_sessions',
   ACTION_LOG: 'action_log',
   SNAPSHOTS: 'snapshots',
 });
@@ -76,10 +77,17 @@ export function openDb() {
         groups.createIndex('workspaceId', 'workspaceId', { unique: false });
 
         const templates = db.createObjectStore(Store.TEMPLATES, { keyPath: 'templateId' });
+        templates.createIndex('workspaceId', 'workspaceId', { unique: false });
         templates.createIndex('workspace_pool', ['workspaceId', 'poolId'], { unique: false });
 
         const runs = db.createObjectStore(Store.SCRAPE_RUNS, { keyPath: 'runId' });
+        runs.createIndex('workspaceId', 'workspaceId', { unique: false });
         runs.createIndex('workspace_started', ['workspaceId', 'startedAt'], { unique: false });
+
+        const sessions = db.createObjectStore(Store.OUTREACH_SESSIONS, { keyPath: 'sessionId' });
+        sessions.createIndex('workspaceId', 'workspaceId', { unique: false });
+        sessions.createIndex('workspace_started', ['workspaceId', 'startedAt'], { unique: false });
+        sessions.createIndex('workspace_mode', ['workspaceId', 'mode'], { unique: false });
 
         const log = db.createObjectStore(Store.ACTION_LOG, { keyPath: 'logId', autoIncrement: true });
         log.createIndex('workspaceId', 'workspaceId', { unique: false });
@@ -88,6 +96,7 @@ export function openDb() {
         log.createIndex('leadKey', 'leadKey', { unique: false });
 
         const snapshots = db.createObjectStore(Store.SNAPSHOTS, { keyPath: 'snapshotId' });
+        snapshots.createIndex('workspaceId', 'workspaceId', { unique: false });
         snapshots.createIndex('workspace_created', ['workspaceId', 'createdAt'], { unique: false });
       }
     };
@@ -219,6 +228,12 @@ export function leadRecord(identity, patch = {}) {
     /** Funnel bookkeeping. */
     groupIds: [],
     followedAt: null,
+    /**
+     * Set only when THIS extension performed the follow. The cleaner refuses to
+     * unfollow anyone without it, so friends the owner followed by hand are
+     * never touched by a campaign they never asked for.
+     */
+    followedViaExtension: false,
     requestedAt: null,
     acceptedAt: null,
     messagedAt: null,
@@ -404,4 +419,290 @@ export async function usageEstimate() {
   if (!nav?.storage?.estimate) return null;
   const { usage, quota } = await nav.storage.estimate();
   return { usage, quota, pct: quota ? (usage / quota) * 100 : null };
+}
+
+/* ------------------------------------------------------- buckets (groups) */
+
+/**
+ * A bucket is a named subset of leads: "linen suppliers", "Ramadan campaign".
+ * Leads carry `groupIds`, so one person can sit in several buckets and deleting
+ * a bucket never deletes a person.
+ */
+export function groupRecord({ workspaceId, name, note = '', groupId = null }) {
+  if (!workspaceId) throw new Error('a bucket needs a workspace');
+  const label = String(name ?? '').trim();
+  if (!label) throw new Error('a bucket needs a name');
+  const now = Date.now();
+  return {
+    groupId: String(groupId ?? `grp_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+    workspaceId: String(workspaceId),
+    name: label,
+    note: String(note ?? ''),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function putGroup(group) {
+  const row = { createdAt: Date.now(), updatedAt: Date.now(), ...group, groupId: String(group.groupId), workspaceId: String(group.workspaceId) };
+  return tx(Store.GROUPS, 'readwrite', (s) => wrap(s.put(row)));
+}
+
+export function listGroups(workspaceId) {
+  return tx(Store.GROUPS, 'readonly', (store) => {
+    const out = [];
+    const req = store.index('workspaceId').openCursor(IDBKeyRange.only(String(workspaceId)));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      out.push(cursor.value);
+      cursor.continue();
+    };
+    return { get __req() { return { result: out.sort((a, b) => a.name.localeCompare(b.name)) }; } };
+  });
+}
+
+export function getGroup(groupId) {
+  return tx(Store.GROUPS, 'readonly', (s) => wrap(s.get(String(groupId))));
+}
+
+/**
+ * Delete a bucket and un-tag its leads.
+ *
+ * Two stores in two transactions on purpose: a single readwrite transaction over
+ * both would have to hold every lead in memory anyway, and a failure halfway
+ * leaves an orphan tag on a lead, which is harmless, rather than a deleted
+ * person, which is not.
+ */
+export async function deleteGroup(groupId) {
+  const id = String(groupId);
+  const group = await getGroup(id);
+  if (!group) return { deleted: false, untagged: 0 };
+  const leads = await listLeads(group.workspaceId, { limit: 100000 });
+  let untagged = 0;
+  for (const lead of leads) {
+    if (!(lead.groupIds ?? []).includes(id)) continue;
+    await upsertLead({ ...lead, groupIds: lead.groupIds.filter((entry) => entry !== id) });
+    untagged += 1;
+  }
+  await tx(Store.GROUPS, 'readwrite', (s) => wrap(s.delete(id)));
+  return { deleted: true, untagged };
+}
+
+/** Add or remove one bucket tag on one lead, keeping firstSeenAt intact. */
+export async function setLeadGroup(leadKey, groupId, { on = true } = {}) {
+  const lead = await getLead(leadKey);
+  if (!lead) return null;
+  const id = String(groupId);
+  const current = lead.groupIds ?? [];
+  const next = on ? (current.includes(id) ? current : [...current, id]) : current.filter((entry) => entry !== id);
+  await upsertLead({ ...lead, groupIds: next });
+  return { ...lead, groupIds: next };
+}
+
+/* ------------------------------------------------- message template pools */
+
+/**
+ * A template is one message the autopilot may send, with spintax and
+ * {{variables}} left intact: rendering happens per lead at send time, so two
+ * people never receive a byte-identical message from the same template.
+ */
+export function templateRecord({ workspaceId, body, label = '', poolId = 'default', language = 'en', enabled = true, templateId = null }) {
+  if (!workspaceId) throw new Error('a template needs a workspace');
+  if (!String(body ?? '').trim()) throw new Error('a template needs a message body');
+  const now = Date.now();
+  return {
+    templateId: String(templateId ?? `tpl_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+    workspaceId: String(workspaceId),
+    poolId: String(poolId ?? 'default'),
+    label: String(label ?? ''),
+    body: String(body),
+    language: String(language ?? 'en'),
+    enabled: Boolean(enabled),
+    createdAt: now,
+    updatedAt: now,
+    sentCount: 0,
+  };
+}
+
+export function putTemplate(template) {
+  const row = { createdAt: Date.now(), updatedAt: Date.now(), sentCount: 0, ...template, templateId: String(template.templateId), workspaceId: String(template.workspaceId) };
+  return tx(Store.TEMPLATES, 'readwrite', (s) => wrap(s.put(row)));
+}
+
+export function listTemplates(workspaceId, { poolId = null } = {}) {
+  return tx(Store.TEMPLATES, 'readonly', (store) => {
+    const out = [];
+    const req = store.index('workspaceId').openCursor(IDBKeyRange.only(String(workspaceId)));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      if (!poolId || cursor.value.poolId === poolId) out.push(cursor.value);
+      cursor.continue();
+    };
+    return { get __req() { return { result: out.sort((a, b) => a.createdAt - b.createdAt) }; } };
+  });
+}
+
+export function deleteTemplate(templateId) {
+  return tx(Store.TEMPLATES, 'readwrite', (s) => wrap(s.delete(String(templateId))));
+}
+
+/** Counting enabled templates is what decides whether a message run may start. */
+export async function countEnabledTemplates(workspaceId, { poolId = null } = {}) {
+  const rows = await listTemplates(workspaceId, { poolId });
+  return rows.filter((row) => row.enabled !== false).length;
+}
+
+/* ------------------------------------------------------ collection sessions */
+
+/**
+ * One Tab 1 collection: what was asked for, what came back, and why it stopped.
+ * Kept permanently — a run that returned 300 leads yesterday is the evidence for
+ * "these people came from @comp_a", and re-collecting costs account risk.
+ */
+export function runRecord({ workspaceId, kind = 'collect', source = null, sourceAccount = null, tabId = null, runId = null }) {
+  const now = Date.now();
+  return {
+    runId: String(runId ?? `run_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+    workspaceId: String(workspaceId),
+    kind,
+    source,
+    sourceAccount,
+    tabId: tabId === null || tabId === undefined ? null : Number(tabId),
+    startedAt: now,
+    finishedAt: null,
+    status: 'running',
+    counts: { leads: 0, edges: 0, pages: 0 },
+    reason: null,
+    severity: null,
+  };
+}
+
+export function putScrapeRun(run) {
+  const row = { startedAt: Date.now(), status: 'running', ...run, runId: String(run.runId), workspaceId: String(run.workspaceId) };
+  return tx(Store.SCRAPE_RUNS, 'readwrite', (s) => wrap(s.put(row)));
+}
+
+export async function finishScrapeRun(runId, patch = {}) {
+  const row = await tx(Store.SCRAPE_RUNS, 'readonly', (s) => wrap(s.get(String(runId))));
+  if (!row) return null;
+  const next = { ...row, ...patch, finishedAt: patch.finishedAt ?? Date.now(), status: patch.status ?? 'done' };
+  await tx(Store.SCRAPE_RUNS, 'readwrite', (s) => wrap(s.put(next)));
+  return next;
+}
+
+export function listScrapeRuns(workspaceId, { limit = 200, kind = null } = {}) {
+  return tx(Store.SCRAPE_RUNS, 'readonly', (store) => {
+    const out = [];
+    const req = store.index('workspaceId').openCursor(IDBKeyRange.only(String(workspaceId)));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      if (!kind || cursor.value.kind === kind) out.push(cursor.value);
+      cursor.continue();
+    };
+    return { get __req() { return { result: out.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit) }; } };
+  });
+}
+
+/* ------------------------------------------------------- outreach sessions */
+
+/**
+ * One autopilot session: mode, when it started, when it stopped, and how many
+ * actions landed. This is the record the owner reads the next morning to know
+ * what the extension did while the tab was open, and it survives a browser
+ * restart because it lives in IndexedDB, not in a page.
+ */
+export function sessionRecord({ workspaceId, mode, groupId = null, tabId = null, policy = {}, sessionId = null }) {
+  const now = Date.now();
+  return {
+    sessionId: String(sessionId ?? `ses_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+    workspaceId: String(workspaceId),
+    mode,
+    groupId: groupId === null || groupId === undefined ? null : String(groupId),
+    tabId: tabId === null || tabId === undefined ? null : Number(tabId),
+    policy,
+    startedAt: now,
+    endedAt: null,
+    status: 'running',
+    planned: 0,
+    counts: { attempted: 0, done: 0, refused: 0, skipped: 0, failed: 0 },
+    lastActionAt: null,
+    reason: null,
+    severity: null,
+  };
+}
+
+export function putOutreachSession(session) {
+  const row = { startedAt: Date.now(), status: 'running', ...session, sessionId: String(session.sessionId), workspaceId: String(session.workspaceId) };
+  return tx(Store.OUTREACH_SESSIONS, 'readwrite', (s) => wrap(s.put(row)));
+}
+
+export async function updateOutreachSession(sessionId, patch = {}) {
+  const row = await tx(Store.OUTREACH_SESSIONS, 'readonly', (s) => wrap(s.get(String(sessionId))));
+  if (!row) return null;
+  const counts = patch.counts ? { ...row.counts, ...patch.counts } : row.counts;
+  const next = { ...row, ...patch, counts, sessionId: row.sessionId, workspaceId: row.workspaceId };
+  await tx(Store.OUTREACH_SESSIONS, 'readwrite', (s) => wrap(s.put(next)));
+  return next;
+}
+
+export async function endOutreachSession(sessionId, { status = 'stopped', reason = null, severity = null } = {}) {
+  return updateOutreachSession(sessionId, { status, reason, severity, endedAt: Date.now() });
+}
+
+export function listOutreachSessions(workspaceId, { limit = 200, mode = null } = {}) {
+  return tx(Store.OUTREACH_SESSIONS, 'readonly', (store) => {
+    const out = [];
+    const req = store.index('workspaceId').openCursor(IDBKeyRange.only(String(workspaceId)));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      if (!mode || cursor.value.mode === mode) out.push(cursor.value);
+      cursor.continue();
+    };
+    return { get __req() { return { result: out.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit) }; } };
+  });
+}
+
+/** A session left running by a crash is not running: mark it, do not hide it. */
+export async function reconcileSessions(workspaceId) {
+  const rows = await listOutreachSessions(workspaceId, { limit: 500 });
+  const stale = rows.filter((row) => row.status === 'running');
+  for (const row of stale) {
+    await endOutreachSession(row.sessionId, { status: 'interrupted', reason: 'the dashboard was closed while this session was running' });
+  }
+  return stale.length;
+}
+
+/* ---------------------------------------------------------------- snapshots */
+
+export function putSnapshot(snapshot) {
+  const row = { createdAt: Date.now(), ...snapshot, workspaceId: String(snapshot.workspaceId), snapshotId: String(snapshot.snapshotId) };
+  return tx(Store.SNAPSHOTS, 'readwrite', (s) => wrap(s.put(row)));
+}
+
+export function listSnapshots(workspaceId, { limit = 100 } = {}) {
+  return tx(Store.SNAPSHOTS, 'readonly', (store) => {
+    const out = [];
+    const req = store.index('workspaceId').openCursor(IDBKeyRange.only(String(workspaceId)));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      // The payload can be megabytes; the list only needs the label.
+      const { payload, ...meta } = cursor.value;
+      out.push({ ...meta, bytes: payload ? JSON.stringify(payload).length : 0 });
+      cursor.continue();
+    };
+    return { get __req() { return { result: out.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit) }; } };
+  });
+}
+
+export function getSnapshot(snapshotId) {
+  return tx(Store.SNAPSHOTS, 'readonly', (s) => wrap(s.get(String(snapshotId))));
+}
+
+export function deleteSnapshot(snapshotId) {
+  return tx(Store.SNAPSHOTS, 'readwrite', (s) => wrap(s.delete(String(snapshotId))));
 }
