@@ -44,7 +44,8 @@ import {
 import { RelationshipKind, buildFollowerIndex, nameKey, planSync, relStateFor } from '../core/relationship.js';
 import { Intent, classifyComment } from '../core/comments.js';
 import { EdgeType, scoreLead } from '../core/scoring.js';
-import { CommandType } from '../storage/bridge.js';
+import { ACTIVE_WORKSPACE_KEY, CommandType, chromeStorageAdapter, createBridge } from '../storage/bridge.js';
+import { installLauncher } from './launcher.js';
 
 /** What Tab 1 can collect from. Every value maps to exactly one edge type. */
 export const CollectSource = Object.freeze({
@@ -965,4 +966,245 @@ export async function ensureViewer(runtime) {
   });
   runtime.viewer = probed;
   return probed;
+}
+
+/* ------------------------------------------------------------------ bootstrap */
+
+/** A sleep that never keeps the process alive on its own. */
+function sleepFor(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, Number(ms) || 0));
+    if (typeof timer?.unref === 'function') timer.unref();
+  });
+}
+
+/** How long to wait before bringing a dead command loop back. */
+export const CONTENT_LOOP_RESTART_MS = 4000;
+
+/** How many times the loop may die and come back before this tab gives up. */
+export const CONTENT_LOOP_MAX_RESTARTS = 6;
+
+/**
+ * Everything this tab needs to serve the dashboard: a mailbox loop, the pill,
+ * and a watcher that follows the owner to another account.
+ *
+ * Built as a factory with injected dependencies rather than as module-level
+ * side effects, so the whole bootstrap is testable without a browser and so a
+ * page that imports this module twice does not end up with two loops answering
+ * the same mailbox (which would run every command twice).
+ */
+export function createContentBootstrap(deps = {}) {
+  const chromeApi = 'chrome' in deps ? deps.chrome : (globalThis.chrome ?? null);
+  const document = 'document' in deps ? deps.document : (globalThis.document ?? null);
+  const location = deps.location ?? globalThis.location ?? null;
+  const now = deps.now ?? (() => Date.now());
+  const sleep = deps.sleep ?? sleepFor;
+  const storage = deps.storage ?? (chromeApi?.storage?.local ? chromeStorageAdapter(chromeApi) : null);
+  const runtime = deps.runtime ?? createContentRuntime({ ...deps, document, location, now });
+  const restartMs = Number.isFinite(deps.restartMs) ? deps.restartMs : CONTENT_LOOP_RESTART_MS;
+  const maxRestarts = Number.isFinite(deps.maxRestarts) ? deps.maxRestarts : CONTENT_LOOP_MAX_RESTARTS;
+
+  const state = {
+    workspaceId: null,
+    bridge: null,
+    signal: null,
+    loop: null,
+    launcher: null,
+    listener: null,
+    started: false,
+    stopped: false,
+    restarts: 0,
+    reason: null,
+    lastError: null,
+    commands: 0,
+  };
+
+  const bridgeFor = deps.bridgeFor
+    ?? ((workspaceId) => createBridge({
+      storage,
+      workspaceId,
+      now,
+      sleep,
+      pollMs: deps.pollMs,
+      commandTimeoutMs: deps.commandTimeoutMs,
+    }));
+
+  // No navigate function on purpose. A content script that sets location.href
+  // destroys itself mid-command, so the tab answers "wrong profile, go here"
+  // and the dashboard - which owns chrome.tabs - moves the tab and re-sends.
+  const handlers = deps.handlers ?? createHandlers(runtime, { navigate: deps.navigate ?? null });
+
+  async function readWorkspaceId() {
+    if (deps.workspaceId) return String(deps.workspaceId);
+    if (!storage) return 'default';
+    try {
+      const row = await storage.get(ACTIVE_WORKSPACE_KEY);
+      return row?.workspaceId ? String(row.workspaceId) : 'default';
+    } catch {
+      return 'default';
+    }
+  }
+
+  async function supervise(workspaceId) {
+    let current = String(workspaceId ?? 'default');
+    while (!state.stopped) {
+      const bridge = bridgeFor(current);
+      const signal = { aborted: false };
+      state.bridge = bridge;
+      state.workspaceId = current;
+      state.signal = signal;
+      try {
+        await bridge.runCommandLoop({
+          handlers,
+          isBusy: () => runtime.isBusy(),
+          signal,
+          onCommand: () => { state.commands += 1; },
+        });
+      } catch (error) {
+        state.lastError = `${error?.name ?? 'Error'}: ${error?.message ?? error}`;
+      }
+      if (state.stopped || signal.aborted) return { stopped: true, workspaceId: current };
+      // A loop that ends on its own is a dead mailbox: the extension would stop
+      // answering and the owner would see only a spinner. Bring it back, but not
+      // forever - a page that kills it six times in a row has a real problem,
+      // and the pill says so instead of burning the tab's CPU in a tight retry.
+      state.restarts += 1;
+      if (state.restarts > maxRestarts) {
+        state.reason = `the mailbox stopped answering ${state.restarts - 1} times in a row; reload this Instagram tab`;
+        return { stopped: false, gaveUp: true, reason: state.reason };
+      }
+      await sleep(restartMs);
+      current = await readWorkspaceId();
+    }
+    return { stopped: true, workspaceId: current };
+  }
+
+  async function restartFor(workspaceId) {
+    const id = String(workspaceId ?? 'default');
+    if (id === state.workspaceId && state.loop) return state.workspaceId;
+    if (state.signal) state.signal.aborted = true;
+    const previous = state.loop;
+    state.loop = null;
+    if (previous) { try { await previous; } catch { /* the loop is already gone */ } }
+    if (state.stopped) return id;
+    state.restarts = 0;
+    state.loop = supervise(id);
+    return id;
+  }
+
+  /** Follow the owner to another account: a new workspace is a new mailbox. */
+  function watchWorkspace() {
+    const onChanged = chromeApi?.storage?.onChanged;
+    if (typeof onChanged?.addListener !== 'function') return null;
+    const listener = (changes, area) => {
+      if (area && area !== 'local') return;
+      const change = changes?.[ACTIVE_WORKSPACE_KEY];
+      if (!change) return;
+      const next = change.newValue?.workspaceId;
+      if (!next || String(next) === state.workspaceId) return;
+      void restartFor(String(next));
+    };
+    onChanged.addListener(listener);
+    state.listener = listener;
+    return listener;
+  }
+
+  function installPill() {
+    if (deps.launcher === false) return null;
+    const install = deps.installLauncher ?? installLauncher;
+    const installedPill = install({
+      document,
+      location,
+      now,
+      tickMs: deps.launcherTickMs,
+      setInterval: deps.setInterval,
+      clearInterval: deps.clearInterval,
+      addEventListener: deps.addEventListener,
+      open: deps.open,
+      getURL: deps.getURL,
+      onAction: deps.onAction,
+      readStatus: async () => (state.bridge ? state.bridge.readStatus() : null),
+      onStop: () => {
+        const stopped = runtime.stop('stopped from this tab');
+        void state.bridge?.postStatus({ kind: 'run-end', ok: false, reason: 'Stopped from this tab.', at: now() });
+        return stopped;
+      },
+    });
+    state.launcher = installedPill;
+    return installedPill;
+  }
+
+  async function start() {
+    if (state.started) return { ok: true, alreadyStarted: true, workspaceId: state.workspaceId };
+    if (!storage) {
+      state.reason = 'this page has no extension storage, so it cannot talk to the CRM';
+      return { ok: false, reason: state.reason };
+    }
+    state.started = true;
+    const workspaceId = await readWorkspaceId();
+    state.workspaceId = workspaceId;
+    state.loop = supervise(workspaceId);
+    watchWorkspace();
+    installPill();
+    return { ok: true, workspaceId };
+  }
+
+  function stop(reason = 'content bootstrap stopped') {
+    state.stopped = true;
+    state.reason = reason;
+    if (state.signal) state.signal.aborted = true;
+    runtime.stop(reason);
+    try { state.launcher?.stop?.(); } catch { /* the pill is already gone */ }
+    const onChanged = chromeApi?.storage?.onChanged;
+    if (state.listener && typeof onChanged?.removeListener === 'function') onChanged.removeListener(state.listener);
+    state.listener = null;
+    return { stopped: true, reason, commands: state.commands };
+  }
+
+  return {
+    runtime,
+    state,
+    start,
+    stop,
+    restartFor,
+    readWorkspaceId,
+    handlers,
+    bridge: () => state.bridge,
+    /** Run one command locally, without the mailbox. Used by the pill and tests. */
+    run: (type, payload, ctx = {}) => runCommand(runtime, type, payload, { ...ctx, deps: { navigate: deps.navigate ?? null } }),
+  };
+}
+
+/** The single installation for this page. */
+let pageBootstrap = null;
+
+/**
+ * The entry point content.js calls.
+ *
+ * Never throws and never rejects: a content script that dies during bootstrap
+ * takes the whole extension down with it, and the only visible symptom would be
+ * a dashboard that waits forever. Everything is caught, reported to the console
+ * and reflected in the returned object.
+ */
+export async function installMessageHandlers(deps = {}) {
+  if (pageBootstrap) return pageBootstrap;
+  try {
+    const bootstrap = createContentBootstrap(deps);
+    pageBootstrap = bootstrap;
+    const started = await bootstrap.start();
+    if (!started.ok) console.warn('[IG Outreach CRM]', started.reason);
+    return bootstrap;
+  } catch (error) {
+    console.error('[IG Outreach CRM] bootstrap failed:', error);
+    pageBootstrap = null;
+    return { ok: false, reason: `${error?.name ?? 'Error'}: ${error?.message ?? error}`, start: async () => ({ ok: false }), stop: () => ({ stopped: true }) };
+  }
+}
+
+/** Drop the page-level installation. Tests, and a tab that must start over. */
+export function resetMessageHandlers() {
+  const previous = pageBootstrap;
+  pageBootstrap = null;
+  try { previous?.stop?.('reset'); } catch { /* nothing to clean up */ }
+  return previous ? true : false;
 }

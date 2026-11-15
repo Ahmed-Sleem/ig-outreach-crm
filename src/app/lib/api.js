@@ -27,7 +27,7 @@
  * surface is testable without a browser.
  */
 
-import { CommandType, createBridge, chromeStorageAdapter } from '../../storage/bridge.js';
+import { ACTIVE_WORKSPACE_KEY, CommandType, createBridge, chromeStorageAdapter } from '../../storage/bridge.js';
 import {
   countEnabledTemplates,
   finishScrapeRun,
@@ -64,7 +64,7 @@ import {
 } from '../../core/governor.js';
 
 /** Where the content script looks to find out which workspace it serves. */
-export const ACTIVE_WORKSPACE_KEY = 'ig_crm_active_workspace_v1';
+export { ACTIVE_WORKSPACE_KEY };
 
 /**
  * The managed Instagram window: small, parked beside the dashboard, reused.

@@ -29,6 +29,9 @@
  *    without a browser.
  */
 
+/** Where the dashboard records which workspace its tabs should serve. */
+export const ACTIVE_WORKSPACE_KEY = 'ig_crm_active_workspace_v1';
+
 export const BRIDGE_PREFIX = 'ig_crm_bridge_v1';
 export const BRIDGE_POLL_MS = 1000;
 export const BRIDGE_COMMAND_TIMEOUT_MS = 30_000;
@@ -197,7 +200,11 @@ export function createBridge(options = {}) {
         continue;
       }
       if (isBusy() && !ALWAYS_ACCEPTED.includes(command.type)) {
-        await postResult(commandId, { ok: false, reason: 'a run is already in progress in this tab', value: null, busy: true });
+        // `busy` travels inside the value: postResult persists a fixed row shape,
+        // so a flag hung off the side would be dropped and the dashboard would
+        // read "this tab refused" as "this tab is broken" instead of "try again
+        // when the run in flight finishes".
+        await postResult(commandId, { ok: false, reason: 'a run is already in progress in this tab', value: { busy: true } });
         continue;
       }
       try {
