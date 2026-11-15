@@ -61,7 +61,7 @@ export function createCollectorView(ctx = {}) {
   const previewCard = el('div');
   const filterBar = el('div', { class: 'row row--wrap mb-2' });
   const tableMount = el('div', { class: 'vtable' });
-  const libraryCard = card('Library', [filterBar, tableMount], { hint: '' });
+  const libraryCard = card('Your people', [filterBar, tableMount], { hint: '' });
 
   let allLeads = [];
   let vtable = null;
@@ -83,6 +83,7 @@ export function createCollectorView(ctx = {}) {
   let targetFieldNode = null;
   let collectBtn = null;
   let initialApplied = false;
+  let pendingFrom = null;
 
   const stepSource = el('div', { class: 'col' });
   const stepDetail = el('div', { class: 'col' });
@@ -125,7 +126,7 @@ export function createCollectorView(ctx = {}) {
   function renderSourcePicker() {
     clear(stepSource);
     const groupId = groupOfSource(source);
-    stepSource.append(el('div', { class: 'step__label', text: 'Step 1 - What do you want to collect from?' }));
+    stepSource.append(el('div', { class: 'step__label', text: 'Step 1 \u2013 What do you want to collect from?' }));
     const groupBar = el('div', { class: 'source-groups', role: 'group', 'aria-label': 'What to collect from' });
     for (const group of SOURCE_GROUPS) {
       const on = group.id === groupId;
@@ -152,7 +153,7 @@ export function createCollectorView(ctx = {}) {
   function renderDetail() {
     clear(stepDetail);
     const meta = metaFor(source);
-    stepDetail.append(el('div', { class: 'step__label', text: 'Step 2 - Details' }));
+    stepDetail.append(el('div', { class: 'step__label', text: 'Step 2 \u2013 Details' }));
     if (meta.needsField) {
       const f = field(meta.label, {
         value: rawInput, placeholder: meta.placeholder,
@@ -247,13 +248,15 @@ export function createCollectorView(ctx = {}) {
       }
       lastParse = parsed;
     }
-    statusLine.textContent = 'Opening the source and reading it at a human pace...';
+    statusLine.textContent = 'Opening the source and reading it at a human pace\u2026';
     let tabId;
-    const from = ctx.initialRequest?.from ?? null;
+    const from = pendingFrom;
+    pendingFrom = null;
     if (from) {
       const resolved = await resolveTabId(from);
       if (resolved.noneFound) {
         statusLine.textContent = '';
+        clear(bannerSlot);
         showCollectError('no_tab', 'Could not find the Instagram tab you clicked from. Open it again and press Collect.');
         return;
       }
@@ -268,6 +271,7 @@ export function createCollectorView(ctx = {}) {
       statusIntervalMs: 1000,
       tabId,
     });
+    clear(bannerSlot);
     if (out.ok) {
       statusLine.textContent = `Collected ${out.count}. Review the preview, then save it into a bucket.`;
       lastPreview = { runId: out.runId, result: out.result };
@@ -281,7 +285,7 @@ export function createCollectorView(ctx = {}) {
   }
 
   function renderLauncher() {
-    collectBtn = btn('Collect', { variant: 'primary', busyLabel: 'Collecting...', onClick: () => doCollect() });
+    collectBtn = btn('Collect', { variant: 'primary', busyLabel: 'Collecting\u2026', onClick: () => doCollect() });
     collectBtn.classList.add('btn--lg');
     renderSourcePicker();
     renderDetail();
@@ -290,7 +294,7 @@ export function createCollectorView(ctx = {}) {
       stepSource,
       stepDetail,
       el('div', { class: 'step' }, [
-        el('div', { class: 'step__label', text: 'Step 3 - Collect' }),
+        el('div', { class: 'step__label', text: 'Step 3 \u2013 Collect' }),
         el('div', { class: 'row' }, [collectBtn]),
         statusLine,
         errorSlot,
@@ -305,6 +309,7 @@ export function createCollectorView(ctx = {}) {
     const req = ctx.initialRequest;
     if (req && !initialApplied) {
       initialApplied = true;
+      pendingFrom = req.from ?? null;
       if (req.source && SOURCE_FIELDS[req.source]) source = req.source;
       rawInput = req.username
         ?? (req.shortcode ? `https://www.instagram.com/p/${req.shortcode}/` : (req.tag ? `#${req.tag}` : ''));
@@ -312,6 +317,7 @@ export function createCollectorView(ctx = {}) {
       if (req.auto === '1') {
         const busy = new Set([RunPhase.PREPARING, RunPhase.RUNNING, RunPhase.WAITING, RunPhase.STOPPING]);
         if (busy.has(controller.state?.phase)) {
+          pendingFrom = null;
           showCollectError(null, 'A run is already in progress.');
           return;
         }
@@ -343,15 +349,20 @@ export function createCollectorView(ctx = {}) {
     let bucketName = '';
     const rows = leads.slice(0, 50).map((entry) => {
       const lead = entry?.lead ?? entry;
-      return [`@${lead.username}`, scannedText(lead.fullName ?? ''), String(Math.round(lead.priorityScore ?? 0)), warmthBadge(lead.warmthTier ?? 'cold')];
+      return [`@${lead.username}`, scannedText(lead.fullName ?? ''), warmthBadge(lead.warmthTier ?? 'cold', lead.priorityScore ?? null)];
     });
-    previewCard.append(card(`Preview — ${leads.length} collected`, [
+    previewCard.append(card(`Preview \u2014 ${leads.length} collected`, [
       note('These people are not in your library yet. Save them into a bucket to keep them, or discard the collection.', 'info'),
-      table(['Username', 'Name', 'Score', 'Warmth'], rows, { numeric: [2] }),
+      table(['Username', 'Name', 'Warmth'], rows),
       el('div', { class: 'row row--wrap mt-4' }, [
-        field('Save into a new or existing bucket', { value: '', placeholder: 'Linen suppliers', onInput: (value) => { bucketName = value; } }),
-        btn('Save to library', {
-          variant: 'primary', busyLabel: 'Saving…',
+        field('Save into', {
+          value: '',
+          placeholder: 'Linen suppliers',
+          hint: 'A bucket is a named list, like "Linen suppliers".',
+          onInput: (value) => { bucketName = value; },
+        }),
+        btn('Save', {
+          variant: 'primary', busyLabel: 'Saving\u2026',
           onClick: async () => {
             const saved = await controller.commit({ result, groupName: bucketName.trim() || null, runId: lastPreview.runId });
             if (saved.ok) {
@@ -365,7 +376,7 @@ export function createCollectorView(ctx = {}) {
             }
           },
         }),
-        btn('Discard', { variant: 'danger', busyLabel: '…', onClick: async () => { await controller.discard({ runId: lastPreview.runId }); lastPreview = null; renderPreview(); say('Collection discarded.'); } }),
+        btn('Discard', { variant: 'danger', busyLabel: '\u2026', onClick: async () => { await controller.discard({ runId: lastPreview.runId }); lastPreview = null; renderPreview(); say('Collection discarded.'); } }),
       ]),
     ], { hint: `run ${lastPreview.runId ?? ''}` }));
   }
@@ -506,7 +517,7 @@ export function createCollectorView(ctx = {}) {
         columns: COLUMNS, rows, rowHeight: 38, viewportHeight: tableViewportHeight(), overscan: 10,
         rowClass: () => 'vtable__row--clickable',
         onRowClick: (row) => openDossier(row),
-        emptyMessage: allLeads.length ? 'No leads match these filters.' : 'No leads yet — collect a source above, then save it into a bucket.',
+        emptyMessage: allLeads.length ? 'No people match these filters.' : 'No people collected yet \u2014 start with Step 1 above \u2191, then save them into a bucket.',
       });
     } else {
       vtable.setRows(rows);

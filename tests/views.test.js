@@ -267,6 +267,37 @@ describe('the views', () => {
     assert.match(drawerRoot.querySelector('.drawer__title').textContent, /sara_shop/);
   });
 
+  test('collector auto-starts from initialRequest and renders the 3-column preview with bucket hint', async () => {
+    await seedWorkspace();
+    let collectArgs = null;
+    const { ctx, container } = makeCtx({
+      initialRequest: { source: 'followers', username: 'sara_shop', auto: '1' },
+    });
+    ctx.controller.collect = async (args) => {
+      collectArgs = args;
+      return {
+        ok: true,
+        count: 1,
+        runId: 'run-1',
+        result: {
+          leads: [{ username: 'linen_co', fullName: 'Linen Co', warmthTier: 'warm', priorityScore: 55 }],
+        },
+      };
+    };
+    const view = createCollectorView(ctx);
+    view.mount(container);
+    await settle(10);
+
+    assert.equal(collectArgs?.source, 'followers');
+    assert.equal(collectArgs?.username, 'sara_shop');
+    const headers = [...container.querySelectorAll('table th')].map((th) => th.textContent);
+    assert.deepEqual(headers, ['Username', 'Name', 'Warmth']);
+    assert.match(container.textContent, /A bucket is a named list/);
+    assert.match(container.textContent, /Your people/);
+    assert.ok(findButton(container, 'Save'), 'Save button present in preview');
+    assert.ok(findButton(container, 'Discard'), 'Discard button present in preview');
+  });
+
   /* ------------------------------------------------------------- outreach */
 
   test('outreach plans a follow run and shows the ready count', async () => {
