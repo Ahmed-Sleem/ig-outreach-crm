@@ -41,16 +41,16 @@ export const HOST_ID = 'ig-crm-launcher-host';
 export const LAUNCHER_TICK_MS = 1000;
 
 const PALETTE = {
-  ink: '#0f1115',
+  ink: '#111827',
   surface: '#ffffff',
-  border: '#dbdfe6',
-  accent: '#3d5afe',
+  border: '#e7e9ee',
+  accent: '#2563eb',
   accentText: '#ffffff',
-  muted: '#5b6472',
-  track: '#eceff3',
-  warn: '#b3261e',
-  ok: '#1b7f4d',
-  managed: '#7a4b00',
+  muted: '#4b5563',
+  track: '#f0f2f5',
+  warn: '#b91c1c',
+  ok: '#15803d',
+  managed: '#b45309',
   managedSurface: '#fff6e5',
 };
 
@@ -101,51 +101,77 @@ export function pageContextFrom(pathname, href = '') {
 export function quickActionsFor(context) {
   const actions = [];
   const here = { here: '1' };
+  // Every collect action carries the page it came from (`from`) and `auto:'1'`, so
+  // the dashboard can start THAT collection immediately and aim it at this exact
+  // tab instead of making the owner retype a username they just clicked from.
+  const collect = (extra) => ({ ...here, tab: 'collector', from: context.href, auto: '1', ...extra });
+  const outreach = (extra) => ({ ...here, tab: 'outreach', from: context.href, ...extra });
 
   if (context.kind === 'profile' && context.username) {
     actions.push({
-      id: 'collect-profile',
-      tab: 'collect',
-      label: 'Collect from this profile',
-      hint: 'Followers, following and recent engagers',
-      params: { ...here, tab: 'collect', username: context.username },
+      id: 'collect-followers',
+      tab: 'collector',
+      label: 'Collect followers',
+      hint: `People who follow @${context.username}`,
+      params: collect({ source: 'followers', username: context.username }),
+    });
+    actions.push({
+      id: 'collect-following',
+      tab: 'collector',
+      label: 'Collect following',
+      hint: `People @${context.username} follows`,
+      params: collect({ source: 'following', username: context.username }),
+    });
+    actions.push({
+      id: 'collect-recent-likers',
+      tab: 'collector',
+      label: 'Collect recent likers',
+      hint: 'People who liked the latest posts',
+      params: collect({ source: 'profile_recent_likers', username: context.username }),
     });
     actions.push({
       id: 'add-to-outreach',
       tab: 'outreach',
       label: `Add @${context.username} to outreach`,
       hint: 'Queue a follow or a first message',
-      params: { ...here, tab: 'outreach', username: context.username, act: 'add' },
+      params: outreach({ username: context.username, act: 'add' }),
     });
   }
 
   if (context.kind === 'post' && context.postCode) {
     actions.push({
-      id: 'collect-post',
-      tab: 'collect',
-      label: 'Collect likers and commenters',
-      hint: 'Everyone who engaged with this post',
-      params: { ...here, tab: 'collect', source: 'post_likers', ref: context.postCode },
+      id: 'collect-post-likers',
+      tab: 'collector',
+      label: 'Collect likers',
+      hint: 'Everyone who liked this post',
+      params: collect({ source: 'post_likers', ref: context.postCode }),
+    });
+    actions.push({
+      id: 'collect-post-commenters',
+      tab: 'collector',
+      label: 'Collect commenters',
+      hint: 'Everyone who commented on this post',
+      params: collect({ source: 'post_comments', ref: context.postCode }),
     });
   }
 
   if (context.kind === 'tag' && context.tag) {
     actions.push({
       id: 'collect-grid',
-      tab: 'collect',
-      label: 'Collect from this grid',
+      tab: 'collector',
+      label: 'Collect from this hashtag',
       hint: 'Authors of the posts on screen, in order',
-      params: { ...here, tab: 'collect', source: 'hashtag_grid', tag: context.tag },
+      params: collect({ source: 'hashtag_grid', tag: context.tag }),
     });
   }
 
   if (context.kind === 'explore' || context.kind === 'other') {
     actions.push({
       id: 'collect-page',
-      tab: 'collect',
+      tab: 'collector',
       label: 'Collect the people on this page',
       hint: 'Whatever list or grid is open right now',
-      params: { ...here, tab: 'collect', source: 'current_page' },
+      params: collect({ source: 'current_page' }),
     });
   }
 
@@ -155,14 +181,15 @@ export function quickActionsFor(context) {
       tab: 'outreach',
       label: 'Open this thread in the CRM',
       hint: 'See the relationship and what was already sent',
-      params: { ...here, tab: 'outreach', thread: context.threadId ?? '' },
+      params: outreach({ thread: context.threadId ?? '' }),
     });
   }
 
   // The emergency stop is not in this list: when this tab is being driven by the
   // dashboard it lives in its own banner, always visible, so the one thing that
-  // must never be hard to find is never behind a click.
-  actions.push({ id: 'open-dashboard', tab: 'collect', label: 'Open the CRM', hint: 'Leads, outreach, backups', params: { tab: 'collect' } });
+  // must never be hard to find is never behind a click. "Open the CRM" is last and
+  // carries no `auto`: it is a plain visit, not a started collection.
+  actions.push({ id: 'open-dashboard', tab: 'collector', label: 'Open the CRM', hint: 'Leads, outreach, backups', params: { tab: 'collector' } });
   return actions;
 }
 

@@ -92,28 +92,37 @@ describe('page context', () => {
 });
 
 describe('quick actions', () => {
-  test('a profile offers collecting and adding that exact handle', () => {
-    const actions = quickActionsFor(pageContextFrom('/sara_shop/'));
-    assert.deepEqual(actions.map((action) => action.id), ['collect-profile', 'add-to-outreach', 'open-dashboard']);
+  test('a profile offers three explicit collect actions plus adding that exact handle', () => {
+    const actions = quickActionsFor(pageContextFrom('/sara_shop/', 'https://www.instagram.com/sara_shop/'));
+    assert.deepEqual(actions.map((action) => action.id), ['collect-followers', 'collect-following', 'collect-recent-likers', 'add-to-outreach', 'open-dashboard']);
     const collect = actions[0];
-    assert.equal(collect.tab, 'collect');
+    assert.equal(collect.tab, 'collector');
+    assert.equal(collect.params.source, 'followers');
     assert.equal(collect.params.username, 'sara_shop', 'the handle must travel: focus moves when the dashboard opens');
     assert.equal(collect.params.here, '1');
-    const add = actions[1];
+    assert.equal(collect.params.auto, '1', 'a collect action starts immediately');
+    assert.equal(collect.params.from, 'https://www.instagram.com/sara_shop/', 'the page it came from travels so the dashboard aims at this tab');
+    assert.equal(actions[2].params.source, 'profile_recent_likers');
+    const add = actions[3];
     assert.equal(add.tab, 'outreach');
     assert.equal(add.params.act, 'add');
     assert.match(add.label, /@sara_shop/);
+    assert.equal(add.params.auto, undefined, 'an outreach action does not auto-start a collection');
   });
 
-  test('a post offers its likers and commenters, a tag offers the grid', () => {
+  test('a post offers likers and commenters, a tag offers the grid', () => {
     const post = quickActionsFor(pageContextFrom('/p/Cx9abc/'));
-    assert.equal(post[0].id, 'collect-post');
+    assert.deepEqual(post.map((action) => action.id), ['collect-post-likers', 'collect-post-commenters', 'open-dashboard']);
     assert.equal(post[0].params.source, 'post_likers');
     assert.equal(post[0].params.ref, 'Cx9abc');
+    assert.equal(post[0].params.auto, '1');
+    assert.equal(post[1].params.source, 'post_comments');
+    assert.equal(post[1].params.ref, 'Cx9abc');
     const tag = quickActionsFor(pageContextFrom('/explore/tags/linen/'));
     assert.equal(tag[0].id, 'collect-grid');
     assert.equal(tag[0].params.source, 'hashtag_grid');
     assert.equal(tag[0].params.tag, 'linen');
+    assert.equal(tag[0].params.auto, '1');
   });
 
   test('a thread offers the thread, and every route still offers the dashboard', () => {
@@ -217,7 +226,7 @@ describe('the pill in a page', () => {
     const ui = launcher.mount();
     assert.equal(ui.panel.style.display, 'none');
     assert.equal(ui.pill.style.display, 'flex');
-    assert.deepEqual([...ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-profile', 'add-to-outreach', 'open-dashboard']);
+    assert.deepEqual([...ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-followers', 'collect-following', 'collect-recent-likers', 'add-to-outreach', 'open-dashboard']);
     ui.pill.click();
     assert.equal(launcher.isOpen, true);
     assert.equal(ui.panel.style.display, 'block');
@@ -230,14 +239,16 @@ describe('the pill in a page', () => {
   test('clicking an action opens the dashboard with the handle in the query', () => {
     const { launcher, opened, actions } = setup();
     const ui = launcher.mount();
-    clickFirst(ui, 'collect-profile');
-    assert.equal(actions[0].id, 'collect-profile');
+    clickFirst(ui, 'collect-followers');
+    assert.equal(actions[0].id, 'collect-followers');
     assert.equal(opened.length, 1);
     const url = new URL(opened[0]);
     assert.equal(url.pathname, '/app/index.html');
-    assert.equal(url.searchParams.get('tab'), 'collect');
+    assert.equal(url.searchParams.get('tab'), 'collector');
+    assert.equal(url.searchParams.get('source'), 'followers');
     assert.equal(url.searchParams.get('username'), 'sara_shop');
     assert.equal(url.searchParams.get('here'), '1');
+    assert.equal(url.searchParams.get('auto'), '1');
   });
 
   test('an action a caller owns is not opened a second time', () => {
@@ -250,15 +261,15 @@ describe('the pill in a page', () => {
       open: () => { throw new Error('must not open'); },
     });
     const ui = launcher.mount();
-    assert.equal(launcher.runAction({ id: 'collect-profile', tab: 'collect', params: {} }), false);
+    assert.equal(launcher.runAction({ id: 'collect-followers', tab: 'collector', params: {} }), false);
     clickFirst(ui, 'add-to-outreach');
-    assert.deepEqual(owned, ['collect-profile', 'add-to-outreach']);
+    assert.deepEqual(owned, ['collect-followers', 'add-to-outreach']);
   });
 
   test('a blocked popup is reported instead of failing silently', () => {
     const { launcher, opened } = setup('/sara_shop/', { blockPopups: true });
     const ui = launcher.mount();
-    clickFirst(ui, 'collect-profile');
+    clickFirst(ui, 'collect-followers');
     assert.equal(opened.length, 1);
     assert.equal(ui.stage.textContent, 'Problem');
     assert.match(ui.detail.textContent, /blocked the new tab/);
@@ -314,7 +325,7 @@ describe('live status and the managed worker banner', () => {
     assert.equal(ui.banner.style.display, 'block');
     assert.equal(ui.bannerText.textContent, 'Following 12 warm leads.');
     assert.equal(ui.pillLabel.textContent, 'Stop');
-    assert.equal(ui.pill.style.borderColor, '#7a4b00');
+    assert.equal(ui.pill.style.borderColor, '#b45309');
     // The pill itself stops the run: the control must not be behind a click.
     ui.pill.click();
     assert.equal(stops.length, 1);
@@ -359,7 +370,7 @@ describe('surviving a single-page app', () => {
     location.pathname = '/p/Cx9abc/';
     location.href = 'https://www.instagram.com/p/Cx9abc/';
     assert.equal(launcher.sync(), true);
-    assert.deepEqual([...ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-post', 'open-dashboard']);
+    assert.deepEqual([...ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-post-likers', 'collect-post-commenters', 'open-dashboard']);
     assert.equal(ui.pillLabel.textContent, 'Collect');
   });
 
@@ -412,7 +423,7 @@ describe('surviving a single-page app', () => {
     const ticked = await timers[0].fn();
     assert.deepEqual(ticked, { mounted: true, navigated: true });
     assert.equal(installed.launcher.isOpen, false, 'a new page must not keep the old panel open');
-    assert.deepEqual([...installed.launcher.ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-post', 'open-dashboard']);
+    assert.deepEqual([...installed.launcher.ui.actions.children].map((node) => node.getAttribute('data-action')), ['collect-post-likers', 'collect-post-commenters', 'open-dashboard']);
 
     const again = await timers[0].fn();
     assert.equal(again.navigated, false);
