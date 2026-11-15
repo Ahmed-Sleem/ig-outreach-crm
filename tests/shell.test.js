@@ -17,7 +17,7 @@ const NOW = new Date(2026, 0, 7, 12, 0, 0).getTime();
 // The exact roots index.html ships. A boot that needs one of these and does not
 // find it would render a blank dashboard in Chrome, so the shell test mirrors
 // the real page rather than a synthetic container.
-const ROOT_IDS = ['shell-left', 'shell-center', 'shell-right', 'view-root', 'modal-root', 'drawer-root', 'toasts'];
+const ROOT_IDS = ['shell-left', 'shell-center', 'shell-right', 'run-banner', 'view-root', 'modal-root', 'drawer-root', 'toasts'];
 
 let doc;
 let fake;
@@ -113,11 +113,10 @@ describe('the dashboard shell (main.js createApp)', () => {
     const viewRoot = doc.getElementById('view-root');
     assert.ok(viewRoot.children.length > 0, 'a view is mounted into #view-root');
 
-    // Brand + session pill landed on the left.
+    // Brand on the left; the connection status moved to the right.
     const left = doc.getElementById('shell-left');
     assert.ok(left.querySelector('.brand'), 'the brand is rendered');
-    assert.ok(left.querySelector('#session-pill'), 'the session pill is rendered');
-    assert.match(textOf(left.querySelector('#session-pill')), /@my_shop/, 'the pill shows the connected workspace');
+    assert.ok(!left.querySelector('#session-pill'), 'the connection status is no longer on the left');
 
     // Two tabs, the collector one active by default.
     const center = doc.getElementById('shell-center');
@@ -127,12 +126,25 @@ describe('the dashboard shell (main.js createApp)', () => {
     assert.match(tabs[1].textContent, /Outreach/);
     assert.ok(tabs[0].classList.contains('tab--on'), 'the collector tab is active on boot');
 
-    // Telemetry strip on the right, with a Stop button and the two drawers.
+    // Connection status + one overflow menu on the right. Stop lives in the run
+    // banner (absent while idle) and the quota meters moved to the Outreach screen.
     const right = doc.getElementById('shell-right');
-    assert.ok(right.querySelector('.telemetry'), 'the telemetry strip is rendered');
-    const labels = [...right.querySelectorAll('.btn')].map((b) => b.textContent.trim());
-    assert.ok(labels.includes('Stop'), 'a Stop button is present');
-    assert.ok(labels.includes('Settings') && labels.includes('Backup'), 'Settings and Backup buttons are present');
+    const pill = right.querySelector('#session-pill');
+    assert.ok(pill, 'the connection status is rendered on the right');
+    assert.match(textOf(pill), /@my_shop/, 'it shows the connected workspace');
+    const trigger = right.querySelector('.menu__trigger');
+    assert.ok(trigger, 'the overflow menu trigger is present');
+    // Open the menu the way a click would; the shim has no full event pipeline,
+    // so invoke the stored listener with a minimal event.
+    trigger._listeners.click[0]({ stopPropagation() {}, target: trigger });
+    const items = [...right.querySelectorAll('.menu__item')].map((b) => b.textContent.trim());
+    assert.ok(items.includes('Settings'), 'Settings is in the overflow menu');
+    assert.ok(items.includes('Backup & export'), 'Backup & export is in the overflow menu');
+    assert.ok(!right.querySelector('.quota'), 'the quota meters left the header');
+    assert.ok(![...right.querySelectorAll('.btn')].some((b) => b.textContent.trim() === 'Stop'), 'Stop is not in the header while idle');
+
+    // No run banner while idle: the slot exists but takes no space.
+    assert.equal(doc.getElementById('run-banner').children.length, 0, 'no run banner while idle');
 
     app.destroy();
   });

@@ -648,3 +648,11 @@ button { font-family: inherit; }
 
 /* The lead table caps its own height in CSS, matching the JS viewport maths. */
 .vtable__viewport { max-height: min(70vh, 640px); }
+
+/* The run banner slot: zero-height while idle (no empty space), and aligned to
+   the same 880px content column as the view when a run is active. */
+#run-banner:not(:empty) {
+  width: 100%; max-width: var(--content-max); margin: 0 auto;
+  padding: var(--sp-3) var(--sp-5) 0;
+}
+#run-banner .banner { margin-bottom: 0; }

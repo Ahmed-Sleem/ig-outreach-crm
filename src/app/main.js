@@ -2,10 +2,11 @@
  * Dashboard shell.
  *
  * Owns the three things every view needs but none should build: the api client,
- * the run controller, and the cross-tab sync bus. It renders the persistent top
- * bar — identity, the account guardrail pill, the two-tab switcher, and the live
- * autopilot telemetry strip that stays visible while the owner works in either
- * tab — and swaps the collector and outreach views underneath it.
+ * the run controller, and the cross-tab sync bus. It renders the slim top bar —
+ * identity on the left, the two-tab switcher (Collect / Outreach) in the middle,
+ * and a connection status with a single overflow menu (Settings, Backup & export)
+ * on the right — plus a run banner that appears under the bar only while a run is
+ * active, and swaps the collector and outreach views underneath it.
  *
  * There is no background service worker. This page does the work itself, so
  * nothing can fail to register and take the whole extension down with it. The
@@ -14,7 +15,7 @@
  * the managed Instagram window.
  */
 
-import { $, btn, clear, drawer, el, note, toast } from './lib/ui.js';
+import { $, banner, btn, clear, drawer, el, menu, note, toast } from './lib/ui.js';
 import { createApiClient } from './lib/api.js';
 import { RunPhase, createRunController } from './lib/runner.js';
 import { createSyncBus } from '../storage/sync.js';
@@ -150,26 +151,36 @@ export function createApp(deps = {}) {
     ]);
   }
 
-  function ensurePill() {
-    return $('#session-pill', doc) ?? el('div', { class: 'session-pill', id: 'session-pill' });
+  /** The one-line connection status shown at the right of the header. */
+  function connectionStatus(overview) {
+    if (overview?.lockedUntil) {
+      const when = new Date(overview.lockedUntil).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+      return { variant: 'danger', text: `Locked until ${when}` };
+    }
+    if (overview?.viewerUsername) return { variant: 'ok', text: `Connected as @${overview.viewerUsername}` };
+    return { variant: 'warn', text: 'Not connected' };
   }
 
-  function renderSessionPill(overview) {
-    const host = $('#session-pill', doc);
-    if (!host) return null;
+  /**
+   * Header right: a status dot with one line of text, and a single overflow menu
+   * holding Settings and Backup & export. The quota meters, the phase read-out and
+   * the Stop button no longer live here — the meters moved to the Outreach screen
+   * and Stop lives in the run banner, which exists only while a run is active.
+   */
+  function renderHeaderRight(overview) {
+    const host = $('#shell-right', doc);
+    if (!host) return;
     clear(host);
-    let variant = 'warn';
-    let text = 'No workspace yet';
-    if (overview?.lockedUntil) {
-      variant = 'danger';
-      text = `Locked until ${new Date(overview.lockedUntil).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' })}`;
-    } else if (overview?.viewerUsername) {
-      variant = 'ok';
-      text = `Connected as @${overview.viewerUsername}`;
-    }
-    host.className = `session-pill session-pill--${variant}`;
-    host.append(el('span', { class: 'session-pill__dot' }), el('span', { class: 'session-pill__text', text }));
-    return host;
+    const status = connectionStatus(overview);
+    const pill = el('div', { class: `session-pill session-pill--${status.variant}`, id: 'session-pill' }, [
+      el('span', { class: 'session-pill__dot' }),
+      el('span', { class: 'session-pill__text', text: status.text }),
+    ]);
+    const overflow = menu('⋯', [
+      { label: 'Settings', onClick: () => openSettingsDrawer() },
+      { label: 'Backup & export', onClick: () => openBackupDrawer() },
+    ], { align: 'end', triggerLabel: 'More options' });
+    host.append(pill, overflow);
   }
 
   function renderTabs() {
@@ -191,47 +202,46 @@ export function createApp(deps = {}) {
     host.append(bar);
   }
 
-  function renderTelemetry() {
-    const host = $('#shell-right', doc);
-    if (!host) return;
-    clear(host);
+  const BUSY_PHASES = [RunPhase.PREPARING, RunPhase.RUNNING, RunPhase.WAITING, RunPhase.STOPPING];
 
-    const statusText = el('span', { class: 'telemetry__count', text: PHASE_LABEL[controller.state.phase] ?? 'Idle' });
-    const countdown = el('span', { class: 'telemetry__count', id: 'telemetry-countdown' });
-    const dot = el('span', { class: `entropy-dot ${controller.state.phase === RunPhase.RUNNING || controller.state.phase === RunPhase.WAITING ? 'entropy-dot--live' : ''}` });
-
-    const quota = el('div', { class: 'quota' });
-    if (cachedBudget) {
-      quota.append(
-        meterNode('Follow', cachedBudget.follow.used.daily, cachedBudget.follow.dailyCap),
-        meterNode('Warm DM', cachedBudget.warmDm.used.daily, cachedBudget.warmDm.dailyCap),
-        meterNode('Invites', cachedBudget.coldDm.used.daily, cachedBudget.coldDm.dailyCap),
-      );
-    }
-
-    const busy = controller.state.phase === RunPhase.RUNNING || controller.state.phase === RunPhase.WAITING || controller.state.phase === RunPhase.PREPARING || controller.state.phase === RunPhase.STOPPING;
-    const stopBtn = btn('Stop', {
-      variant: 'danger', disabled: !busy,
-      onClick: () => { controller.stop('stopped by the owner'); toast('Stopping after the current action…'); },
-    });
-
-    host.append(el('div', { class: 'telemetry' }, [
-      el('div', { class: 'telemetry__status' }, [dot, el('span', { class: 'telemetry__label', text: 'Autopilot' }), statusText, countdown]),
-      quota,
-      stopBtn,
-      btn('Settings', { variant: 'ghost', onClick: () => openSettingsDrawer() }),
-      btn('Backup', { variant: 'ghost', onClick: () => openBackupDrawer() }),
-    ]));
-    paintCountdown();
+  /** A short, plain sentence about what the run is doing right now. */
+  function progressSentence() {
+    const counts = controller.state.counts ?? {};
+    const kind = controller.state.kind === 'outreach' ? 'outreach run' : 'collection';
+    const parts = [];
+    if (counts.done) parts.push(`${counts.done} done`);
+    if (counts.refused) parts.push(`${counts.refused} refused`);
+    if (counts.skipped) parts.push(`${counts.skipped} skipped`);
+    if (counts.failed) parts.push(`${counts.failed} failed`);
+    const label = PHASE_LABEL[controller.state.phase] ?? 'Working';
+    return parts.length ? `${label} — ${parts.join(', ')}` : `${label} the ${kind}`;
   }
 
-  function meterNode(label, used, cap) {
-    const fraction = cap > 0 ? Math.min(1, used / cap) : 0;
-    const near = fraction >= 0.8;
-    return el('div', { class: `meter ${near ? 'meter--near' : ''}` }, [
-      el('div', { class: 'meter__head' }, [el('span', { text: label }), el('span', { class: 'meter__read', text: `${used}/${cap}` })]),
-      el('div', { class: 'meter__track' }, [el('div', { class: 'meter__fill', style: { width: `${Math.round(fraction * 100)}%` } })]),
-    ]);
+  /**
+   * The run banner under the header. It exists only while a run is active; when
+   * idle the slot is cleared so it takes up no vertical space.
+   */
+  function renderRunBanner() {
+    const host = $('#run-banner', doc);
+    if (!host) return;
+    clear(host);
+    if (!BUSY_PHASES.includes(controller.state.phase)) return;
+    const stopBtn = btn('Stop', {
+      variant: 'danger',
+      onClick: () => { controller.stop('stopped by the owner'); toast('Stopping after the current action…'); },
+    });
+    const node = banner('', { variant: 'info', actions: [stopBtn] });
+    const text = node.querySelector('.banner__text');
+    if (text) {
+      clear(text);
+      text.append(
+        el('span', { class: 'entropy-dot entropy-dot--live' }),
+        el('span', { text: progressSentence() }),
+        el('span', { class: 'telemetry__count', id: 'telemetry-countdown' }),
+      );
+    }
+    host.append(node);
+    paintCountdown();
   }
 
   function paintCountdown() {
@@ -239,7 +249,7 @@ export function createApp(deps = {}) {
     if (!node) return;
     if (nextActionAt && (controller.state.phase === RunPhase.WAITING || controller.state.phase === RunPhase.RUNNING)) {
       const left = Math.max(0, nextActionAt - Date.now());
-      node.textContent = left > 0 ? `· next in ${formatCountdown(left)}` : '';
+      node.textContent = left > 0 ? ` · next in ${formatCountdown(left)}` : '';
     } else {
       node.textContent = '';
     }
@@ -258,7 +268,7 @@ export function createApp(deps = {}) {
     if (event.type === 'delay') nextActionAt = (event.nextAt ?? Date.now() + (event.ms ?? 0));
     if (event.type === 'action' || event.type === 'outcome') nextActionAt = null;
     if (['phase', 'delay', 'action', 'outcome', 'summary', 'session'].includes(event.type)) {
-      renderTelemetry();
+      renderRunBanner();
     }
     if (event.type === 'summary' || event.type === 'outcome') void refreshShell();
     if (event.type === 'refusal' && event.severity === 'account') toast(event.reason ?? 'Instagram refused an action.', 'error');
@@ -313,8 +323,8 @@ export function createApp(deps = {}) {
       const [workspace, settings] = await Promise.all([api.workspace(), api.settings()]);
       cachedBudget = controller.budget(workspace?.governorState ?? null, { settings, workspaceKey: api.workspaceId });
     } catch { cachedBudget = null; }
-    renderSessionPill(overview);
-    renderTelemetry();
+    renderHeaderRight(overview);
+    renderRunBanner();
   }
 
   /* --------------------------------------------------------- metronome */
@@ -351,9 +361,10 @@ export function createApp(deps = {}) {
 
   async function start() {
     const left = $('#shell-left', doc);
-    if (left) { clear(left).append(brand(), ensurePill()); renderSessionPill(null); }
+    if (left) clear(left).append(brand());
     renderTabs();
-    renderTelemetry();
+    renderHeaderRight(null);
+    renderRunBanner();
 
     // Watch the tabs for account switches and blocks so the guardrail pill and a
     // toast reflect what the content script sees, without a page refresh.

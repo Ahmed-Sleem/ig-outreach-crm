@@ -22,6 +22,9 @@
       <div class="shell__right" id="shell-right"></div>
     </header>
     <div class="shell__body">
+      <!-- The run banner is rendered into this slot only while a run is active;
+           when idle main.js clears it so it takes up no space. -->
+      <div id="run-banner"></div>
       <main class="view" id="view-root"></main>
     </div>
   </div>
