@@ -39,11 +39,11 @@ const SORTS = [
 // Five columns only, so the table fits a laptop without crowding; the score,
 // message state, sources and score breakdown all stay in the lead drawer.
 const COLUMNS = [
-  { key: 'username', label: 'Username', width: '1.4fr', cell: (row) => `@${row.username}` },
-  { key: 'fullName', label: 'Name', width: '1.4fr', cell: (row) => scannedText(row.fullName ?? '') },
+  { key: 'username', label: 'Username', width: '1.3fr', cell: (row) => `@${row.username}` },
+  { key: 'fullName', label: 'Name', width: '1.3fr', cell: (row) => scannedText(row.fullName ?? '') },
   { key: 'warmthTier', label: 'Warmth', width: '96px', cell: (row) => warmthBadge(row.warmthTier, row.priorityScore) },
-  { key: 'relState', label: 'Status', width: '168px', cell: (row) => stateBadge(row.relState) },
-  { key: 'followers', label: 'Followers', width: '88px', numeric: true, cell: (row) => fmtNum(row.followers ?? null, { compact: true }) },
+  { key: 'relState', label: 'Status', width: '180px', cell: (row) => stateBadge(row.relState) },
+  { key: 'followers', label: 'Followers', width: '104px', numeric: true, cell: (row) => fmtNum(row.followers ?? null, { compact: true }) },
 ];
 
 /**
