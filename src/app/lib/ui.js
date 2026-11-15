@@ -158,20 +158,36 @@ export function table(headers, rows, { numeric = [] } = {}) {
 export function toast(message, variant = '') {
   const root = $('#toasts');
   if (!root) return;
-  const node = el('div', { class: `toast ${variant ? `toast--${variant}` : ''}`.trim(), text: message });
+  if (variant === 'error') {
+    const closeBtn = el('button', {
+      class: 'toast__close', type: 'button', 'aria-label': 'Dismiss', text: '\u00d7',
+      onclick: () => node.remove(),
+    });
+    const node = el('div', { class: 'toast toast--error', role: 'alert' }, [
+      el('span', { class: 'toast__text', text: message }),
+      closeBtn,
+    ]);
+    root.append(node);
+    return;
+  }
+  const node = el('div', { class: `toast ${variant ? `toast--${variant}` : ''}`.trim(), role: 'status', text: message });
   root.append(node);
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     node.style.opacity = '0';
-    setTimeout(() => node.remove(), 300);
-  }, variant === 'error' ? 8000 : 4000);
+    const fade = setTimeout(() => node.remove(), 300);
+    if (typeof fade?.unref === 'function') fade.unref();
+  }, 5000);
+  if (typeof timer?.unref === 'function') timer.unref();
 }
 
 export function modal({ title, body, actions = [], onClose = null }) {
   const root = $('#modal-root');
+  const opener = document.activeElement ?? null;
   const close = () => {
     clear(root);
     document.removeEventListener('keydown', onKey);
     onClose?.();
+    if (opener && typeof opener.focus === 'function') opener.focus();
   };
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
@@ -271,6 +287,7 @@ export function slider(label, value, { min = 0, max = 100, step = 1, onChange = 
   return el('div', { class: 'slider', title: hint }, [
     el('div', { class: 'slider__head' }, [el('span', { class: 'slider__label', text: label }), readout]),
     input,
+    hint ? el('span', { class: 'field__help', text: hint }) : null,
   ]);
 }
 
@@ -376,10 +393,12 @@ export function tabs(items, activeId, { onSelect = null } = {}) {
  */
 export function drawer({ title, body, actions = [], onClose = null, width = null } = {}) {
   const root = $('#drawer-root') ?? document.body;
+  const opener = document.activeElement ?? null;
   const close = () => {
     clear(root);
     document.removeEventListener('keydown', onKey);
     onClose?.();
+    if (opener && typeof opener.focus === 'function') opener.focus();
   };
   const onKey = (event) => { if (event.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);

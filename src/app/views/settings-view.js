@@ -48,9 +48,9 @@ export function createSettingsView(ctx = {}) {
   const root = el('div', { class: 'col' });
   const clampNote = el('div');
   const presetRow = el('div', { class: 'row row--wrap' });
-  const limitsCard = card('Action limits', el('div'), { hint: 'capped at the governor ceiling' });
-  const scheduleCard = card('Active window', el('div'));
-  const weightsCard = card('Ranking weights', el('div'), { hint: 'how a lead earns priority' });
+  const limitsCard = card('Daily limits', el('div'), { hint: 'capped at the governor ceiling' });
+  const scheduleCard = card('Timing', el('div'), { hint: 'when outreach is allowed to run' });
+  const weightsCard = card('Ranking', el('div'), { hint: 'how a lead earns priority' });
   const actions = el('div', { class: 'row row--end mt-4' });
 
   function snapshot(settings) { return JSON.stringify(settings.limits) + JSON.stringify(settings.schedule) + JSON.stringify(settings.rankingWeights) + settings.trustPreset; }
@@ -122,10 +122,12 @@ export function createSettingsView(ctx = {}) {
     const body = el('div', { class: 'grid grid--2' }, [
       field('Active from (local)', {
         type: 'time', value: draft.schedule.activeStartLocal,
+        hint: 'Earliest local time outreach may start each day.',
         onInput: (value) => patchSchedule('activeStartLocal', value),
       }),
       field('Active until (local)', {
         type: 'time', value: draft.schedule.activeEndLocal,
+        hint: 'Latest local time outreach may run each day.',
         onInput: (value) => patchSchedule('activeEndLocal', value),
       }),
       slider('Daily drift', Number(draft.schedule.dailyDriftMinutes ?? 20), {

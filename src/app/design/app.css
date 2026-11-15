@@ -152,8 +152,8 @@ button { font-family: inherit; }
 /* ---------- Primitives ---------- */
 
 .card {
-  background: var(--c-surface); border: 1px solid var(--c-border);
-  border-radius: var(--r-lg); padding: var(--sp-4); margin-bottom: var(--sp-4);
+  background: var(--c-bg-raised); border: 1px solid var(--c-border);
+  border-radius: var(--r-lg); padding: 20px; margin-bottom: var(--sp-4);
 }
 .card__head { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-3); }
 .card__title { font-size: var(--fs-md); font-weight: var(--fw-semi); }
@@ -172,8 +172,9 @@ button { font-family: inherit; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  min-height: 40px;
   padding: var(--sp-2) var(--sp-4); border-radius: var(--r-md);
-  border: 1px solid var(--c-border-strong); background: var(--c-surface);
+  border: 1px solid var(--c-border-strong); background: var(--c-bg-raised);
   color: var(--c-text); font-size: var(--fs-base);
   cursor: pointer; transition: background var(--t-fast), border-color var(--t-fast);
 }
@@ -187,7 +188,7 @@ button { font-family: inherit; }
 /* Filled red is reserved for the confirm step of a destructive action. */
 .btn--danger-solid { background: var(--c-danger); border-color: var(--c-danger); color: var(--c-text-invert); font-weight: var(--fw-medium); }
 .btn--danger-solid:hover:not(:disabled) { background: var(--c-danger); border-color: var(--c-danger); filter: brightness(1.1); }
-.btn--sm { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
+.btn--sm { min-height: 36px; padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .btn--ghost { border-color: transparent; background: transparent; }
 .btn--ghost:hover:not(:disabled) { background: var(--c-surface-hover); }
 
@@ -201,7 +202,7 @@ button { font-family: inherit; }
 .icon-btn:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; }
 
 .input, .select, .textarea, .input--area {
-  width: 100%; padding: var(--sp-2) var(--sp-3);
+  width: 100%; min-height: 40px; padding: var(--sp-2) var(--sp-3);
   background: var(--c-bg-inset); border: 1px solid var(--c-border);
   border-radius: var(--r-md); color: var(--c-text);
   font-family: inherit; font-size: var(--fs-base);
@@ -311,13 +312,14 @@ button { font-family: inherit; }
    scroll viewport, which a real table cannot do without losing its column
    alignment. The head is a sibling grid with the same template so columns line up. */
 
-.vtable { display: flex; flex-direction: column; min-width: 0; }
+.vtable { display: flex; flex-direction: column; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .vtable__head, .vtable__row {
   display: grid; align-items: center;
   gap: 0;
 }
 .vtable__head {
   position: sticky; top: 0; z-index: 2;
+  min-width: 560px;
   background: var(--c-bg-raised);
   border-bottom: 1px solid var(--c-border-strong);
   font-size: var(--fs-xs); color: var(--c-text-dim);
@@ -325,6 +327,7 @@ button { font-family: inherit; }
 }
 .vtable__viewport {
   position: relative; overflow-y: auto; overflow-x: hidden;
+  min-width: 560px;
   max-height: var(--table-max-h);
   background: var(--c-surface);
   border: 1px solid var(--c-border); border-top: none;
@@ -389,11 +392,20 @@ button { font-family: inherit; }
 
 .toasts { position: fixed; bottom: var(--sp-5); right: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); z-index: 200; }
 .toast {
+  display: flex; align-items: center; gap: var(--sp-3);
   background: var(--c-bg-raised); border: 1px solid var(--c-border-strong);
   border-left: 3px solid var(--c-primary); border-radius: var(--r-md);
   padding: var(--sp-3) var(--sp-4); box-shadow: var(--shadow-md);
   font-size: var(--fs-sm); max-width: 420px; transition: opacity var(--t-base);
 }
+.toast__text { flex: 1; min-width: 0; }
+.toast__close {
+  background: none; border: none; color: var(--c-text-dim);
+  cursor: pointer; font-size: var(--fs-md); line-height: 1;
+  padding: 2px var(--sp-1); border-radius: var(--r-sm); flex-shrink: 0;
+}
+.toast__close:hover { background: var(--c-surface-hover); color: var(--c-text); }
+.toast__close:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; }
 .toast--error { border-left-color: var(--c-danger); }
 .toast--success { border-left-color: var(--c-success); }
 
@@ -423,14 +435,13 @@ button { font-family: inherit; }
 .badge--dm_failed { background: var(--dm-failed); color: var(--c-text-invert); }
 
 .badge--tier { border-color: transparent; font-weight: var(--fw-semi); text-transform: capitalize; }
-.badge--tier-hot { background: var(--tier-hot); color: var(--c-text-invert); }
-.badge--tier-warm { background: var(--tier-warm); color: var(--c-text-invert); }
-.badge--tier-lukewarm { background: var(--tier-lukewarm); color: var(--c-text); }
-.badge--tier-cold { background: var(--tier-cold); color: var(--c-text); }
+.badge--tier-hot { background: var(--c-danger-fade); color: var(--tier-hot); }
+.badge--tier-warm { background: var(--c-warning-fade); color: var(--tier-warm); }
+.badge--tier-lukewarm { background: var(--c-info-fade); color: var(--tier-lukewarm); }
+.badge--tier-cold { background: var(--c-bg-inset); color: var(--c-text-dim); }
 
-/* ---------- Outreach layout: group rail + workspace ---------- */
+/* ---------- Outreach layout: static rail styles retained for helpers ---------- */
 
-.outreach { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
 /* No hard-coded sticky offset: a header that grows at narrow widths used to leave
    this rail pinned at 56px, sliding underneath it. Static flow cannot overlap. */
 .rail { position: static; display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -518,9 +529,13 @@ button { font-family: inherit; }
   .shell__right { justify-content: flex-end; min-width: 0; }
   .session-pill__text { display: none; }
   .telemetry { overflow-x: auto; }
-  .outreach { grid-template-columns: minmax(0, 1fr); }
   .rail { flex-direction: row; flex-wrap: wrap; }
   .studio { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 699px) {
+  .toasts { left: var(--sp-4); right: var(--sp-4); bottom: var(--sp-4); align-items: center; }
+  .toast { max-width: 100%; }
 }
 
 @media (max-width: 560px) {
@@ -528,6 +543,12 @@ button { font-family: inherit; }
   .view { padding: var(--sp-3); }
   .table th, .table td { padding: var(--sp-2); }
   .brand__sub { display: none; }
+}
+
+@media (max-width: 480px) {
+  .shell__bar { padding: var(--sp-2); gap: var(--sp-2); }
+  .brand__title { display: none; }
+  .tab { padding: var(--sp-1) var(--sp-3); }
 }
 
 @media (prefers-reduced-motion: reduce) {

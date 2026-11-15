@@ -116,10 +116,16 @@ export function virtualTable(mount, options = {}) {
 
   function renderCell(column, row, index) {
     const value = typeof column.cell === 'function' ? column.cell(row, index) : row?.[column.key];
+    const node = isNode(value);
+    const textValue = node ? String(value.textContent ?? '') : String(value ?? '—');
+    const title = node
+      ? (value.getAttribute?.('title') ? null : (textValue || null))
+      : textValue;
     return el('div', {
       class: `vtable__cell ${column.numeric ? 'vtable__cell--num' : ''}`.trim(),
       role: 'gridcell',
-    }, [isNode(value) ? value : String(value ?? '—')]);
+      title,
+    }, [node ? value : textValue]);
   }
 
   /** A DOM node, in a browser or in the shim: anything with a nodeType. */

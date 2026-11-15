@@ -276,6 +276,27 @@ describe('overlays', () => {
     assert.ok(node.classList.contains('toast--success'));
   });
 
+  test('error toast stays until its close button is clicked', () => {
+    toast('Could not reach Instagram.', 'error');
+    const node = $('#toasts').querySelector('.toast--error');
+    assert.ok(node, 'error toast rendered');
+    assert.equal(node.querySelector('.toast__text').textContent, 'Could not reach Instagram.');
+    const closeBtn = node.querySelector('.toast__close');
+    assert.ok(closeBtn, 'error toast has a close button');
+    fire(closeBtn, 'click');
+    assert.equal($('#toasts').querySelector('.toast--error'), null, 'clicking close dismisses the error toast');
+  });
+
+  test('drawer returns focus to the trigger when closed', () => {
+    let focused = false;
+    const trigger = el('button', { text: 'Open' });
+    trigger.focus = () => { focused = true; };
+    doc.activeElement = trigger;
+    drawer({ title: '@sara', body: el('p') });
+    fire($('#drawer-root').querySelector('.icon-btn'), 'click');
+    assert.equal(focused, true, 'closing the drawer returns focus to its opener');
+  });
+
   test('modal renders into #modal-root and an action closes it', () => {
     let closed = false;
     modal({ title: 'Confirm', body: el('p', { text: 'body' }), actions: [{ label: 'OK', onClick: () => { closed = true; } }], onClose: () => {} });

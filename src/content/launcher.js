@@ -425,15 +425,16 @@ export function createLauncher(deps = {}) {
     return true;
   }
 
-  function actionButton(action) {
+  function actionButton(action, index = 0) {
+    const isPrimary = !action.emergency && index === 0 && action.tab === 'collector' && action.id !== 'open-dashboard';
     const button = make(document, 'button', {
       display: 'block',
       width: '100%',
       padding: action.emergency ? '9px 12px' : '8px 10px',
       margin: '0 0 6px 0',
-      background: action.emergency ? PALETTE.warn : PALETTE.surface,
-      color: action.emergency ? PALETTE.accentText : PALETTE.ink,
-      border: `1px solid ${action.emergency ? PALETTE.warn : PALETTE.border}`,
+      background: action.emergency ? PALETTE.warn : (isPrimary ? PALETTE.accent : PALETTE.surface),
+      color: (action.emergency || isPrimary) ? PALETTE.accentText : PALETTE.ink,
+      border: `1px solid ${action.emergency ? PALETTE.warn : (isPrimary ? PALETTE.accent : PALETTE.border)}`,
       borderRadius: '10px',
       fontSize: '12.5px',
       fontWeight: '600',
@@ -450,7 +451,8 @@ export function createLauncher(deps = {}) {
         display: 'block',
         fontWeight: '400',
         fontSize: '11px',
-        color: action.emergency ? PALETTE.accentText : PALETTE.muted,
+        color: (action.emergency || isPrimary) ? PALETTE.accentText : PALETTE.muted,
+        opacity: isPrimary ? '0.9' : '1',
         marginTop: '2px',
       }, action.hint);
       button.append(hint);
@@ -461,7 +463,7 @@ export function createLauncher(deps = {}) {
 
   function renderActions() {
     if (!ui) return;
-    ui.actions.replaceChildren(...quickActionsFor(context()).map(actionButton));
+    ui.actions.replaceChildren(...quickActionsFor(context()).map((action, index) => actionButton(action, index)));
   }
 
   function renderManaged() {
@@ -505,14 +507,10 @@ export function createLauncher(deps = {}) {
       // CSS, not to undo our own.
       all: 'initial',
       position: 'fixed',
-      // Placement is a collision problem, not a taste problem: Instagram's own
-      // floating controls (new post, back to top, the mobile tab bar) live in
-      // the bottom-right corner. The right edge at mid-height avoids the
-      // header, the bottom bar and every corner FAB; the safe-area insets keep
-      // the pill off notches and the home indicator.
+      // Bottom-right corner with a 16px margin and safe-area insets so the compact
+      // launcher stays out of Instagram's content and navigation bars.
       right: 'calc(16px + env(safe-area-inset-right, 0px))',
-      top: '50%',
-      transform: 'translateY(-50%)',
+      bottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
       zIndex: '2147483000',
     });
 
@@ -521,13 +519,14 @@ export function createLauncher(deps = {}) {
     const pill = make(document, 'button', {
       display: 'flex',
       alignItems: 'center',
-      gap: '8px',
-      padding: '10px 14px',
+      gap: '6px',
+      padding: '8px 12px',
+      minHeight: '38px',
       background: PALETTE.surface,
       color: PALETTE.ink,
       border: `1px solid ${PALETTE.border}`,
       borderRadius: '999px',
-      boxShadow: '0 4px 16px rgba(15, 17, 21, 0.16)',
+      boxShadow: '0 4px 16px rgba(17, 24, 39, 0.12)',
       cursor: 'pointer',
       fontFamily: FONT,
       fontSize: '13px',
@@ -554,8 +553,8 @@ export function createLauncher(deps = {}) {
       color: PALETTE.ink,
       background: PALETTE.surface,
       border: `1px solid ${PALETTE.border}`,
-      borderRadius: '14px',
-      boxShadow: '0 6px 24px rgba(15, 17, 21, 0.18)',
+      borderRadius: '12px',
+      boxShadow: '0 12px 32px rgba(17, 24, 39, 0.12)',
       padding: '12px',
       width: '280px',
       maxWidth: 'calc(100vw - 32px)',
