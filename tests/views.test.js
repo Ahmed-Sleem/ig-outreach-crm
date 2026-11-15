@@ -281,7 +281,7 @@ describe('the views', () => {
 
     assert.ok(view.plan, 'a dry run produced a plan');
     assert.ok(view.plan.counts.ready >= 1, 'the fresh leads are queued');
-    assert.ok(container.querySelector('.rail'), 'the group rail renders');
+    assert.ok(container.querySelector('.bucket-bar'), 'the bucket selector renders');
     assert.match(container.textContent, /Ready/);
   });
 

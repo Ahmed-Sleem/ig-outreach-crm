@@ -1,13 +1,14 @@
 /**
- * Tab 2 — Outreach Autopilot & Cleaner.
+ * Tab 2 — Outreach: follow, message and clean up.
  *
- * The control room. A group rail on the left picks which people a run touches;
- * the autopilot panel on the right plans a run (a dry run that costs nothing and
- * touches no tab), shows the governor's budget and gate in plain words, then
- * starts, streams and stops the real thing. Below it the message studio edits the
- * template pool and lints it against the same rules the sender enforces, so a
- * message that would be refused at send time is refused here, while it is still
- * being written.
+ * The control room, one column top to bottom. A bucket selector across the top
+ * picks which people a run touches and a small stat row summarises the funnel;
+ * the run header plans a run (a dry run that costs nothing and touches no tab),
+ * shows the governor's budget and gate in plain words, then starts, streams and
+ * stops the real thing. Below it the message studio edits the template pool and
+ * lints it against the same rules the sender enforces, so a message that would be
+ * refused at send time is refused here, while it is still being written. Pool
+ * health and the template list sit in a collapsed section at the bottom.
  *
  * The runner does the acting; this view only decides WHAT to ask for (mode,
  * bucket, policy) and renders what the runner reports. It never touches a tab or
@@ -54,14 +55,22 @@ export function createOutreachView(ctx = {}) {
   const say = ctx.toast ?? toast;
 
   const root = el('div', { class: 'outreach' });
-  const rail = el('nav', { class: 'rail' });
-  const workspace = el('div', { class: 'col' });
-  const autopilotCard = card('Autopilot', el('div'));
+  const bucketBar = el('nav', { class: 'bucket-bar' });
+  const funnelRow = el('div', { class: 'stat-row' });
+  const autopilotCard = card('Run', el('div'));
   const budgetRow = el('div', { class: 'grid grid--4' });
   const gateNote = el('div');
+  // The header carries the quota meters and the Start/Stop controls together.
+  const headerWrap = el('div', { class: 'outreach__header' }, [autopilotCard, budgetRow, gateNote]);
   const queueCard = card('Funnel queue', el('div'), { hint: 'a dry run costs nothing' });
   const logCard = card('Run log', el('div', { class: 'runlog' }));
   const studioCard = card('Message studio', el('div'));
+  // Pool health and the template list are reference material: a collapsed section.
+  const poolBody = el('div', { class: 'col' });
+  const poolDetails = el('details', { class: 'details--section' }, [
+    el('summary', { text: 'Pool health & templates' }),
+    poolBody,
+  ]);
 
   let groups = [];
   let leads = [];
@@ -104,7 +113,7 @@ export function createOutreachView(ctx = {}) {
 
   function isRunning() { return running || RUNNING_PHASES.has(controller.state.phase); }
 
-  /* ------------------------------------------------------------------- rail */
+  /* ------------------------------------------------------- buckets & funnel */
 
   function funnelCounts() {
     const counts = { untouched: 0, queued: 0, requested: 0, following: 0, mutual: 0, replied: 0, messaged: 0 };
@@ -122,28 +131,40 @@ export function createOutreachView(ctx = {}) {
     return counts;
   }
 
-  function renderRail() {
-    clear(rail);
-    rail.append(el('div', { class: 'rail__label', text: 'Buckets' }));
-    const allItem = el('button', {
-      class: `rail__item ${selectedGroupId === null ? 'rail__item--on' : ''}`, type: 'button',
-      onclick: () => { selectedGroupId = null; renderRail(); void refreshPlan(); },
-    }, [el('span', { text: 'All leads' }), el('span', { class: 'rail__count', text: String(leads.length) })]);
-    rail.append(allItem);
+  const FUNNEL_LABELS = [['untouched', 'Untouched'], ['queued', 'Queued'], ['requested', 'Awaiting accept'], ['following', 'Following'], ['mutual', 'Mutual'], ['messaged', 'Messaged'], ['replied', 'Replied']];
+
+  function renderSelectors() { renderBuckets(); renderFunnel(); }
+
+  // The bucket selector is a horizontal row of chips above the content; it used to
+  // be a left rail. Choosing one narrows the queue to that bucket.
+  function renderBuckets() {
+    clear(bucketBar);
+    bucketBar.append(el('span', { class: 'bucket-bar__label', text: 'Bucket' }));
+    const chips = el('div', { class: 'chips' });
+    chips.append(bucketChip('All leads', leads.length, selectedGroupId === null, () => { selectedGroupId = null; renderSelectors(); void refreshPlan(); }));
     for (const group of groups) {
       const count = leads.filter((lead) => (lead.groupIds ?? []).includes(group.groupId)).length;
-      rail.append(el('button', {
-        class: `rail__item ${selectedGroupId === group.groupId ? 'rail__item--on' : ''}`, type: 'button',
-        onclick: () => { selectedGroupId = group.groupId; renderRail(); void refreshPlan(); },
-      }, [el('span', { class: 'truncate', text: group.name }), el('span', { class: 'rail__count', text: String(count) })]));
+      chips.append(bucketChip(group.name, count, selectedGroupId === group.groupId, () => { selectedGroupId = group.groupId; renderSelectors(); void refreshPlan(); }));
     }
-    rail.append(btn('New bucket', { variant: 'sm ghost', onClick: () => newBucket() }));
+    bucketBar.append(chips);
+    bucketBar.append(btn('New bucket', { variant: 'sm ghost', onClick: () => newBucket() }));
+  }
 
+  function bucketChip(label, count, on, onClick) {
+    return el('button', {
+      class: `chip ${on ? 'chip--on' : ''}`.trim(), type: 'button',
+      'aria-pressed': on ? 'true' : 'false', onclick: onClick,
+    }, [el('span', { text: label }), el('span', { class: 'chip__count', text: String(count) })]);
+  }
+
+  // Funnel counts as one small stat row (they were stacked down the left rail).
+  function renderFunnel() {
+    clear(funnelRow);
     const counts = funnelCounts();
-    rail.append(el('div', { class: 'rail__label mt-4', text: 'Funnel' }));
-    for (const [key, label] of [['untouched', 'Untouched'], ['queued', 'Queued'], ['requested', 'Awaiting accept'], ['following', 'Following'], ['mutual', 'Mutual'], ['messaged', 'Messaged'], ['replied', 'Replied']]) {
-      rail.append(el('div', { class: 'rail__item', style: { cursor: 'default' } }, [
-        el('span', { text: label }), el('span', { class: 'rail__count', text: String(counts[key] ?? 0) }),
+    for (const [key, label] of FUNNEL_LABELS) {
+      funnelRow.append(el('div', { class: 'stat-row__item' }, [
+        el('span', { class: 'stat-row__label', text: label }),
+        el('span', { class: 'stat-row__value', text: String(counts[key] ?? 0) }),
       ]));
     }
   }
@@ -514,14 +535,16 @@ export function createOutreachView(ctx = {}) {
   }
 
   function renderStudio() {
-    const body = el('div', { class: 'studio' }, [
-      renderEditor(),
-      el('div', { class: 'col' }, [
-        card('Pool health', renderPoolHealth()),
-        card('Templates', renderTemplateList(), { hint: `${templates.length}` }),
-      ]),
-    ]);
-    replaceCard(studioCard, body);
+    replaceCard(studioCard, renderEditor());
+    renderPoolSection();
+  }
+
+  function renderPoolSection() {
+    clear(poolBody);
+    poolBody.append(
+      card('Pool health', renderPoolHealth()),
+      card('Templates', renderTemplateList(), { hint: `${templates.length}` }),
+    );
   }
 
   /* ------------------------------------------------------------------ shell */
@@ -545,7 +568,7 @@ export function createOutreachView(ctx = {}) {
       leads = []; groups = [];
     }
     await loadTemplates();
-    renderRail();
+    renderSelectors();
     renderControls();
     renderStudio();
     renderLog();
@@ -554,9 +577,10 @@ export function createOutreachView(ctx = {}) {
 
   function mount(container) {
     clear(root);
-    clear(workspace);
-    workspace.append(autopilotCard, budgetRow, gateNote, queueCard, logCard, studioCard);
-    root.append(rail, workspace);
+    // One column, top to bottom: bucket selector, funnel counts, the run header
+    // (quota meters + Start/Stop), the queue, the message studio, the run log, and
+    // the collapsed pool-health/templates section.
+    root.append(bucketBar, funnelRow, headerWrap, queueCard, studioCard, logCard, poolDetails);
     container.append(root);
     if (ctx.onRunEvent) unsubscribe.push(ctx.onRunEvent(onRunEvent));
     if (ctx.onSync) unsubscribe.push(ctx.onSync((message) => {
