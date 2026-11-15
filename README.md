@@ -2,7 +2,7 @@
 
 **A local Chrome extension that collects warm Instagram leads from profiles you already have open, and runs a human-paced follow, accept-detect and message funnel from your own logged-in session.**
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-128%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-766%20passing-brightgreen)
 
 ## Why
 
@@ -37,6 +37,20 @@ The extension is being built engine-first: every rule is written as a pure, unit
 | `storage/settings.js` | One settings key in `chrome.storage.local`, clamped against the hard ceilings on every read and write, with credential redaction on export. |
 | `storage/sync.js` | `BroadcastChannel` bus so two open tabs never disagree about a lead. |
 
+## Screenshots
+
+Dashboard captures are **pending**. This environment cannot drive Chrome with the
+extension loaded (and the in-page pill shot needs a logged-in Instagram session),
+so no images were fabricated. The exact list of the eight shots to produce — and
+how to produce them — is in [`docs/screenshots/TODO.md`](docs/screenshots/TODO.md);
+the fictional demo-data seed for them is in [`tools/seed-demo.md`](tools/seed-demo.md).
+
+<!--
+  Owner-captured screenshot placeholder (add once captured on a logged-in test session,
+  with any real account names cropped or blurred):
+  In-page pill on an Instagram profile -> docs/screenshots/08-in-page-pill.png
+-->
+
 ## Requirements
 
 - Node.js 20 or newer, for the tests, the verification gate, and the one-command build. The extension itself has zero runtime dependencies.
@@ -49,13 +63,13 @@ from?* — then shows a single field that adapts to the answer:
 
 | Collect from | Paste | Example |
 |---|---|---|
-| An account | Their username | `linen.studio` |
-| A post | Its link or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
-| A hashtag | The tag, with or without `#` | `#homedecor` or `homedecor` |
-| What I have open | Nothing — it reads the page you have open | — |
+| An account *(Followers, Following, Recent likers)* | Username, `@handle`, or profile link | `nike`, `@nike`, or `https://www.instagram.com/nike/` |
+| A post *(Likers, Commenters)* | Post or reel link, or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
+| A hashtag | Tag with or without `#`, or hashtag link | `#linen`, `linen`, or `https://www.instagram.com/explore/tags/linen/` |
+| What I have open *(Open followers list, Saved posts, This page)* | Nothing — it reads the page you have open | — |
 
 The field checks what you type as you type it and confirms it (for example
-`Account: @linen.studio`); **Collect** stays disabled until the input is valid, and
+`✓ Account: @linen.studio`); **Collect** stays disabled until the input is valid, and
 pressing Enter collects. If something goes wrong you get one plain sentence — and
 the raw technical detail is tucked into a collapsed **Details** line, not thrown at
 you.
@@ -71,22 +85,14 @@ you.
 4. Pick a bucket under **Save into** and click **Save**; they join your library.
 
 You can also do it from the dashboard itself: choose **An account**, paste a
-username, and click **Collect**.
-
-## Screenshots
-
-Dashboard captures are **pending**. This environment cannot drive Chrome with the
-extension loaded (and the in-page pill shot needs a logged-in Instagram session),
-so no images were fabricated. The exact list of the eight shots to produce — and
-how to produce them — is in [`docs/screenshots/TODO.md`](docs/screenshots/TODO.md);
-the fictional demo-data seed for them is in [`tools/seed-demo.md`](tools/seed-demo.md).
+username, `@handle`, or profile link, and click **Collect**.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
 cd ig-outreach-crm
-npm test                       # 760 tests, no dependencies
+npm test                       # 766 tests, no dependencies
 npm run verify                 # 24 checks: shape, hygiene, code invariants, links, tests
 node scripts/build.mjs         # writes the loadable folder to build/extension/
 node scripts/check-package.mjs build/extension   # verifies it the way Chrome would load it
