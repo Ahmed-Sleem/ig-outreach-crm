@@ -123,7 +123,7 @@ describe('the dashboard shell (main.js createApp)', () => {
     const center = doc.getElementById('shell-center');
     const tabs = [...center.querySelectorAll('.tab')];
     assert.equal(tabs.length, 2, 'two tabs are rendered');
-    assert.match(tabs[0].textContent, /People & CRM/);
+    assert.match(tabs[0].textContent, /Collect/);
     assert.match(tabs[1].textContent, /Outreach/);
     assert.ok(tabs[0].classList.contains('tab--on'), 'the collector tab is active on boot');
 

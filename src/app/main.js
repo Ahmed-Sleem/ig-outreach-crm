@@ -39,12 +39,44 @@ const PHASE_LABEL = {
 };
 
 /**
+ * Parse the dashboard deep link the in-page pill opens: which tab to land on and,
+ * for a collect action, what to collect, from which page, and whether to start at
+ * once. `tab=collect` is accepted as an alias for the real id `collector`.
+ */
+function readLaunchParams(deps = {}) {
+  let params;
+  try {
+    params = new URLSearchParams(deps.location?.search ?? globalThis.location?.search ?? '');
+  } catch {
+    params = new URLSearchParams();
+  }
+  const rawTab = params.get('tab');
+  const tab = rawTab === 'collect' ? 'collector' : rawTab;
+  const source = params.get('source');
+  const username = params.get('username');
+  const ref = params.get('ref');
+  const tag = params.get('tag');
+  const from = params.get('from');
+  const auto = params.get('auto');
+  const hasRequest = Boolean(source || username || ref || tag || auto);
+  return {
+    tab,
+    initialRequest: hasRequest ? { source, username, shortcode: ref, tag, from, auto } : null,
+  };
+}
+
+/**
  * @param {{chromeApi?: object, document?: Document}} deps
  */
 export function createApp(deps = {}) {
   const doc = deps.document ?? (typeof document !== 'undefined' ? document : null);
   const chromeApi = deps.chromeApi ?? (typeof chrome !== 'undefined' ? chrome : null);
   if (!doc) throw new Error('createApp needs a document');
+
+  // Read the pill's deep link once, before any view is built, so the collector can
+  // pre-fill its source and target and (with auto='1') start immediately. start()
+  // clears the query string afterwards so a refresh never launches a second run.
+  const launch = readLaunchParams(deps);
 
   const api = deps.api ?? createApiClient({ chromeApi });
   const runHandlers = new Set();
@@ -66,6 +98,11 @@ export function createApp(deps = {}) {
     controller,
     bus,
     toast,
+    // What the in-page pill asked for (null on a plain dashboard open). The
+    // collector reads this once to pre-fill and, with auto='1', start.
+    initialRequest: launch.initialRequest,
+    // The live governor budget, so a screen can render the quota meters itself.
+    budget: () => cachedBudget,
     onRunEvent: (handler) => { runHandlers.add(handler); return () => runHandlers.delete(handler); },
     onSync: (handler) => { syncHandlers.add(handler); return () => syncHandlers.delete(handler); },
     onChanged: () => { void refreshShell(); },
@@ -81,7 +118,7 @@ export function createApp(deps = {}) {
   };
   const badges = { collector: null, outreach: null };
 
-  let activeTab = 'collector';
+  let activeTab = launch.tab && views[launch.tab] ? launch.tab : 'collector';
   let nextActionAt = null;
   let cachedBudget = null;
   let tickCount = 0;
@@ -140,8 +177,8 @@ export function createApp(deps = {}) {
     if (!host) return;
     clear(host);
     const items = [
-      { id: 'collector', label: 'Tab 1 · People & CRM', count: badges.collector?.total ?? undefined },
-      { id: 'outreach', label: 'Tab 2 · Outreach', count: badges.outreach?.ready ?? undefined },
+      { id: 'collector', label: 'Collect', count: badges.collector?.total ?? undefined },
+      { id: 'outreach', label: 'Outreach', count: badges.outreach?.ready ?? undefined },
     ];
     const bar = el('div', { class: 'tabs', role: 'tablist' });
     for (const item of items) {
@@ -332,19 +369,21 @@ export function createApp(deps = {}) {
       void refreshShell();
     });
 
-    // The toolbar popup can deep-link straight to a tab ("Go straight to
-    // Outreach" opens ?tab=outreach). Honour it before the first mount so the
-    // owner lands where he asked rather than watching a tab switch after load.
+    // The tab deep link (?tab=outreach from the popup, or the pill's
+    // ?tab=collector&auto=1) was already read into activeTab and ctx.initialRequest
+    // at construction. Clear the query string now so a refresh neither re-runs an
+    // auto-started collection nor re-deep-links.
     try {
-      const requested = new URLSearchParams(globalThis.location?.search ?? '').get('tab');
-      if (requested && views[requested]) activeTab = requested;
-    } catch { /* a malformed query string must not stop the dashboard */ }
+      const loc = globalThis.location;
+      if (globalThis.history?.replaceState && loc && (loc.search || loc.hash)) {
+        globalThis.history.replaceState(null, '', loc.pathname);
+      }
+    } catch { /* a browser without replaceState simply keeps the query */ }
 
     startScheduler();
     await refreshShell();
-    // Not navigate(): activeTab is already the target (possibly changed by the
-    // deep link above), and navigate() no-ops on the current tab. Render the
-    // tab bar to reflect it and mount the view directly.
+    // Not navigate(): activeTab is already the target, and navigate() no-ops on the
+    // current tab. Render the tab bar to reflect it and mount the view directly.
     renderTabs();
     mountActive();
   }
