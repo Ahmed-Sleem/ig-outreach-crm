@@ -22,6 +22,7 @@ import {
   fetchFriendshipList,
   fetchLikers,
   fetchMediaIdForShortcode,
+  fetchProfileById,
   readProfileByUsername,
   lookupFollowship,
   normaliseProfile,
@@ -265,9 +266,9 @@ export async function resolveTarget(runtime, { username = null, userId = null, f
     else { reason = byName.reason; code = byName.code ?? null; }
   }
   if (!profile && userId) {
-    const byId = await runtime.deps.fetchProfileById
-      ? await runtime.deps.fetchProfileById(ctx, { userId, signal: runtime.signal })
-      : { ok: false, reason: 'no id lookup available' };
+    // Wired straight from the adapters, like the by-name reader above, so this
+    // fallback is live rather than a guarded no-op that always reports "unavailable".
+    const byId = await fetchProfileById(ctx, { userId, signal: runtime.signal });
     if (byId.ok) profile = byId.user;
     else reason = reason ?? byId.reason;
   }

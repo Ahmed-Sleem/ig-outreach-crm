@@ -887,4 +887,22 @@ describe('collect sources after the audit fixes', () => {
     assert.equal(result.value.sourceAccount, '#linen');
     assert.equal(calls.length, 0);
   });
+
+  test('resolveTarget falls back to fetchProfileById when userId is known and username read fails (F10)', async () => {
+    const { rt, calls } = runtime('explore', {}, [
+      [/web_profile_info/, { status: 404, body: { message: 'not found' } }],
+      [/users\/555\/info/, { body: { user: { pk: '555', username: 'comp_a', full_name: 'Comp A', follower_count: 100, following_count: 20 } } }],
+      [/friendships\/555\/followers/, { body: { users: [{ pk: '1', username: 'ali', full_name: 'Ali' }], next_max_id: null } }],
+    ]);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
+      source: CollectSource.FOLLOWERS,
+      targetUsername: 'comp_a',
+      targetUserId: '555',
+      workspaceId: '77',
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.value.leads.length, 1);
+    assert.equal(result.value.leads[0].username, 'ali');
+    assert.ok(calls.some((c) => /users\/555\/info/.test(c.url)), 'the by-id fallback must call users/{id}/info');
+  });
 });
