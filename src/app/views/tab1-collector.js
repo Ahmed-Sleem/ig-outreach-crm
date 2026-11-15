@@ -1,53 +1,32 @@
 /**
- * Tab 1 — People Collector & Ranked CRM.
+ * Tab 1 — Collect.
  *
- * Two surfaces in one tab. The launcher collects a source (the followers of a
- * competitor, the likers of a post, a hashtag grid) into a PREVIEW; nothing is
- * written to the library until the owner looks at it and presses Save into a
- * bucket. Below it, the permanent library renders as a ranked, virtualised table
- * — virtualised because a niche competitor's follower list is thousands of rows
- * and a DOM node per row would freeze the tab the first time he scrolls.
+ * Four separated sub-tabs keep every collection source clean and self-contained:
+ *   • From an account  (Followers · Following · Recent likers)
+ *   • From a post      (Likers · Commenters)
+ *   • From a hashtag   (Hashtag posts)
+ *   • From open tab    (Open list dialog · Saved posts · This page)
  *
- * Every scraped name and biography renders through scannedText(), never
- * innerHTML: a biography is attacker-controlled text and must display as
- * characters. Clicking a row opens the lead dossier drawer.
+ * Every collection runs visibly in the user's open Instagram tab at a human
+ * pace (real mouse paths, clicks, and scrolling — zero Instagram API calls).
+ * Results land in a Preview card first so nothing enters Your people until the
+ * owner picks a bucket (pre-selected to the ready Default bucket) and presses
+ * Save.
  */
 
 import {
-  btn, card, chipList, drawer, el, clear, field, note, scannedText,
-  stateBadge, table, toast, warmthBadge, fmtNum, relTime,
-  segmented, detailsLine, banner,
+  banner, btn, card, clear, detailsLine, el, field, note,
+  scannedText, segmented, table, toast, warmthBadge,
 } from '../lib/ui.js';
-import { virtualTable } from '../lib/virtual-list.js';
 import { CollectSource } from '../../content/main.js';
 import { RunPhase } from '../lib/runner.js';
-import { SOURCE_FIELDS, SOURCE_GROUPS, parseTarget, describeTarget } from '../lib/target.js';
-import { listEdgesForLead, upsertLead } from '../../storage/db.js';
+import { SOURCE_FIELDS, SOURCE_GROUPS, describeTarget, parseTarget } from '../lib/target.js';
+import { isDefaultBucket } from '../lib/api.js';
 
-// The nine collect sources, their four plain groups, and the field each one needs
-// all live in lib/target.js (SOURCE_GROUPS / SOURCE_FIELDS), so the form, the live
-// validation and the parser read one description and can never drift apart.
-
-const TIERS = ['hot', 'warm', 'lukewarm', 'cold'];
-const SORTS = [
-  { value: 'score', label: 'Priority score' },
-  { value: 'username', label: 'Username (A–Z)' },
-  { value: 'followers', label: 'Followers' },
-  { value: 'recent', label: 'Recently actioned' },
-];
-
-// Five columns only, so the table fits a laptop without crowding; the score,
-// message state, sources and score breakdown all stay in the lead drawer.
-const COLUMNS = [
-  { key: 'username', label: 'Username', width: '1.3fr', cell: (row) => `@${row.username}` },
-  { key: 'fullName', label: 'Name', width: '1.3fr', cell: (row) => scannedText(row.fullName ?? '') },
-  { key: 'warmthTier', label: 'Warmth', width: '96px', cell: (row) => warmthBadge(row.warmthTier, row.priorityScore) },
-  { key: 'relState', label: 'Status', width: '180px', cell: (row) => stateBadge(row.relState) },
-  { key: 'followers', label: 'Followers', width: '104px', numeric: true, cell: (row) => fmtNum(row.followers ?? null, { compact: true }) },
-];
+const NEW_BUCKET_VALUE = '__new__';
 
 /**
- * @param {{api: object, controller: object, toast?: Function, onRunEvent?: Function, onSync?: Function, onChanged?: Function}} ctx
+ * @param {{api: object, controller: object, toast?: Function, onRunEvent?: Function, onSync?: Function, onChanged?: Function, onOpenPeople?: Function, setBadge?: Function, initialRequest?: object}} ctx
  */
 export function createCollectorView(ctx = {}) {
   const api = ctx.api;
@@ -57,24 +36,17 @@ export function createCollectorView(ctx = {}) {
   const say = ctx.toast ?? toast;
 
   const root = el('div', { class: 'col' });
-  const launcherCard = card('Collect people', el('div'), { hint: 'nothing is saved until you press Save' });
+  const subtabsBar = el('nav', { class: 'subtabs', role: 'tablist', 'aria-label': 'Collection sources' });
+  const launcherCard = card('From an account', el('div'), { hint: 'nothing is saved until you press Save' });
   const previewCard = el('div');
-  const filterBar = el('div', { class: 'row row--wrap mb-2' });
-  const tableMount = el('div', { class: 'vtable' });
-  const libraryCard = card('Your people', [filterBar, tableMount], { hint: '' });
 
-  let allLeads = [];
-  let vtable = null;
-  let filters = { search: '', tiers: new Set(), bucket: 'all', sort: 'score' };
   let groups = [];
   let lastPreview = null;
+  let lastSavedBanner = null;
   const unsubscribe = [];
 
   /* ---------------------------------------------------------------- launcher */
 
-  // Collect-form state. The picker, the adaptive field and the parser all read the
-  // same descriptors from lib/target.js, so the form can never offer a source the
-  // parser cannot validate, and the field always matches the chosen source.
   let source = CollectSource.FOLLOWERS;
   let rawInput = '';
   let limit = 200;
@@ -85,21 +57,20 @@ export function createCollectorView(ctx = {}) {
   let initialApplied = false;
   let pendingFrom = null;
 
-  const stepSource = el('div', { class: 'col' });
+  const stepMode = el('div', { class: 'col' });
   const stepDetail = el('div', { class: 'col' });
   const statusLine = el('div', { class: 'status-line small dim', role: 'status', 'aria-live': 'polite' });
   const errorSlot = el('div', { class: 'col' });
   const bannerSlot = el('div');
 
-  // One plain sentence per failure code plus what to do next. The raw internal
-  // string is kept in a collapsed Details line, so nothing is lost for debugging.
   const HUMAN = {
     invalid_username: () => 'That does not look like an Instagram username. Use letters, numbers, . and _ only.',
     not_found: (name) => `Instagram could not find @${name}. Check the spelling, or the account may be private, removed or renamed.`,
     login_required: () => 'You are logged out of Instagram in this browser. Log in, reload the tab, then try again.',
     rate_limited: () => 'Instagram asked us to slow down. The run was paused. Wait a few minutes before trying again.',
-    no_numeric_id: (name) => `Could not get @${name}'s ID from Instagram. Open their profile in the Instagram tab, wait for it to load, then press Collect.`,
-    no_recent_posts: (name) => `@${name} has no readable recent posts (private account, or no posts).`,
+    no_numeric_id: (name) => `Could not open @${name} in Instagram. Open their profile in the Instagram tab, wait for it to load, then press Collect.`,
+    no_recent_posts: (name) => `@${name} has no visible recent posts (private account, or no posts yet).`,
+    private_account: (name) => `@${name} is a private account. Follow and get accepted before reading their lists.`,
     network: () => 'Could not reach Instagram. Check your connection.',
     no_tab: () => 'No Instagram tab is open. Open instagram.com in a tab and try again.',
   };
@@ -109,7 +80,6 @@ export function createCollectorView(ctx = {}) {
   }
 
   function humanFor(code, technical) {
-    // Safety refusals keep pacing.js's own wording verbatim; never soften them.
     if (code === 'blocked') return { message: technical ?? 'Instagram blocked an action.', safety: true };
     const make = HUMAN[code];
     if (make) return { message: make(targetName()), safety: false };
@@ -119,44 +89,52 @@ export function createCollectorView(ctx = {}) {
   function metaFor(src) { return SOURCE_FIELDS[src] ?? SOURCE_FIELDS.current_page; }
 
   function groupOfSource(src) {
-    const group = SOURCE_GROUPS.find((g) => g.options.some((o) => o.value === src));
-    return (group ?? SOURCE_GROUPS[0]).id;
+    return SOURCE_GROUPS.find((g) => g.options.some((o) => o.value === src)) ?? SOURCE_GROUPS[0];
   }
 
-  function renderSourcePicker() {
-    clear(stepSource);
-    const groupId = groupOfSource(source);
-    stepSource.append(el('div', { class: 'step__label', text: 'Step 1 \u2013 What do you want to collect from?' }));
-    const groupBar = el('div', { class: 'source-groups', role: 'group', 'aria-label': 'What to collect from' });
+  function renderSubtabs() {
+    clear(subtabsBar);
+    const activeGroup = groupOfSource(source);
     for (const group of SOURCE_GROUPS) {
-      const on = group.id === groupId;
-      groupBar.append(el('button', {
-        class: `source-group ${on ? 'source-group--on' : ''}`.trim(),
-        type: 'button', 'aria-pressed': on ? 'true' : 'false', text: group.label,
+      const on = group.id === activeGroup.id;
+      subtabsBar.append(el('button', {
+        class: `subtab ${on ? 'subtab--on' : ''}`.trim(),
+        role: 'tab',
+        type: 'button',
+        'aria-selected': on ? 'true' : 'false',
+        'data-collect-tab': group.id,
+        text: group.label,
         onclick: () => setSource(group.options[0].value),
       }));
     }
-    stepSource.append(groupBar);
-    const group = SOURCE_GROUPS.find((g) => g.id === groupId);
-    if (group && group.options.length > 1) {
+    const titleNode = launcherCard.querySelector('.card__title');
+    if (titleNode) titleNode.textContent = activeGroup.label;
+  }
+
+  function renderModePicker() {
+    clear(stepMode);
+    const group = groupOfSource(source);
+    if (group.options.length > 1) {
+      stepMode.append(el('div', { class: 'step__label', text: 'What to read' }));
       const options = group.options.map((o) => ({ id: o.value, label: o.label }));
-      stepSource.append(el('div', { class: 'mt-2' }, [segmented(options, source, { onSelect: (value) => setSource(value) })]));
+      stepMode.append(segmented(options, source, { onSelect: (value) => setSource(value) }));
     }
   }
 
   function setSource(next) {
     source = next;
-    renderSourcePicker();
+    renderSubtabs();
+    renderModePicker();
     renderDetail();
   }
 
   function renderDetail() {
     clear(stepDetail);
     const meta = metaFor(source);
-    stepDetail.append(el('div', { class: 'step__label', text: 'Step 2 \u2013 Details' }));
     if (meta.needsField) {
       const f = field(meta.label, {
-        value: rawInput, placeholder: meta.placeholder,
+        value: rawInput,
+        placeholder: meta.placeholder,
         onInput: (value) => { rawInput = value; scheduleValidate(); },
       });
       targetFieldNode = f;
@@ -168,8 +146,10 @@ export function createCollectorView(ctx = {}) {
       targetFieldNode = null;
       stepDetail.append(note(meta.helper, 'info'));
     }
-    stepDetail.append(field('How many', {
-      type: 'number', value: String(limit), hint: 'Between 1 and 5000.',
+    stepDetail.append(field('How many people', {
+      type: 'number',
+      value: String(limit),
+      hint: 'Between 1 and 5000. Runs visibly in your Instagram tab at a human pace.',
       onInput: (value) => { limit = Math.max(1, Math.min(5000, Number(value) || 200)); },
     }));
     validate(true);
@@ -219,9 +199,6 @@ export function createCollectorView(ctx = {}) {
     if (technical && technical !== message) errorSlot.append(detailsLine('Details', technical));
   }
 
-  // The pill sends the page it was clicked from; aim the collection at that exact
-  // tab, because opening the dashboard moves focus and "the active Instagram tab"
-  // is no longer the one the owner clicked.
   async function resolveTabId(from) {
     const query = globalThis.chrome?.tabs?.query;
     if (typeof query !== 'function') return { tabId: undefined };
@@ -239,6 +216,7 @@ export function createCollectorView(ctx = {}) {
   async function doCollect() {
     const meta = metaFor(source);
     clear(errorSlot);
+    lastSavedBanner = null;
     if (meta.needsField) {
       const parsed = parseTarget(source, rawInput);
       if (!parsed.ok) {
@@ -248,7 +226,7 @@ export function createCollectorView(ctx = {}) {
       }
       lastParse = parsed;
     }
-    statusLine.textContent = 'Opening the source and reading it at a human pace\u2026';
+    statusLine.textContent = 'Opening Instagram visibly and collecting at a human pace\u2026';
     let tabId;
     const from = pendingFrom;
     pendingFrom = null;
@@ -273,7 +251,7 @@ export function createCollectorView(ctx = {}) {
     });
     clear(bannerSlot);
     if (out.ok) {
-      statusLine.textContent = `Collected ${out.count}. Review the preview, then save it into a bucket.`;
+      statusLine.textContent = `Collected ${out.count}. Review the preview below, then save into a bucket.`;
       lastPreview = { runId: out.runId, result: out.result };
       renderPreview();
     } else {
@@ -287,24 +265,21 @@ export function createCollectorView(ctx = {}) {
   function renderLauncher() {
     collectBtn = btn('Collect', { variant: 'primary', busyLabel: 'Collecting\u2026', onClick: () => doCollect() });
     collectBtn.classList.add('btn--lg');
-    renderSourcePicker();
+    renderSubtabs();
+    renderModePicker();
     renderDetail();
     replaceCard(launcherCard, el('div', { class: 'col' }, [
       bannerSlot,
-      stepSource,
+      stepMode,
       stepDetail,
-      el('div', { class: 'step' }, [
-        el('div', { class: 'step__label', text: 'Step 3 \u2013 Collect' }),
-        el('div', { class: 'row' }, [collectBtn]),
-        statusLine,
-        errorSlot,
-      ]),
+      note('Runs visibly in your open Instagram tab with human cursor movement and scrolling — no Instagram API calls.', 'info'),
+      el('div', { class: 'row row--wrap' }, [collectBtn]),
+      statusLine,
+      errorSlot,
     ]));
     updateCollectEnabled();
   }
 
-  // The pill can open the dashboard with a source and target already chosen and
-  // auto='1'. Pre-fill the form, then start once - unless a run is already going.
   function applyInitialRequest() {
     const req = ctx.initialRequest;
     if (req && !initialApplied) {
@@ -334,157 +309,113 @@ export function createCollectorView(ctx = {}) {
     renderLauncher();
   }
 
-
   /* ----------------------------------------------------------------- preview */
+
+  function defaultGroupId() {
+    const def = groups.find((g) => isDefaultBucket(g, api.workspaceId));
+    return def?.groupId ?? groups[0]?.groupId ?? '';
+  }
 
   function renderPreview() {
     clear(previewCard);
-    if (!lastPreview) return;
+    if (!lastPreview) {
+      if (lastSavedBanner) previewCard.append(lastSavedBanner);
+      return;
+    }
     const result = lastPreview.result ?? {};
     const leads = Array.isArray(result.leads) ? result.leads : [];
     if (!leads.length) {
       previewCard.append(note(result.reason ?? 'That source returned nobody to preview.', 'warning'));
       return;
     }
-    let bucketName = '';
+
+    let selectedBucketId = defaultGroupId();
+    let newBucketName = '';
+
+    const bucketSelect = el('select', { class: 'select', 'aria-label': 'Save into bucket', style: { minWidth: '210px' } });
+    for (const group of groups) {
+      const label = isDefaultBucket(group, api.workspaceId) ? `${group.name} (ready)` : group.name;
+      bucketSelect.append(el('option', { value: group.groupId, text: label }));
+    }
+    bucketSelect.append(el('option', { value: NEW_BUCKET_VALUE, text: '+ Create new bucket…' }));
+    if (selectedBucketId) bucketSelect.value = selectedBucketId;
+
+    const newBucketWrap = el('div', { style: { display: selectedBucketId ? 'none' : 'block' } });
+    const newBucketField = field('New bucket name', {
+      value: '',
+      placeholder: 'Linen suppliers',
+      hint: 'Creates a new bucket tab in Your people.',
+      onInput: (value) => { newBucketName = value; },
+    });
+    newBucketWrap.append(newBucketField);
+
+    bucketSelect.addEventListener('change', () => {
+      selectedBucketId = bucketSelect.value;
+      newBucketWrap.style.display = selectedBucketId === NEW_BUCKET_VALUE ? 'block' : 'none';
+    });
+
     const rows = leads.slice(0, 50).map((entry) => {
       const lead = entry?.lead ?? entry;
       return [`@${lead.username}`, scannedText(lead.fullName ?? ''), warmthBadge(lead.warmthTier ?? 'cold', lead.priorityScore ?? null)];
     });
+
     previewCard.append(card(`Preview \u2014 ${leads.length} collected`, [
-      note('These people are not in your library yet. Save them into a bucket to keep them, or discard the collection.', 'info'),
+      note('These people are not in Your people yet. Choose a bucket (Default is ready) and press Save, or discard the collection.', 'info'),
       table(['Username', 'Name', 'Warmth'], rows),
       el('div', { class: 'row row--wrap mt-4' }, [
-        field('Save into', {
-          value: '',
-          placeholder: 'Linen suppliers',
-          hint: 'A bucket is a named list, like "Linen suppliers".',
-          onInput: (value) => { bucketName = value; },
-        }),
+        el('label', { class: 'field', style: { marginBottom: '0' } }, [
+          el('span', { class: 'field__label', text: 'Save into bucket' }),
+          bucketSelect,
+        ]),
+        newBucketWrap,
         btn('Save', {
-          variant: 'primary', busyLabel: 'Saving\u2026',
+          variant: 'primary',
+          busyLabel: 'Saving\u2026',
           onClick: async () => {
-            const saved = await controller.commit({ result, groupName: bucketName.trim() || null, runId: lastPreview.runId });
+            const creatingNew = selectedBucketId === NEW_BUCKET_VALUE;
+            if (creatingNew && !newBucketName.trim()) {
+              say('Enter a name for the new bucket.', 'error');
+              return;
+            }
+            const saved = await controller.commit({
+              result,
+              groupId: creatingNew ? null : (selectedBucketId || null),
+              groupName: creatingNew ? newBucketName.trim() : null,
+              runId: lastPreview.runId,
+            });
             if (saved.ok) {
-              say(`Saved ${saved.saved} new, updated ${saved.updated}.`, 'success');
+              const targetGroup = groups.find((g) => g.groupId === saved.groupId)?.name ?? (creatingNew ? newBucketName.trim() : 'Default');
+              say(`Saved ${saved.saved} new, updated ${saved.updated} in "${targetGroup}".`, 'success');
               lastPreview = null;
-              renderPreview();
+              lastSavedBanner = banner(`Saved ${saved.saved + saved.updated} people into "${targetGroup}".`, {
+                variant: 'info',
+                actions: ctx.onOpenPeople
+                  ? [btn('Open in Your people →', { variant: 'primary', onClick: () => ctx.onOpenPeople(saved.groupId) })]
+                  : [],
+              });
               await refresh();
+              renderPreview();
               ctx.onChanged?.();
             } else {
               say(saved.reason ?? 'Could not save the collection.', 'error');
             }
           },
         }),
-        btn('Discard', { variant: 'danger', busyLabel: '\u2026', onClick: async () => { await controller.discard({ runId: lastPreview.runId }); lastPreview = null; renderPreview(); say('Collection discarded.'); } }),
+        btn('Discard', {
+          variant: 'danger',
+          busyLabel: '\u2026',
+          onClick: async () => {
+            await controller.discard({ runId: lastPreview.runId });
+            lastPreview = null;
+            renderPreview();
+            say('Collection discarded.');
+          },
+        }),
       ]),
     ], { hint: `run ${lastPreview.runId ?? ''}` }));
   }
 
-  /* ----------------------------------------------------------------- library */
-
-  function applyFilters() {
-    const search = filters.search.toLowerCase();
-    let rows = allLeads.filter((lead) => {
-      if (search && !`${lead.username} ${lead.fullName ?? ''}`.toLowerCase().includes(search)) return false;
-      if (filters.tiers.size && !filters.tiers.has(lead.warmthTier ?? 'cold')) return false;
-      if (filters.bucket !== 'all' && !(lead.groupIds ?? []).includes(filters.bucket)) return false;
-      return true;
-    });
-    rows = sortRows(rows, filters.sort);
-    vtable?.setRows(rows);
-    return rows;
-  }
-
-  function sortRows(rows, sort) {
-    const copy = [...rows];
-    if (sort === 'username') copy.sort((a, b) => a.username.localeCompare(b.username));
-    else if (sort === 'followers') copy.sort((a, b) => (b.followers ?? 0) - (a.followers ?? 0));
-    else if (sort === 'recent') copy.sort((a, b) => (b.followedAt ?? b.messagedAt ?? 0) - (a.followedAt ?? a.messagedAt ?? 0));
-    else copy.sort((a, b) => (b.priorityScore ?? 0) - (a.priorityScore ?? 0));
-    return copy;
-  }
-
-  function renderFilterBar() {
-    clear(filterBar);
-    const search = el('input', { class: 'input', type: 'search', placeholder: 'Search username or name…', style: { maxWidth: '260px' } });
-    search.addEventListener('input', () => { filters.search = search.value; applyFilters(); updateCounts(); });
-
-    const bucketSelect = el('select', { class: 'select', style: { maxWidth: '200px' } });
-    bucketSelect.append(el('option', { value: 'all', text: 'All buckets' }));
-    for (const group of groups) bucketSelect.append(el('option', { value: group.groupId, text: group.name }));
-    bucketSelect.value = filters.bucket;
-    bucketSelect.addEventListener('change', () => { filters.bucket = bucketSelect.value; applyFilters(); updateCounts(); });
-
-    const sortSelect = el('select', { class: 'select', style: { maxWidth: '180px' } });
-    for (const option of SORTS) sortSelect.append(el('option', { value: option.value, text: option.label }));
-    sortSelect.value = filters.sort;
-    sortSelect.addEventListener('change', () => { filters.sort = sortSelect.value; applyFilters(); });
-
-    filterBar.append(
-      search,
-      chipList(TIERS, [...filters.tiers], { onChange: (values) => { filters.tiers = new Set(values); applyFilters(); updateCounts(); } }),
-      bucketSelect,
-      sortSelect,
-      el('span', { class: 'grow' }),
-      el('span', { class: 'small dim', id: 'collector-count' }),
-    );
-  }
-
-  function updateCounts() {
-    const shown = vtable?.rowCount ?? 0;
-    const untouched = allLeads.filter((lead) => lead.relState === 'NONE' && lead.dmState === 'NONE').length;
-    const node = root.querySelector('#collector-count');
-    if (node) node.textContent = `${shown} of ${allLeads.length} shown · ${untouched} untouched`;
-    ctx.setBadge?.('collector', { total: allLeads.length, untouched });
-  }
-
-  /* ------------------------------------------------------------------ dossier */
-
-  async function openDossier(lead) {
-    const fresh = (await api.lead(lead.leadKey)) ?? lead;
-    let edges = [];
-    try { edges = await listEdgesForLead(fresh.leadKey); } catch { edges = []; }
-    let all = [];
-    try { all = await api.actions({ limit: 500 }); } catch { all = []; }
-    const actions = all.filter((row) => row.leadKey === fresh.leadKey).slice(0, 12);
-
-    const body = el('div', { class: 'col' }, [
-      el('div', { class: 'row row--wrap' }, [warmthBadge(fresh.warmthTier, fresh.priorityScore), stateBadge(fresh.relState), stateBadge(fresh.dmState)]),
-      fresh.fullName ? el('div', {}, [scannedText(fresh.fullName, 'p')]) : null,
-      fresh.biography ? el('div', { class: 'pre-wrap small dim' }, [scannedText(fresh.biography, 'span')]) : null,
-      table(['Metric', 'Value'], [
-        ['Priority score', String(Math.round(fresh.priorityScore ?? 0))],
-        ['Followers', fmtNum(fresh.followers ?? null)],
-        ['Following', fmtNum(fresh.following ?? null)],
-        ['Private', fresh.isPrivate ? 'yes' : 'no'],
-        ['Business', fresh.isBusiness ? 'yes' : 'no'],
-        ['Buckets', (fresh.groupIds ?? []).map((id) => groups.find((g) => g.groupId === id)?.name ?? id).join(', ') || '—'],
-        ['Collected from', (fresh.sourceAccounts ?? []).join(', ') || '—'],
-        ['Followed', fresh.followedAt ? relTime(fresh.followedAt) : '—'],
-        ['Messaged', fresh.messagedAt ? relTime(fresh.messagedAt) : '—'],
-      ]),
-      fresh.scoreParts && Object.keys(fresh.scoreParts).length
-        ? card('Score breakdown', table(['Signal', 'Points'], Object.entries(fresh.scoreParts).map(([k, v]) => [k, String(Math.round(v))]), { numeric: [1] }))
-        : null,
-      edges.length ? card('Provenance', table(['Source', 'Edge', 'When'], edges.slice(0, 10).map((e) => [e.sourceAccount ?? '—', e.edgeType ?? '—', e.observedAt ? relTime(e.observedAt) : '—']))) : null,
-      actions.length ? card('Recent actions', table(['Action', 'Outcome', 'When'], actions.map((a) => [a.actionType, a.verifiedOk ? 'verified' : (a.outcome ?? '—'), relTime(a.timestamp)]))) : null,
-    ]);
-
-    const actions2 = [
-      btn(fresh.isWhitelisted ? 'Remove whitelist' : 'Whitelist (protect)', {
-        variant: 'ghost',
-        onClick: async () => { await upsertLead({ ...fresh, isWhitelisted: !fresh.isWhitelisted }); say(fresh.isWhitelisted ? 'Whitelist removed.' : 'Protected: this person will never be actioned.', 'success'); await refresh(); },
-      }),
-      btn('Do not contact', {
-        variant: 'danger',
-        onClick: async () => { await upsertLead({ ...fresh, doNotContactReason: 'marked by the owner' }); say('Marked do-not-contact.', 'success'); await refresh(); },
-      }),
-    ];
-    drawer({ title: `@${fresh.username}`, body, actions: actions2, width: 'var(--drawer-w)' });
-  }
-
-  /* ------------------------------------------------------------------- render */
+  /* --------------------------------------------------------------- lifecycle */
 
   function replaceCard(cardNode, body) {
     const head = cardNode.querySelector('.card__head');
@@ -493,61 +424,45 @@ export function createCollectorView(ctx = {}) {
     cardNode.append(body);
   }
 
-  // The table caps its own height from the viewport (matching the CSS
-  // max-height: min(70vh, 640px)), never a number hard-coded in JS.
-  function tableViewportHeight() {
-    const vh = typeof globalThis.innerHeight === 'number' && globalThis.innerHeight > 0 ? globalThis.innerHeight : 800;
-    return Math.max(240, Math.min(Math.round(vh * 0.7), 640));
-  }
-
   async function refresh() {
     try {
-      [allLeads, groups] = await Promise.all([api.leads({ limit: 20_000 }), api.groups()]);
-    } catch (error) {
-      say(`Could not load the library: ${error?.message ?? error}`, 'error');
-      allLeads = []; groups = [];
+      groups = (await api.groups()) ?? [];
+    } catch {
+      groups = [];
     }
-    renderFilterBar();
-    const rows = applyFilters();
-    // The virtual table renders its own empty message, so it is mounted once and
-    // never torn down: detaching it on an empty library would drop the scroll
-    // position every time a filter box empties and refills.
-    if (!vtable) {
-      vtable = virtualTable(tableMount, {
-        columns: COLUMNS, rows, rowHeight: 38, viewportHeight: tableViewportHeight(), overscan: 10,
-        rowClass: () => 'vtable__row--clickable',
-        onRowClick: (row) => openDossier(row),
-        emptyMessage: allLeads.length ? 'No people match these filters.' : 'No people collected yet \u2014 start with Step 1 above \u2191, then save them into a bucket.',
-      });
-    } else {
-      vtable.setRows(rows);
-    }
-    updateCounts();
+    if (lastPreview) renderPreview();
   }
 
   function mount(container) {
     clear(root);
-    root.append(launcherCard, previewCard, libraryCard);
+    root.append(subtabsBar, launcherCard, previewCard);
     container.append(root);
     applyInitialRequest();
     renderPreview();
-    if (ctx.onRunEvent) unsubscribe.push(ctx.onRunEvent((event) => {
-      // A collection finishing elsewhere, or a commit, should refresh the table.
-      if (event.type === 'saved' || event.type === 'collected') void refresh();
-    }));
-    if (ctx.onSync) unsubscribe.push(ctx.onSync((message) => {
-      if (message?.type === 'LEADS_UPSERTED' || message?.type === 'LEAD_STATE_CHANGED') void refresh();
-    }));
+    if (ctx.onRunEvent) {
+      unsubscribe.push(ctx.onRunEvent((event) => {
+        if (event.type === 'saved' || event.type === 'collected') void refresh();
+      }));
+    }
+    if (ctx.onSync) {
+      unsubscribe.push(ctx.onSync(() => void refresh()));
+    }
     void refresh();
   }
 
   function destroy() {
     for (const off of unsubscribe.splice(0)) { try { off?.(); } catch { /* already gone */ } }
     if (validateTimer) { clearTimeout(validateTimer); validateTimer = null; }
-    vtable?.destroy();
-    vtable = null;
     clear(root);
   }
 
-  return { mount, refresh, destroy, root, get leads() { return allLeads; } };
+  return {
+    id: 'collector',
+    mount,
+    refresh,
+    destroy,
+    root,
+    setSource,
+    get source() { return source; },
+  };
 }

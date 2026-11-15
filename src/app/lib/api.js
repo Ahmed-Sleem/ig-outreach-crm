@@ -30,7 +30,9 @@
 import { ACTIVE_WORKSPACE_KEY, CommandType, createBridge, chromeStorageAdapter } from '../../storage/bridge.js';
 import {
   countEnabledTemplates,
+  deleteGroup,
   finishScrapeRun,
+  getGroup,
   getLead,
   getWorkspace,
   groupRecord,
@@ -48,6 +50,7 @@ import {
   putWorkspace,
   runRecord,
   sessionRecord,
+  setLeadGroup,
   updateOutreachSession,
   updateWorkspace,
   upsertEdge,
@@ -728,8 +731,42 @@ export function createCommandChannel({
  * to IndexedDB and fails only if the disk does. Keeping them apart is what lets a
  * run keep recording what it did after the tab it was driving stops answering.
  */
+export const DEFAULT_BUCKET_NAME = 'Default';
+
+export function defaultBucketIdFor(workspaceId) {
+  return `${String(workspaceId)}:default`;
+}
+
+export function isDefaultBucket(group, workspaceId = null) {
+  if (!group) return false;
+  if (group.isDefault === true) return true;
+  if (workspaceId && String(group.groupId) === defaultBucketIdFor(workspaceId)) return true;
+  return String(group.groupId ?? '').endsWith(':default');
+}
+
 export function createLedger({ state, now = () => Date.now() } = {}) {
   const ws = () => String(state.workspaceId ?? BOOTSTRAP_WORKSPACE_ID);
+
+  async function ensureDefaultBucket() {
+    const workspaceId = ws();
+    const defaultId = defaultBucketIdFor(workspaceId);
+    const existing = await listGroups(workspaceId);
+    const found = existing.find((g) => isDefaultBucket(g, workspaceId) || g.name.toLowerCase() === DEFAULT_BUCKET_NAME.toLowerCase());
+    if (found) {
+      if (!found.isDefault) {
+        const patched = { ...found, isDefault: true };
+        await putGroup(patched);
+        return patched;
+      }
+      return found;
+    }
+    const created = {
+      ...groupRecord({ workspaceId, name: DEFAULT_BUCKET_NAME, note: 'Ready default bucket', groupId: defaultId }),
+      isDefault: true,
+    };
+    await putGroup(created);
+    return created;
+  }
 
   return {
     /** Create the workspace row if this is the first time the account is seen. */
@@ -743,6 +780,7 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
         if (viewer?.following !== undefined) patch.viewerFollowing = viewer.following;
         if (Object.keys(patch).length) await updateWorkspace(id, patch);
         state.workspaceId = id;
+        await ensureDefaultBucket();
         return { ...existing, ...patch, created: false };
       }
       const row = {
@@ -753,6 +791,7 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
       };
       await putWorkspace(row);
       state.workspaceId = id;
+      await ensureDefaultBucket();
       return { ...(await getWorkspace(id)), created: true };
     },
 
@@ -760,7 +799,18 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
 
     leads: (options = {}) => listLeads(ws(), options),
     lead: (leadKey) => getLead(String(leadKey)),
-    groups: () => listGroups(ws()),
+    ensureDefaultBucket,
+    async groups() {
+      const workspaceId = ws();
+      await ensureDefaultBucket();
+      const all = await listGroups(workspaceId);
+      return all.sort((a, b) => {
+        const aDef = isDefaultBucket(a, workspaceId) ? 0 : 1;
+        const bDef = isDefaultBucket(b, workspaceId) ? 0 : 1;
+        if (aDef !== bDef) return aDef - bDef;
+        return a.name.localeCompare(b.name);
+      });
+    },
     templates: (options = {}) => listTemplates(ws(), options),
     enabledTemplateCount: (poolId = null) => countEnabledTemplates(ws(), { poolId }),
     runs: (options = {}) => listScrapeRuns(ws(), options),
@@ -768,10 +818,37 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
     actions: (options = {}) => listActions(ws(), options),
 
     async createGroup({ name, note = '', groupId = null }) {
-      const group = groupRecord({ workspaceId: ws(), name, note, groupId });
+      const trimmed = String(name ?? '').trim();
+      const existing = await listGroups(ws());
+      const match = existing.find((g) => g.name.toLowerCase() === trimmed.toLowerCase());
+      if (match && !groupId) return match;
+      const group = groupRecord({ workspaceId: ws(), name: trimmed, note, groupId });
       await putGroup(group);
       return group;
     },
+
+    async renameGroup(groupId, name) {
+      const id = String(groupId);
+      const trimmed = String(name ?? '').trim();
+      if (!trimmed) throw new Error('a bucket needs a name');
+      const existing = await getGroup(id);
+      if (!existing) throw new Error('bucket not found');
+      const updated = { ...existing, name: trimmed, updatedAt: now() };
+      await putGroup(updated);
+      return updated;
+    },
+
+    async deleteGroup(groupId) {
+      const id = String(groupId);
+      const existing = await getGroup(id);
+      if (!existing) return { deleted: false, untagged: 0 };
+      if (isDefaultBucket(existing, ws())) {
+        return { deleted: false, untagged: 0, reason: 'The Default bucket stays ready and cannot be removed.' };
+      }
+      return deleteGroup(id);
+    },
+
+    setLeadGroup: (leadKey, groupId, options = { on: true }) => setLeadGroup(String(leadKey), String(groupId), options),
 
     /* ------------------------------------------------------------ collections */
 
@@ -786,14 +863,18 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
      * The owner pressed "save": write one collection into the library.
      *
      * Leads are merged, not replaced (`mergeLead`), edges are upserted on their
-     * idempotent key, and the bucket tag is applied to everything saved. The
-     * counts returned are what the toast says, so they are counted here rather
-     * than estimated from the input length.
+     * idempotent key, and the bucket tag is applied to everything saved (falling
+     * back to the ready Default bucket when none is chosen).
      */
     async saveCollected({ result, groupId = null, groupName = null, runId = null }) {
       const workspaceId = ws();
       let bucket = groupId ? String(groupId) : null;
-      if (!bucket && groupName) bucket = (await this.createGroup({ name: groupName })).groupId;
+      if (!bucket && groupName && String(groupName).trim()) {
+        bucket = (await this.createGroup({ name: groupName })).groupId;
+      }
+      if (!bucket) {
+        bucket = (await ensureDefaultBucket()).groupId;
+      }
 
       const entries = result?.leads ?? [];
       let saved = 0;

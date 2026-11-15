@@ -20,6 +20,7 @@ import { createApiClient } from './lib/api.js';
 import { RunPhase, createRunController } from './lib/runner.js';
 import { createSyncBus } from '../storage/sync.js';
 import { createCollectorView } from './views/tab1-collector.js';
+import { createPeopleView } from './views/tab-people.js';
 import { createOutreachView } from './views/tab2-outreach.js';
 import { createSettingsView } from './views/settings-view.js';
 import { createBackupView } from './views/backup-export.js';
@@ -106,7 +107,16 @@ export function createApp(deps = {}) {
     budget: () => cachedBudget,
     onRunEvent: (handler) => { runHandlers.add(handler); return () => runHandlers.delete(handler); },
     onSync: (handler) => { syncHandlers.add(handler); return () => syncHandlers.delete(handler); },
-    onChanged: () => { void refreshShell(); },
+    onChanged: () => {
+      void refreshShell();
+      if (activeTab === 'people') void views.people.refresh();
+      else if (activeTab === 'outreach') void views.outreach.refresh();
+    },
+    onOpenPeople: (groupId = null) => {
+      if (groupId) views.people.selectBucket(groupId);
+      navigate('people');
+      void views.people.refresh();
+    },
     setBadge: (tab, counts) => { badges[tab] = counts; renderTabs(); },
     openSettings: () => openSettingsDrawer(),
     openBackup: () => openBackupDrawer(),
@@ -115,9 +125,10 @@ export function createApp(deps = {}) {
 
   const views = {
     collector: createCollectorView(ctx),
+    people: createPeopleView(ctx),
     outreach: createOutreachView(ctx),
   };
-  const badges = { collector: null, outreach: null };
+  const badges = { collector: null, people: null, outreach: null };
 
   let activeTab = launch.tab && views[launch.tab] ? launch.tab : 'collector';
   let nextActionAt = null;
@@ -261,6 +272,7 @@ export function createApp(deps = {}) {
     clear(host);
     const items = [
       { id: 'collector', label: 'Collect', count: badges.collector?.total ?? undefined },
+      { id: 'people', label: 'Your people', count: badges.people?.total ?? undefined },
       { id: 'outreach', label: 'Outreach', count: badges.outreach?.ready ?? undefined },
     ];
     const bar = el('div', { class: 'tabs', role: 'tablist' });
@@ -392,8 +404,17 @@ export function createApp(deps = {}) {
     try {
       // overview() summarises the workspace but does not carry the governor state,
       // and the budget is computed from that state, so read the row directly.
-      const [workspace, settings] = await Promise.all([api.workspace(), api.settings()]);
+      const [workspace, settings, leads] = await Promise.all([
+        api.workspace(),
+        api.settings(),
+        typeof api.leads === 'function' ? api.leads({ limit: 50000 }) : Promise.resolve(null),
+      ]);
       cachedBudget = controller.budget(workspace?.governorState ?? null, { settings, workspaceKey: api.workspaceId });
+      if (Array.isArray(leads)) {
+        const untouched = leads.filter((l) => l.relState === 'NONE' && l.dmState === 'NONE').length;
+        badges.people = { total: leads.length, untouched };
+        renderTabs();
+      }
     } catch { cachedBudget = null; }
     renderHeaderRight(overview);
     renderRunBanner();

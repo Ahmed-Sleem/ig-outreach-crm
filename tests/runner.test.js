@@ -415,8 +415,7 @@ describe('the run loops (real ledger, scripted tab)', () => {
     assert.deepEqual(lead.groupIds, [saved.groupId]);
 
     const groups = await api.groups();
-    assert.equal(groups.length, 1);
-    assert.equal(groups[0].name, 'Warm leads');
+    assert.deepEqual(groups.map((g) => g.name), ['Default', 'Warm leads']);
   });
 
   test('discard marks the run so the history does not show a collection that vanished', async () => {

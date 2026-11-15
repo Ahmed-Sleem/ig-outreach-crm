@@ -45,6 +45,10 @@ document.getElementById('open-dashboard').addEventListener('click', () => {
   openDashboard().catch((err) => setStatus(`Could not open the dashboard: ${err.message}`, true));
 });
 
+document.getElementById('open-people')?.addEventListener('click', () => {
+  openDashboard({ tab: 'people' }).catch((err) => setStatus(`Could not open the dashboard: ${err.message}`, true));
+});
+
 document.getElementById('open-outreach').addEventListener('click', () => {
   openDashboard({ tab: 'outreach' }).catch((err) => setStatus(`Could not open the dashboard: ${err.message}`, true));
 });

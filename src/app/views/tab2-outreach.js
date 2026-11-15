@@ -31,9 +31,9 @@ import {
 import { templateRecord, putTemplate, deleteTemplate } from '../../storage/db.js';
 
 const MODES = [
-  { value: QueueMode.FOLLOW, label: 'Follow' },
-  { value: QueueMode.DM, label: 'Message' },
-  { value: QueueMode.UNFOLLOW, label: 'Cleaner' },
+  { value: QueueMode.FOLLOW, id: 'follow', label: 'Follow', cardTitle: 'Follow run', cta: 'Start Follow run' },
+  { value: QueueMode.DM, id: 'dm', label: 'Messages', cardTitle: 'Messages run', cta: 'Start Messages run' },
+  { value: QueueMode.UNFOLLOW, id: 'unfollow', label: 'Unfollow', cardTitle: 'Unfollow run', cta: 'Start Unfollow run' },
 ];
 
 const CLEANUP_MODES = [
@@ -41,6 +41,28 @@ const CLEANUP_MODES = [
   { value: CleanupMode.STALE_REQUESTS, label: 'Withdraw stale pending requests' },
   { value: CleanupMode.FULL_CYCLE, label: 'Full cycle (clean campaign mutuals too)' },
 ];
+
+const FUNNEL_BY_MODE = {
+  [QueueMode.FOLLOW]: [
+    ['untouched', 'Untouched'],
+    ['queued', 'Queued'],
+    ['requested', 'Awaiting accept'],
+    ['following', 'Following'],
+    ['mutual', 'Mutual'],
+  ],
+  [QueueMode.DM]: [
+    ['mutual', 'Mutual'],
+    ['following', 'Following'],
+    ['messaged', 'Messaged'],
+    ['replied', 'Replied'],
+  ],
+  [QueueMode.UNFOLLOW]: [
+    ['requested', 'Awaiting accept'],
+    ['following', 'Following'],
+    ['mutual', 'Mutual'],
+    ['replied', 'Replied'],
+  ],
+};
 
 const RUNNING_PHASES = new Set([RunPhase.PREPARING, RunPhase.RUNNING, RunPhase.WAITING, RunPhase.STOPPING]);
 
@@ -55,22 +77,24 @@ export function createOutreachView(ctx = {}) {
   const say = ctx.toast ?? toast;
 
   const root = el('div', { class: 'outreach' });
+  const subtabsBar = el('nav', { class: 'subtabs', role: 'tablist', 'aria-label': 'Outreach mode' });
   const bucketBar = el('nav', { class: 'bucket-bar' });
   const funnelRow = el('div', { class: 'stat-row' });
-  const autopilotCard = card('Run', el('div'));
+  const autopilotCard = card('Follow run', el('div'));
   const budgetRow = el('div', { class: 'grid grid--4' });
   const gateNote = el('div');
   // The header carries the quota meters and the Start/Stop controls together.
   const headerWrap = el('div', { class: 'outreach__header' }, [autopilotCard, budgetRow, gateNote]);
-  const queueCard = card('Funnel queue', el('div'), { hint: 'a dry run costs nothing' });
+  const queueCard = card('Queue preview', el('div'), { hint: 'a dry run costs nothing' });
   const logCard = card('Run log', el('div', { class: 'runlog' }));
   const studioCard = card('Message studio', el('div'));
-  // Pool health and the template list are reference material: a collapsed section.
+  // Pool health and the template list are reference material inside Messages.
   const poolBody = el('div', { class: 'col' });
   const poolDetails = el('details', { class: 'details--section' }, [
     el('summary', { text: 'Pool health & templates' }),
     poolBody,
   ]);
+  const messagesSlot = el('div', { class: 'col' });
 
   let groups = [];
   let leads = [];
@@ -113,11 +137,53 @@ export function createOutreachView(ctx = {}) {
 
   function isRunning() { return running || RUNNING_PHASES.has(controller.state.phase); }
 
+  function modeMeta(m = mode) {
+    return MODES.find((entry) => entry.value === m) ?? MODES[0];
+  }
+
+  function setMode(nextMode) {
+    mode = nextMode;
+    renderSubtabs();
+    renderFunnel();
+    renderControls();
+    renderMessagesSlot();
+    void refreshPlan();
+  }
+
+  function renderSubtabs() {
+    clear(subtabsBar);
+    for (const option of MODES) {
+      const on = mode === option.value;
+      subtabsBar.append(el('button', {
+        class: `subtab ${on ? 'subtab--on' : ''}`.trim(),
+        role: 'tab',
+        type: 'button',
+        'aria-selected': on ? 'true' : 'false',
+        'data-outreach-tab': option.id,
+        text: option.label,
+        onclick: () => setMode(option.value),
+      }));
+    }
+  }
+
+  function renderMessagesSlot() {
+    clear(messagesSlot);
+    if (mode === QueueMode.DM) {
+      renderStudio();
+      messagesSlot.append(studioCard, poolDetails);
+    }
+  }
+
   /* ------------------------------------------------------- buckets & funnel */
+
+  function scopedLeads() {
+    if (selectedGroupId === null) return leads;
+    return leads.filter((lead) => (lead.groupIds ?? []).includes(selectedGroupId));
+  }
 
   function funnelCounts() {
     const counts = { untouched: 0, queued: 0, requested: 0, following: 0, mutual: 0, replied: 0, messaged: 0 };
-    for (const lead of leads) {
+    for (const lead of scopedLeads()) {
       const rel = lead.relState ?? 'NONE';
       const dm = lead.dmState ?? 'NONE';
       if (rel === 'NONE' && dm === 'NONE') counts.untouched += 1;
@@ -131,23 +197,21 @@ export function createOutreachView(ctx = {}) {
     return counts;
   }
 
-  const FUNNEL_LABELS = [['untouched', 'Untouched'], ['queued', 'Queued'], ['requested', 'Awaiting accept'], ['following', 'Following'], ['mutual', 'Mutual'], ['messaged', 'Messaged'], ['replied', 'Replied']];
-
   function renderSelectors() { renderBuckets(); renderFunnel(); }
 
-  // The bucket selector is a horizontal row of chips above the content; it used to
-  // be a left rail. Choosing one narrows the queue to that bucket.
+  // The bucket selector is a horizontal row of chips above the content.
+  // Choosing one narrows the queue and funnel summary to that bucket.
   function renderBuckets() {
     clear(bucketBar);
     bucketBar.append(el('span', { class: 'bucket-bar__label', text: 'Bucket' }));
     const chips = el('div', { class: 'chips' });
-    chips.append(bucketChip('All leads', leads.length, selectedGroupId === null, () => { selectedGroupId = null; renderSelectors(); void refreshPlan(); }));
+    chips.append(bucketChip('All people', leads.length, selectedGroupId === null, () => { selectedGroupId = null; renderSelectors(); void refreshPlan(); }));
     for (const group of groups) {
       const count = leads.filter((lead) => (lead.groupIds ?? []).includes(group.groupId)).length;
       chips.append(bucketChip(group.name, count, selectedGroupId === group.groupId, () => { selectedGroupId = group.groupId; renderSelectors(); void refreshPlan(); }));
     }
     bucketBar.append(chips);
-    bucketBar.append(btn('New bucket', { variant: 'sm ghost', onClick: () => newBucket() }));
+    bucketBar.append(btn('+ New bucket', { variant: 'sm ghost', onClick: () => newBucket() }));
   }
 
   function bucketChip(label, count, on, onClick) {
@@ -157,11 +221,12 @@ export function createOutreachView(ctx = {}) {
     }, [el('span', { text: label }), el('span', { class: 'chip__count', text: String(count) })]);
   }
 
-  // Funnel counts as one small stat row (they were stacked down the left rail).
+  // Funnel counts scoped to the current outreach sub-tab (Follow / Messages / Unfollow).
   function renderFunnel() {
     clear(funnelRow);
     const counts = funnelCounts();
-    for (const [key, label] of FUNNEL_LABELS) {
+    const items = FUNNEL_BY_MODE[mode] ?? FUNNEL_BY_MODE[QueueMode.FOLLOW];
+    for (const [key, label] of items) {
       funnelRow.append(el('div', { class: 'stat-row__item' }, [
         el('span', { class: 'stat-row__label', text: label }),
         el('span', { class: 'stat-row__value', text: String(counts[key] ?? 0) }),
@@ -219,14 +284,9 @@ export function createOutreachView(ctx = {}) {
   }
 
   function renderControls() {
-    const modeRow = el('div', { class: 'tabs', role: 'tablist' });
-    for (const option of MODES) {
-      modeRow.append(el('button', {
-        class: `tab ${mode === option.value ? 'tab--on' : ''}`, role: 'tab', type: 'button',
-        'aria-selected': mode === option.value ? 'true' : 'false', text: option.label,
-        onclick: () => { mode = option.value; renderControls(); void refreshPlan(); },
-      }));
-    }
+    const meta = modeMeta();
+    const titleNode = autopilotCard.querySelector('.card__title');
+    if (titleNode) titleNode.textContent = meta.cardTitle;
 
     const busy = isRunning();
     const actionRow = el('div', { class: 'row row--wrap mt-4' }, [
@@ -238,11 +298,10 @@ export function createOutreachView(ctx = {}) {
       btn('Plan (dry run)', { disabled: busy, busyLabel: 'Planning…', onClick: () => refreshPlan() }),
       busy
         ? btn('Stop', { variant: 'danger', onClick: () => { controller.stop('stopped by the owner'); say('Stopping after the current action…'); } })
-        : btn('Start run', { variant: 'primary', disabled: !plan?.canStart, busyLabel: 'Running…', onClick: () => start() }),
+        : btn(meta.cta, { variant: 'primary', disabled: !plan?.canStart, busyLabel: 'Running…', onClick: () => start() }),
     ]);
 
     replaceCard(autopilotCard, el('div', { class: 'autopilot' }, [
-      el('div', { class: 'autopilot__row' }, [modeRow]),
       policyRow(),
       actionRow,
     ]));
@@ -310,7 +369,7 @@ export function createOutreachView(ctx = {}) {
     const top = (plan.queue ?? []).slice(0, 12);
     if (!top.length) {
       body.append(note(counts.ready === 0 ? 'Nobody is waiting for this action right now: everyone in scope was already actioned, is protected, or is inside a spacing delay.' : 'The queue is empty.', ''));
-    } else {
+    } else if (mode === QueueMode.DM) {
       body.append(table(
         ['#', 'Username', 'Warmth', 'Action', 'Message preview'],
         top.map((entry) => [
@@ -318,7 +377,18 @@ export function createOutreachView(ctx = {}) {
           `@${entry.lead.username}`,
           warmthBadge(entry.lead.warmthTier, entry.lead.priorityScore),
           String(entry.actionType ?? ''),
-          mode === QueueMode.DM ? previewFor(entry.lead) : '—',
+          previewFor(entry.lead),
+        ]),
+        { numeric: [0] },
+      ));
+    } else {
+      body.append(table(
+        ['#', 'Username', 'Warmth', 'Action'],
+        top.map((entry) => [
+          String(entry.rank),
+          `@${entry.lead.username}`,
+          warmthBadge(entry.lead.warmthTier, entry.lead.priorityScore),
+          String(entry.actionType ?? ''),
         ]),
         { numeric: [0] },
       ));
@@ -568,20 +638,22 @@ export function createOutreachView(ctx = {}) {
       leads = []; groups = [];
     }
     await loadTemplates();
+    renderSubtabs();
     renderSelectors();
     renderControls();
-    renderStudio();
+    renderMessagesSlot();
     renderLog();
     await refreshPlan();
   }
 
   function mount(container) {
     clear(root);
-    // One column, top to bottom: bucket selector, funnel counts, the run header
-    // (quota meters + Start/Stop), the queue, the message studio, the run log, and
-    // the collapsed pool-health/templates section.
-    root.append(bucketBar, funnelRow, headerWrap, queueCard, studioCard, logCard, poolDetails);
+    // Clean separated sub-tabs (Follow | Messages | Unfollow) at top;
+    // messagesSlot mounts Message studio + Pool health ONLY on the Messages sub-tab.
+    root.append(subtabsBar, bucketBar, funnelRow, headerWrap, queueCard, messagesSlot, logCard);
     container.append(root);
+    renderSubtabs();
+    renderMessagesSlot();
     if (ctx.onRunEvent) unsubscribe.push(ctx.onRunEvent(onRunEvent));
     if (ctx.onSync) unsubscribe.push(ctx.onSync((message) => {
       if (['LEADS_UPSERTED', 'LEAD_STATE_CHANGED', 'GOVERNOR_TICK', 'CIRCUIT_BREAKER_TRIPPED'].includes(message?.type)) {
@@ -596,5 +668,15 @@ export function createOutreachView(ctx = {}) {
     clear(root);
   }
 
-  return { mount, refresh, destroy, root, onRunEvent, get plan() { return plan; } };
+  return {
+    id: 'outreach',
+    mount,
+    refresh,
+    destroy,
+    root,
+    onRunEvent,
+    setMode,
+    get mode() { return mode; },
+    get plan() { return plan; },
+  };
 }

@@ -669,7 +669,7 @@ describe('the ledger', () => {
     assert.match(saved.groupId, /^grp_/);
 
     const groups = await ledger.groups();
-    assert.deepEqual(groups.map((group) => group.name), ['Linen suppliers']);
+    assert.deepEqual(groups.map((group) => group.name), ['Default', 'Linen suppliers']);
     const sara = await getLead('7:sara_shop');
     assert.equal(sara.priorityScore, 82);
     assert.equal(sara.warmthTier, 'hot');
@@ -683,9 +683,10 @@ describe('the ledger', () => {
     const sara = await getLead('7:sara_shop');
     await upsertLead({ ...sara, relState: RelState.FOLLOWING, followedAt: 555, followedViaExtension: true, isWhitelisted: true });
 
+    const linenGroup = (await ledger.groups()).find((g) => g.name === 'Linen suppliers');
     const saved = await ledger.saveCollected({
       result: { leads: [{ lead: { username: 'SARA_SHOP', priorityScore: 95, workspaceId: '7' }, edges: [{ edgeType: 'COMMENTED_POST', sourceAccount: 'comp_a', refId: 'Cx9' }] }] },
-      groupId: (await ledger.groups())[0].groupId,
+      groupId: linenGroup.groupId,
     });
     assert.deepEqual({ saved: saved.saved, updated: saved.updated, edges: saved.edges }, { saved: 0, updated: 1, edges: 1 });
 
@@ -839,7 +840,7 @@ describe('the composed client', () => {
     assert.equal(overview.workspaceId, '7');
     assert.equal(overview.viewerUsername, 'me');
     assert.equal(overview.followers, 900);
-    assert.equal(overview.groups.length, 1);
+    assert.deepEqual(overview.groups.map((g) => g.name), ['Default', 'Warm']);
     assert.equal(overview.enabledTemplates, 0);
     assert.equal(overview.counters.daily.follows, 0);
     assert.equal(overview.lockedUntil, null, 'a lock that was never tripped is not "locked until 1970"');

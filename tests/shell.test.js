@@ -118,12 +118,13 @@ describe('the dashboard shell (main.js createApp)', () => {
     assert.ok(left.querySelector('.brand'), 'the brand is rendered');
     assert.ok(!left.querySelector('#session-pill'), 'the connection status is no longer on the left');
 
-    // Two tabs, the collector one active by default.
+    // Three top-level tabs (Collect, Your people, Outreach); Collect active by default.
     const center = doc.getElementById('shell-center');
     const tabs = [...center.querySelectorAll('.tab')];
-    assert.equal(tabs.length, 2, 'two tabs are rendered');
+    assert.equal(tabs.length, 3, 'three top-level tabs are rendered');
     assert.match(tabs[0].textContent, /Collect/);
-    assert.match(tabs[1].textContent, /Outreach/);
+    assert.match(tabs[1].textContent, /Your people/);
+    assert.match(tabs[2].textContent, /Outreach/);
     assert.ok(tabs[0].classList.contains('tab--on'), 'the collector tab is active on boot');
 
     // Connection status + one overflow menu on the right. Stop lives in the run
@@ -149,7 +150,7 @@ describe('the dashboard shell (main.js createApp)', () => {
     app.destroy();
   });
 
-  test('navigate("outreach") re-mounts into the same live root and flips the active tab', async () => {
+  test('navigate("people") and navigate("outreach") re-mount into the same live root and flip active tabs', async () => {
     const { app } = bootApp();
     await app.start();
     await settle();
@@ -158,12 +159,18 @@ describe('the dashboard shell (main.js createApp)', () => {
     const viewRoot = doc.getElementById('view-root');
     const beforeHtml = viewRoot.innerHTML;
 
+    app.navigate('people');
+    await settle();
+    assert.equal(app.activeTab, 'people', 'the active tab is now people');
+    let tabs = [...center.querySelectorAll('.tab')];
+    assert.ok(tabs[1].classList.contains('tab--on'), 'the Your people tab is marked active');
+
     app.navigate('outreach');
     await settle();
 
     assert.equal(app.activeTab, 'outreach', 'the active tab is now outreach');
-    const tabs = [...center.querySelectorAll('.tab')];
-    assert.ok(tabs[1].classList.contains('tab--on'), 'the outreach tab is marked active');
+    tabs = [...center.querySelectorAll('.tab')];
+    assert.ok(tabs[2].classList.contains('tab--on'), 'the outreach tab is marked active');
     assert.ok(!tabs[0].classList.contains('tab--on'), 'the collector tab is no longer active');
     assert.ok(viewRoot.children.length > 0, 'the outreach view is mounted');
     assert.notEqual(viewRoot.innerHTML, beforeHtml, 'the mounted content changed on navigation');
@@ -180,7 +187,7 @@ describe('the dashboard shell (main.js createApp)', () => {
 
     assert.equal(app.activeTab, 'outreach', 'the deep link set the active tab');
     const tabs = [...doc.getElementById('shell-center').querySelectorAll('.tab')];
-    assert.ok(tabs[1].classList.contains('tab--on'), 'Outreach is the tab the owner asked for');
+    assert.ok(tabs[2].classList.contains('tab--on'), 'Outreach is the tab the owner asked for');
 
     globalThis.location.search = '';
     app.destroy();

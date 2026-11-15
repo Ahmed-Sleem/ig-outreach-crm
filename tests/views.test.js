@@ -7,6 +7,7 @@ import { createRunController } from '../src/app/lib/runner.js';
 import { createSettingsView } from '../src/app/views/settings-view.js';
 import { createBackupView } from '../src/app/views/backup-export.js';
 import { createCollectorView } from '../src/app/views/tab1-collector.js';
+import { createPeopleView } from '../src/app/views/tab-people.js';
 import { createOutreachView } from '../src/app/views/tab2-outreach.js';
 import { clampSafetySettings } from '../src/storage/settings.js';
 import { initialGovernorState } from '../src/core/governor.js';
@@ -213,61 +214,27 @@ describe('the views', () => {
     assert.ok(Array.isArray(data.edges));
   });
 
-  /* ------------------------------------------------------------ collector */
+  /* ------------------------------------------------------------- collect */
 
-  test('collector renders seeded leads in the virtual table', async () => {
+  test('collect renders 4 separated sub-tabs and switches source cleanly', async () => {
     await seedWorkspace();
-    await seedLead('sara_shop', { fullName: 'Sara Adel', warmthTier: 'hot', priorityScore: 80 });
-    await seedLead('linen_co', { fullName: 'Linen Co', warmthTier: 'cold', priorityScore: 10 });
     const { ctx, container } = makeCtx();
     const view = createCollectorView(ctx);
     view.mount(container);
     await view.refresh();
     await settle();
 
-    const rows = container.querySelectorAll('.vtable__row');
-    assert.equal(rows.length, 2);
-    const text = container.querySelector('.vtable__viewport').textContent;
-    assert.match(text, /sara_shop/);
-    assert.equal(view.leads.length, 2);
+    const subtabs = [...container.querySelectorAll('.subtab')];
+    assert.deepEqual(
+      subtabs.map((b) => b.textContent.trim()),
+      ['From an account', 'From a post', 'From a hashtag', 'From open tab'],
+    );
+    subtabs[1]._listeners.click[0]({ target: subtabs[1] });
+    await settle();
+    assert.equal(view.source, 'post_likers');
   });
 
-  test('collector search filter narrows the table', async () => {
-    await seedWorkspace();
-    await seedLead('sara_shop', { fullName: 'Sara Adel' });
-    await seedLead('linen_co', { fullName: 'Linen Co' });
-    const { ctx, container } = makeCtx();
-    const view = createCollectorView(ctx);
-    view.mount(container);
-    await view.refresh();
-    await settle();
-
-    const search = container.querySelector('input[type="search"]');
-    search.value = 'linen';
-    search._listeners.input[0]({ target: search });
-    await settle();
-    assert.equal(container.querySelectorAll('.vtable__row').length, 1);
-    assert.match(container.querySelector('.vtable__viewport').textContent, /linen_co/);
-  });
-
-  test('collector opens a lead dossier drawer on row click', async () => {
-    await seedWorkspace();
-    await seedLead('sara_shop', { fullName: 'Sara Adel', biography: 'Cotton & linen' });
-    const { ctx, container } = makeCtx();
-    const view = createCollectorView(ctx);
-    view.mount(container);
-    await view.refresh();
-    await settle();
-
-    const row = container.querySelector('.vtable__row');
-    row._listeners.click[0]({ target: row });
-    await settle(10);
-    const drawerRoot = doc.getElementById('drawer-root');
-    assert.ok(drawerRoot.querySelector('.drawer'), 'the dossier drawer opened');
-    assert.match(drawerRoot.querySelector('.drawer__title').textContent, /sara_shop/);
-  });
-
-  test('collector auto-starts from initialRequest and renders the 3-column preview with bucket hint', async () => {
+  test('collector auto-starts from initialRequest and renders the 3-column preview with Default bucket ready', async () => {
     await seedWorkspace();
     let collectArgs = null;
     const { ctx, container } = makeCtx({
@@ -292,15 +259,82 @@ describe('the views', () => {
     assert.equal(collectArgs?.username, 'sara_shop');
     const headers = [...container.querySelectorAll('table th')].map((th) => th.textContent);
     assert.deepEqual(headers, ['Username', 'Name', 'Warmth']);
-    assert.match(container.textContent, /A bucket is a named list/);
+    assert.match(container.textContent, /Default/);
     assert.match(container.textContent, /Your people/);
     assert.ok(findButton(container, 'Save'), 'Save button present in preview');
     assert.ok(findButton(container, 'Discard'), 'Discard button present in preview');
   });
 
+  /* ---------------------------------------------------------- your people */
+
+  test('your people renders ready Default bucket tab, custom bucket tabs, and seeded leads', async () => {
+    await seedWorkspace();
+    const { ctx, container, api } = makeCtx();
+    const def = await api.ensureDefaultBucket();
+    const custom = await api.createGroup({ name: 'Cairo boutiques' });
+    await seedLead('sara_shop', { fullName: 'Sara Adel', warmthTier: 'hot', priorityScore: 80, groupIds: [def.groupId] });
+    await seedLead('linen_co', { fullName: 'Linen Co', warmthTier: 'cold', priorityScore: 10, groupIds: [custom.groupId] });
+
+    const view = createPeopleView(ctx);
+    view.mount(container);
+    await view.refresh();
+    await settle();
+
+    const tabs = [...container.querySelectorAll('.subtab')].map((b) => b.textContent.trim());
+    assert.ok(tabs.some((t) => t.startsWith('All people')), 'All people tab rendered');
+    assert.ok(tabs.some((t) => t.startsWith('Default')), 'ready Default bucket tab rendered');
+    assert.ok(tabs.some((t) => t.startsWith('Cairo boutiques')), 'custom bucket tab rendered');
+    assert.ok(tabs.includes('+ New bucket'), '+ New bucket button rendered');
+
+    assert.equal(container.querySelectorAll('.vtable__row').length, 2);
+
+    // Click the custom bucket tab — filters to only its leads
+    const customTab = [...container.querySelectorAll('.subtab')].find((b) => b.textContent.includes('Cairo boutiques'));
+    customTab._listeners.click[0]({ target: customTab });
+    await settle();
+    assert.equal(container.querySelectorAll('.vtable__row').length, 1);
+    assert.match(container.querySelector('.vtable__viewport').textContent, /linen_co/);
+  });
+
+  test('your people search filter narrows the table', async () => {
+    await seedWorkspace();
+    await seedLead('sara_shop', { fullName: 'Sara Adel' });
+    await seedLead('linen_co', { fullName: 'Linen Co' });
+    const { ctx, container } = makeCtx();
+    const view = createPeopleView(ctx);
+    view.mount(container);
+    await view.refresh();
+    await settle();
+
+    const search = container.querySelector('input[type="search"]');
+    search.value = 'linen';
+    search._listeners.input[0]({ target: search });
+    await settle();
+    assert.equal(container.querySelectorAll('.vtable__row').length, 1);
+    assert.match(container.querySelector('.vtable__viewport').textContent, /linen_co/);
+  });
+
+  test('your people opens a lead dossier drawer on row click with bucket toggles', async () => {
+    await seedWorkspace();
+    await seedLead('sara_shop', { fullName: 'Sara Adel', biography: 'Cotton & linen' });
+    const { ctx, container } = makeCtx();
+    const view = createPeopleView(ctx);
+    view.mount(container);
+    await view.refresh();
+    await settle();
+
+    const row = container.querySelector('.vtable__row');
+    row._listeners.click[0]({ target: row });
+    await settle(10);
+    const drawerRoot = doc.getElementById('drawer-root');
+    assert.ok(drawerRoot.querySelector('.drawer'), 'the dossier drawer opened');
+    assert.match(drawerRoot.querySelector('.drawer__title').textContent, /sara_shop/);
+    assert.ok(drawerRoot.querySelector('.drawer-buckets'), 'bucket assignment toggles rendered inside drawer');
+  });
+
   /* ------------------------------------------------------------- outreach */
 
-  test('outreach plans a follow run and shows the ready count', async () => {
+  test('outreach separates Follow, Messages, and Unfollow into clean sub-tabs', async () => {
     await seedWorkspace();
     await seedLead('sara_shop');
     await seedLead('linen_co');
@@ -310,22 +344,30 @@ describe('the views', () => {
     await view.refresh();
     await settle();
 
+    const subtabs = [...container.querySelectorAll('.subtab')].map((b) => b.textContent.trim());
+    assert.deepEqual(subtabs, ['Follow', 'Messages', 'Unfollow']);
     assert.ok(view.plan, 'a dry run produced a plan');
     assert.ok(view.plan.counts.ready >= 1, 'the fresh leads are queued');
     assert.ok(container.querySelector('.bucket-bar'), 'the bucket selector renders');
-    assert.match(container.textContent, /Ready/);
+    assert.equal(container.querySelector('.input--area'), null, 'Message studio stays hidden inside Follow sub-tab');
+    assert.doesNotMatch(container.textContent, /Cleanup scope/, 'Cleanup scope stays hidden inside Follow sub-tab');
   });
 
-  test('outreach message studio lists templates and saves a new one', async () => {
+  test('outreach Messages sub-tab renders Message studio and saves a new template', async () => {
     await seedWorkspace();
-    const { ctx, container, api } = makeCtx();
+    const { ctx, container } = makeCtx();
     const view = createOutreachView(ctx);
     view.mount(container);
     await view.refresh();
     await settle();
 
-    // Type into the studio composer and save.
+    const msgTab = [...container.querySelectorAll('.subtab')].find((b) => b.textContent.trim() === 'Messages');
+    assert.ok(msgTab, 'Messages sub-tab is rendered');
+    msgTab._listeners.click[0]({ target: msgTab });
+    await settle(8);
+
     const area = container.querySelector('.input--area');
+    assert.ok(area, 'Message studio composer renders inside Messages sub-tab');
     area.value = 'Hi {{first_name|there}}, {loved|liked} your {linen|cotton}.';
     area._listeners.input[0]({ target: area });
     await settle();
@@ -336,10 +378,9 @@ describe('the views', () => {
     const templates = await listTemplates(WS);
     assert.equal(templates.length, 1, 'the template was written to the pool');
     assert.match(templates[0].body, /loved\|liked/);
-    void api;
   });
 
-  test('outreach switching to the Cleaner mode renders the cleanup scope', async () => {
+  test('outreach switching to the Unfollow sub-tab renders Cleanup scope and hides Message studio', async () => {
     await seedWorkspace();
     await seedLead('sara_shop', { relState: 'FOLLOWING', followedViaExtension: true, followedAt: NOW - 10 * 86_400_000 });
     const { ctx, container } = makeCtx();
@@ -348,10 +389,11 @@ describe('the views', () => {
     await view.refresh();
     await settle();
 
-    const cleanerTab = [...container.querySelectorAll('.tab')].find((b) => b.textContent === 'Cleaner');
-    assert.ok(cleanerTab, 'the Cleaner mode tab is rendered');
-    cleanerTab._listeners.click[0]({ target: cleanerTab });
+    const unfollowTab = [...container.querySelectorAll('.subtab')].find((b) => b.textContent.trim() === 'Unfollow');
+    assert.ok(unfollowTab, 'Unfollow sub-tab is rendered');
+    unfollowTab._listeners.click[0]({ target: unfollowTab });
     await settle(8);
-    assert.match(container.textContent, /Cleanup scope/, 'the cleaner exposes its scope control');
+    assert.match(container.textContent, /Cleanup scope/, 'Unfollow sub-tab exposes its scope control');
+    assert.equal(container.querySelector('.input--area'), null, 'Message studio stays hidden inside Unfollow sub-tab');
   });
 });

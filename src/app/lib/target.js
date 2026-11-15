@@ -50,19 +50,19 @@ export const SOURCE_FIELDS = Object.freeze({
 
 /** The four plain "what do you want to collect from" groups. */
 export const SOURCE_GROUPS = Object.freeze([
-  { id: 'account', label: 'An account', options: [
+  { id: 'account', label: 'From an account', options: [
     { value: 'followers', label: 'Followers' },
     { value: 'following', label: 'Following' },
     { value: 'profile_recent_likers', label: 'Recent likers' },
   ] },
-  { id: 'post', label: 'A post', options: [
+  { id: 'post', label: 'From a post', options: [
     { value: 'post_likers', label: 'Likers' },
     { value: 'post_comments', label: 'Commenters' },
   ] },
-  { id: 'hashtag', label: 'A hashtag', options: [
+  { id: 'hashtag', label: 'From a hashtag', options: [
     { value: 'hashtag_grid', label: 'Hashtag' },
   ] },
-  { id: 'open', label: 'What I have open on Instagram', options: [
+  { id: 'open', label: 'From open tab', options: [
     { value: 'open_list_dialog', label: 'Open followers list' },
     { value: 'saved_grid', label: 'Saved posts' },
     { value: 'current_page', label: 'This page' },

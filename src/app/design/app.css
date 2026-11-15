@@ -717,3 +717,78 @@ button { font-family: inherit; }
 .details--section > summary:hover { color: var(--c-primary); }
 .details--section[open] > summary { border-bottom: 1px solid var(--c-border); }
 .details--section > .col { padding: var(--sp-4); gap: var(--sp-4); }
+
+/* ------------------------------------------------- nested sub-tab navigation */
+
+/* Clean horizontal sub-tab rail inside Collect, Your people (bucket tabs),
+   and Outreach (Follow | Messages | Unfollow). Visually distinct from the
+   rounded top-bar tabs so hierarchy is immediate at a glance. */
+.subtabs {
+  display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 0;
+  margin-bottom: var(--sp-3);
+}
+.subtab {
+  position: relative;
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  min-height: 40px;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--c-text-dim); font-size: var(--fs-sm); font-weight: var(--fw-medium);
+  font-family: inherit; cursor: pointer; white-space: nowrap;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.subtab:hover { color: var(--c-text); background: var(--c-surface-hover); }
+.subtab:focus-visible { outline: 2px solid var(--c-primary); outline-offset: -2px; }
+.subtab--on {
+  color: var(--c-primary);
+  font-weight: var(--fw-semi);
+  border-bottom-color: var(--c-primary);
+}
+.subtab__count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--c-surface); color: var(--c-text-dim);
+  font-size: var(--fs-xs); font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+}
+.subtab--on .subtab__count {
+  background: var(--c-primary-fade);
+  color: var(--c-primary);
+}
+.subtabs__spacer { flex: 1; min-width: var(--sp-2); }
+.subtab--add {
+  color: var(--c-primary);
+  border: 1px dashed var(--c-border-strong);
+  border-radius: var(--r-md);
+  min-height: 32px;
+  margin-bottom: var(--sp-1);
+  padding: 0 var(--sp-3);
+}
+.subtab--add:hover {
+  background: var(--c-primary-fade);
+  border-color: var(--c-primary);
+  color: var(--c-primary);
+}
+
+.people__toolbar {
+  display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+}
+.people__actions {
+  display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+}
+.drawer-buckets {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2);
+}
+
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; height: auto; padding-top: var(--sp-2); padding-bottom: var(--sp-2); gap: var(--sp-2); }
+  .topbar__tabs { order: 3; width: 100%; justify-content: stretch; }
+  .topbar__tabs .tab { flex: 1; justify-content: center; padding: 0 var(--sp-2); font-size: var(--fs-xs); }
+  .subtab { padding: var(--sp-2); font-size: var(--fs-xs); min-height: 36px; }
+}
+
