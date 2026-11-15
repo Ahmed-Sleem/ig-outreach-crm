@@ -37,10 +37,10 @@ if (!(await db.getWorkspace(WS))) await db.putWorkspace({ workspaceId: WS, viewe
 await db.putGroup(db.groupRecord({ workspaceId: WS, name: 'Linen & home textiles' }));
 
 // 25 invented leads, varied warmth / followers / lifecycle.
-const warm = ['linen.studio.demo', 'home_textiles_demo', 'cotton.and.co.demo', 'woven.home.demo', 'flax.thread.demo'];
-const managed = ['ceramic.nook.demo', 'slow.made.demo', 'loom.and.leaf.demo', 'terra.craft.demo', 'natural.dye.demo'];
-const cold = ['bazaar.finds.demo', 'thrift.weave.demo', 'market.stall.demo', 'fiber.arts.demo', 'rustic.loft.demo',
-              'canvas.cove.demo', 'threadbare.demo', 'hearth.and.home.demo', 'knot.and.grain.demo', 'linen.loft.demo',
+const hot = ['linen.studio.demo', 'home_textiles_demo', 'cotton.and.co.demo', 'woven.home.demo'];
+const warm = ['flax.thread.demo', 'ceramic.nook.demo', 'slow.made.demo', 'loom.and.leaf.demo', 'terra.craft.demo', 'natural.dye.demo'];
+const lukewarm = ['bazaar.finds.demo', 'thrift.weave.demo', 'market.stall.demo', 'fiber.arts.demo', 'rustic.loft.demo'];
+const cold = ['canvas.cove.demo', 'threadbare.demo', 'hearth.and.home.demo', 'knot.and.grain.demo', 'linen.loft.demo',
               'cotton.club.demo', 'woolen.way.demo', 'silk.road.demo', 'denim.den.demo', 'jute.journey.demo'];
 const relStates = ['NONE', 'FOLLOW_REQUESTED', 'FOLLOWING', 'MUTUAL', 'FOLLOWED_BY_ONLY'];
 const dmStates  = ['NONE', 'WAITING_FOR_ACCEPT', 'DM_SENT_REQUEST', 'DM_REPLIED'];
@@ -52,7 +52,7 @@ const seed = (username, warmthTier) => db.upsertLead(db.leadRecord({ workspaceId
   followers: 500 + ((i * 733) % 24000),
   following: 200 + ((i * 311) % 1800),
   warmthTier,
-  priorityScore: warmthTier === 'warm' ? 80 - i : warmthTier === 'managed' ? 50 - i : 20 - (i % 15),
+  priorityScore: warmthTier === 'hot' ? 88 - i : warmthTier === 'warm' ? 68 - i : warmthTier === 'lukewarm' ? 42 - i : 20 - (i % 15),
   relState: relStates[i % relStates.length],
   dmState: dmStates[i % dmStates.length],
   sourceAccounts: ['demo.source.account'],
@@ -60,8 +60,9 @@ const seed = (username, warmthTier) => db.upsertLead(db.leadRecord({ workspaceId
   edgeCount: 1 + (i % 4),
 }));
 
+for (const u of hot) await seed(u, 'hot');
 for (const u of warm) await seed(u, 'warm');
-for (const u of managed) await seed(u, 'managed');
+for (const u of lukewarm) await seed(u, 'lukewarm');
 for (const u of cold) await seed(u, 'cold');
 
 console.log(`Seeded ${i} demo leads into workspace "${WS}". Reload the dashboard to see them.`);

@@ -1,25 +1,24 @@
-# README screenshots — to capture
+# README screenshots — status & capture guide
 
-These eight PNGs are referenced by `README.md` but **none exist yet**. This
-environment cannot drive Chrome with an unpacked extension loaded, and shot 8
-needs a logged-in Instagram session, so nothing was fabricated. Capture them on a
-machine with Chrome and the built extension, then drop the files in this folder
-and the README's Screenshots section will light up.
+Shots `01`–`07` have been captured in real Chromium with the unpacked
+`build/extension/` loaded and purely fictional demo data (zero console/page errors,
+compressed to 12–133 KB each). Shot `08-in-page-pill.png` requires a logged-in
+Instagram session and must be captured by the repository owner.
 
-## Files to produce
+## Files
 
 | # | File | Content | Status |
 |---|---|---|---|
-| 1 | `01-collect.png` | Collect screen, empty state: the four source groups and the adaptive field | **Missing** |
-| 2 | `02-collect-preview.png` | After a collection: preview table plus "Save into a bucket" | **Missing** |
-| 3 | `03-library.png` | "Your people" table with the search and warmth filters | **Missing** |
-| 4 | `04-lead-drawer.png` | A lead drawer open | **Missing** |
-| 5 | `05-outreach.png` | Outreach screen with the queue and message studio | **Missing** |
-| 6 | `06-settings.png` | Settings drawer | **Missing** |
-| 7 | `07-popup.png` | Toolbar popup, cropped to about 280px wide | **Missing** |
-| 8 | `08-in-page-pill.png` | The pill on a real Instagram profile — **owner must capture** (needs a logged-in session; blur or crop any real account names) | **Missing — owner only** |
+| 1 | `01-collect.png` | Collect screen, empty state: the four source groups and the adaptive field | **Done** (`1600×1000`) |
+| 2 | `02-collect-preview.png` | After a collection: preview table plus "Save into a bucket" | **Done** (`1600×1000`) |
+| 3 | `03-library.png` | "Your people" table with the search and warmth filters | **Done** (`1600×1000`) |
+| 4 | `04-lead-drawer.png` | A lead drawer open | **Done** (`1600×1000`) |
+| 5 | `05-outreach.png` | Outreach screen with the queue and message studio | **Done** (`1600×1000`) |
+| 6 | `06-settings.png` | Settings drawer | **Done** (`1600×1000`) |
+| 7 | `07-popup.png` | Toolbar popup, cropped to 280px wide (2× retina `560×424`) | **Done** (`560×424`) |
+| 8 | `08-in-page-pill.png` | The pill on a real Instagram profile — **owner must capture** (needs a logged-in session; blur or crop any real account names, then add it to the `## Screenshots` section of `README.md`) | **Missing — owner only** |
 
-## How to capture (1–7)
+## How to re-capture (1–7)
 
 - Viewport 1440×900, device scale factor 2, then downscale to at most 1600px wide.
 - Compress each PNG (`oxipng` or `pngquant`); target ≤ 300 KB each.

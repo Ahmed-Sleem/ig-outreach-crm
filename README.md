@@ -39,15 +39,23 @@ The extension is being built engine-first: every rule is written as a pure, unit
 
 ## Screenshots
 
-Dashboard captures are **pending**. This environment cannot drive Chrome with the
-extension loaded (and the in-page pill shot needs a logged-in Instagram session),
-so no images were fabricated. The exact list of the eight shots to produce — and
-how to produce them — is in [`docs/screenshots/TODO.md`](docs/screenshots/TODO.md);
-the fictional demo-data seed for them is in [`tools/seed-demo.md`](tools/seed-demo.md).
+| Collect | Preview & save |
+|---|---|
+| ![Collect screen with source picker](docs/screenshots/01-collect.png) | ![Collected people preview with bucket save](docs/screenshots/02-collect-preview.png) |
+
+| Your people | Lead details |
+|---|---|
+| ![Library table with warmth filter](docs/screenshots/03-library.png) | ![Lead drawer](docs/screenshots/04-lead-drawer.png) |
+
+| Outreach | Settings |
+|---|---|
+| ![Outreach queue and message studio](docs/screenshots/05-outreach.png) | ![Settings drawer](docs/screenshots/06-settings.png) |
+
+<p align="center"><img src="docs/screenshots/07-popup.png" alt="Toolbar popup" width="280"></p>
 
 <!--
   Owner-captured screenshot placeholder (add once captured on a logged-in test session,
-  with any real account names cropped or blurred):
+  with any real account names cropped or blurred; see docs/screenshots/TODO.md):
   In-page pill on an Instagram profile -> docs/screenshots/08-in-page-pill.png
 -->
 
@@ -111,9 +119,9 @@ in [INSTALL.md](INSTALL.md).
 | Core engines and local storage | Done, unit-tested |
 | Instagram read layer | Done — session-cookie + DOM-dialog paths, unit-tested; **not run live** |
 | Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, unit-tested; **not run live** |
-| Dashboard UI | Done — Collect and Outreach screens, light theme, virtual tables, drawers; unit-tested |
+| Dashboard UI | Done — Collect and Outreach screens, light theme, virtual tables, drawers; unit-tested and responsive-checked in Chromium (360–1440px) |
 | Loadable `build/extension/` build | Done — `node scripts/build.mjs`, passes the package check |
-| README screenshots | Pending — cannot drive Chrome with the extension here; see `docs/screenshots/TODO.md` |
+| README screenshots | Done for `01`–`07` (captured in Chromium with fictional demo data); `08-in-page-pill.png` is owner-captured — see `docs/screenshots/TODO.md` |
 | Run against a live Instagram account | Not performed |
 
 ## Repository layout
