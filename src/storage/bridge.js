@@ -124,7 +124,7 @@ export function createBridge(options = {}) {
   /** Publish a command and wait for the matching result. */
   async function postCommand(type, payload = {}, { timeoutMs = commandTimeoutMs, signal = null } = {}) {
     if (!Object.values(CommandType).includes(type)) {
-      return { ok: false, reason: `unknown command type: ${type}`, result: null, commandId: null };
+      return { ok: false, reason: `unknown command type: ${type}`, severity: null, result: null, commandId: null, elapsedMs: 0 };
     }
     const commandId = newCommandId(random, now);
     const command = { commandId, type, payload, postedAt: now(), workspaceId };
@@ -136,7 +136,17 @@ export function createBridge(options = {}) {
       const result = await storage.get(resultKey);
       if (result && result.commandId === commandId) {
         await storage.remove(resultKey);
-        return { ok: Boolean(result.ok), reason: result.reason ?? null, result: result.value ?? null, commandId, elapsedMs: now() - command.postedAt };
+        // `result` here is the answer's VALUE; `ok`, `reason` and `severity` are
+        // lifted out of the row. A caller that has to dig them back out of the
+        // value is a caller that will guess wrong about a refusal.
+        return {
+          ok: Boolean(result.ok),
+          reason: result.reason ?? null,
+          severity: result.severity ?? null,
+          result: result.value ?? null,
+          commandId,
+          elapsedMs: now() - command.postedAt,
+        };
       }
       await sleepFn(pollMs);
     }
@@ -145,8 +155,10 @@ export function createBridge(options = {}) {
     return {
       ok: false,
       reason: `no reply within ${Math.round(timeoutMs / 1000)}s — the Instagram tab may be closed, asleep, or not on instagram.com`,
+      severity: 'tab',
       result: null,
       commandId,
+      elapsedMs: now() - command.postedAt,
       timedOut: true,
     };
   }
@@ -190,7 +202,22 @@ export function createBridge(options = {}) {
       }
       try {
         const value = await handler(command.payload ?? {}, { command, postStatus, signal });
-        await postResult(commandId, { ok: true, reason: null, value: value ?? null });
+        // A handler answers either with a value or with a refusal of its own
+        // (`{ ok: false, reason, severity }`). A refusal must not travel inside a
+        // successful envelope, or the dashboard reports "the tab refused" as
+        // "the tab did it" — and the refusal's own `value` is kept, because it
+        // carries what the dashboard needs next (a url to navigate to, the counts
+        // collected so far, the phase that failed).
+        if (value && typeof value === 'object' && value.ok === false) {
+          await postResult(commandId, {
+            ok: false,
+            reason: value.reason ?? 'the tab refused the command',
+            value: value.value ?? value,
+            severity: value.severity ?? null,
+          });
+        } else {
+          await postResult(commandId, { ok: true, reason: null, value: value ?? null });
+        }
       } catch (error) {
         await postResult(commandId, {
           ok: false,

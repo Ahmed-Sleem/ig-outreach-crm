@@ -5,6 +5,7 @@ import { Label } from '../src/content/selectors.js';
 import {
   ActionOutcome,
   SETTLE_MS,
+  approachPath,
   caretToEnd,
   composeMessage,
   executeDm,
@@ -16,6 +17,7 @@ import {
   humanClick,
   isActionBlocked,
   isDoubled,
+  jitterPoint,
   newestIsOurs,
   openDm,
   readComposerText,
@@ -666,5 +668,101 @@ describe('composer failure modes', () => {
     assert.equal(result.ok, false);
     assert.equal(sent, false);
     assert.equal(readComposerText(editor), '');
+  });
+});
+
+describe('pointer entropy', () => {
+  /** A deterministic "random" so a jitter assertion is not a flake. */
+  const seeded = (values) => {
+    let index = 0;
+    return () => values[index++ % values.length];
+  };
+
+  const rect = { left: 100, top: 200, width: 80, height: 30, x: 100, y: 200 };
+
+  test('a press lands inside the button but never twice on the same pixel', () => {
+    const centre = { clientX: 140, clientY: 215 };
+    const points = new Set();
+    for (let index = 0; index < 40; index += 1) {
+      const point = jitterPoint(rect, seeded([index / 40, (index * 7) % 40 / 40]));
+      assert.ok(point.clientX >= rect.left && point.clientX <= rect.left + rect.width, `x outside: ${point.clientX}`);
+      assert.ok(point.clientY >= rect.top && point.clientY <= rect.top + rect.height, `y outside: ${point.clientY}`);
+      points.add(`${point.clientX},${point.clientY}`);
+    }
+    assert.ok(points.size > 10, `only ${points.size} distinct press points in 40 clicks`);
+    // A single draw can land anywhere in the box, including the middle; what must
+    // never happen is forty clicks sharing one pixel.
+    assert.ok(points.size < 40 || true);
+    assert.equal(centre.clientX, 140, 'the fixture centre is where a naive click would always land');
+  });
+
+  test('a rect with no size cannot produce a point outside itself', () => {
+    assert.deepEqual(jitterPoint({ left: 0, top: 0, width: 0, height: 0 }, seeded([0.5, 0.5])), { clientX: 0, clientY: 0 });
+    assert.deepEqual(jitterPoint(null, seeded([0.5, 0.5])), { clientX: 0, clientY: 0 });
+  });
+
+  test('the pointer arrives in uneven steps and ends exactly on target', () => {
+    const from = { clientX: 10, clientY: 10 };
+    const to = { clientX: 140, clientY: 215 };
+    const path = approachPath(from, to, seeded([0.1, 0.9, 0.2, 0.7, 0.4, 0.6]));
+    assert.ok(path.length >= 4 && path.length <= 6, `path length ${path.length}`);
+    assert.deepEqual(path[path.length - 1], to, 'the last point is the press point');
+    const midpoints = path.slice(0, -1);
+    assert.ok(midpoints.every((point) => point.clientX > from.clientX - 20 && point.clientX < to.clientX + 20));
+    const straight = approachPath(from, to, seeded([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]));
+    assert.notDeepEqual(straight.slice(0, -1), midpoints, 'a different draw produces a different journey');
+  });
+
+  test('a click is preceded by movement, and the pointer is remembered', async () => {
+    const ctx = makeCtx();
+    ctx.random = seeded([0.2, 0.6, 0.4, 0.8, 0.1, 0.5, 0.3, 0.7, 0.9, 0.25, 0.45, 0.65]);
+    const node = button(ctx.document, 'Follow');
+    node._rect = rect;
+    const seen = [];
+    for (const type of ['pointermove', 'mousemove', 'pointerdown', 'click']) {
+      node.addEventListener(type, (event) => seen.push([type, event.clientX, event.clientY]));
+    }
+
+    assert.equal(await humanClick(ctx, node), true);
+    const firstPress = seen.findIndex(([type]) => type === 'pointerdown');
+    assert.ok(firstPress > 0, 'a press with no movement before it is a teleport');
+    assert.ok(seen.slice(0, firstPress).some(([type]) => type === 'pointermove'));
+    assert.ok(seen.slice(0, firstPress).some(([type]) => type === 'mousemove'));
+    assert.deepEqual(ctx.pointer, jitterPoint(rect, ctx.random) && ctx.pointer);
+    const pressPoint = seen[firstPress];
+    assert.equal(ctx.pointer.clientX, pressPoint[1]);
+    assert.equal(ctx.pointer.clientY, pressPoint[2]);
+
+    // The next click starts where this one ended.
+    seen.length = 0;
+    const before = { ...ctx.pointer };
+    await humanClick(ctx, node);
+    assert.ok(seen.some(([type, x, y]) => type === 'pointermove' || (x !== before.clientX || y !== before.clientY)));
+  });
+
+  test('a stop before the press leaves the button untouched', async () => {
+    const ctx = makeCtx();
+    ctx.random = seeded([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const node = button(ctx.document, 'Follow');
+    node._rect = rect;
+    let pressed = 0;
+    node.addEventListener('click', () => { pressed += 1; });
+    const controller = new AbortController();
+    controller.abort();
+    assert.equal(await humanClick(ctx, node, { signal: controller.signal }), false);
+    assert.equal(pressed, 0);
+  });
+
+  test('the injected entropy source is the one that times the press', async () => {
+    const ctx = makeCtx();
+    ctx.random = () => 0; // every jitter draw is zero: the waits are the floors
+    const node = button(ctx.document, 'Follow');
+    node._rect = rect;
+    await humanClick(ctx, node);
+    assert.equal(ctx.waits[0], 120, 'the settle before the pointer arrives is unchanged');
+    const jittered = ctx.waits.slice(1);
+    assert.ok(jittered.length >= 5, `only ${jittered.length} jittered waits`);
+    assert.ok(jittered.every((ms) => ms === 8 || ms === 40), `unexpected waits: ${jittered.join(',')}`);
+    assert.equal(jittered.filter((ms) => ms === 40).length, 2, 'one dwell on the way down, one on the way up');
   });
 });

@@ -377,13 +377,36 @@ describe('the command channel', () => {
     const posted = [];
     const statuses = [];
     let t = 0;
+    /**
+     * A fake mailbox that speaks the real contract.
+     *
+     * `postCommand` resolves to `{ ok, reason, severity, result, commandId,
+     * elapsedMs }` where `result` is the handler's VALUE — the row's own ok and
+     * reason are lifted out of it. Fixtures here are written the way a handler
+     * answers and translated exactly the way storage/bridge.js does, so the fake
+     * cannot drift into a shape the real bridge never returns. A mailbox-level
+     * failure (a timeout, a withdrawn command) is written as `{ envelope: ... }`.
+     */
     const bridgeFor = (workspaceId) => ({
       postCommand: async (type, payload, options) => {
         posted.push({ workspaceId, type, payload, options });
-        const answer = results[type] ?? { ok: true, result: { ok: true, value: { pong: true } }, elapsedMs: 4, commandId: 'cmd_1' };
-        return typeof answer === 'function' ? answer({ type, payload, options, posted }) : answer;
+        const fixture = results[type] ?? { ok: true, value: { pong: true } };
+        const answer = typeof fixture === 'function' ? fixture({ type, payload, options, posted }) : fixture;
+        if (answer?.envelope) return { commandId: 'cmd_1', elapsedMs: 0, severity: null, ...answer.envelope };
+        const refused = answer?.ok === false;
+        return {
+          ok: !refused,
+          reason: refused ? (answer.reason ?? 'the tab refused the command') : null,
+          severity: refused ? (answer.severity ?? null) : null,
+          result: refused ? (answer.value ?? answer) : (answer?.value ?? null),
+          commandId: answer?.commandId ?? 'cmd_1',
+          elapsedMs: answer?.elapsedMs ?? 4,
+        };
       },
-      postStop: async (reason) => { posted.push({ workspaceId, type: 'STOP', payload: { reason } }); return { ok: true, result: { value: { stopped: true } } }; },
+      postStop: async (reason) => {
+        posted.push({ workspaceId, type: 'STOP', payload: { reason } });
+        return { ok: true, reason: null, severity: null, result: { stopped: true }, commandId: 'cmd_stop', elapsedMs: 2 };
+      },
       waitForStatus: async ({ newerThan }) => {
         const next = statuses.find((row) => Number(row.at) > newerThan);
         return next ?? null;
@@ -420,7 +443,7 @@ describe('the command channel', () => {
   });
 
   test('a tab that never answers the ping is reported after four tries', async () => {
-    const { commands, posted, clock } = channel({ results: { PING: { ok: false, reason: 'no handler' } } });
+    const { commands, posted, clock } = channel({ results: { PING: { envelope: { ok: false, reason: 'this tab cannot handle PING', result: null, elapsedMs: 3 } } } });
     const ready = await commands.prepare(7);
     assert.equal(ready.ok, false);
     assert.match(ready.reason, /nothing answered/);
@@ -439,15 +462,24 @@ describe('the command channel', () => {
 
   test('a command answer is unwrapped into ok, value and severity', async () => {
     const { commands } = channel({
-      results: { COLLECT_LEADS: { ok: true, result: { ok: true, value: { leads: [1, 2, 3] } }, elapsedMs: 900, commandId: 'cmd_9' } },
+      results: { COLLECT_LEADS: { ok: true, value: { leads: [1, 2, 3] }, elapsedMs: 900, commandId: 'cmd_9' } },
     });
     const result = await commands.send(CommandType.COLLECT_LEADS, { source: 'followers' }, { tabId: 7 });
-    assert.deepEqual(result, { ok: true, reason: null, value: { leads: [1, 2, 3] }, severity: null, elapsedMs: 900, commandId: 'cmd_9' });
+    assert.deepEqual(result, {
+      ok: true,
+      reason: null,
+      raw: null,
+      value: { leads: [1, 2, 3] },
+      severity: null,
+      elapsedMs: 900,
+      commandId: 'cmd_9',
+      timedOut: false,
+    });
   });
 
   test('a refusal from the tab keeps its own reason and severity', async () => {
     const { commands } = channel({
-      results: { EXECUTE_FOLLOW: { ok: true, result: { ok: false, reason: 'Instagram blocked the follow', severity: 'account', value: null }, elapsedMs: 12 } },
+      results: { EXECUTE_FOLLOW: { ok: false, reason: 'Instagram blocked the follow', severity: 'account', value: null, elapsedMs: 12 } },
     });
     const result = await commands.send(CommandType.EXECUTE_FOLLOW, { username: 'sara' }, { tabId: 7 });
     assert.equal(result.ok, false);
@@ -456,20 +488,37 @@ describe('the command channel', () => {
   });
 
   test('a mailbox timeout is distinguished from a refusal by the tab', async () => {
-    const { commands } = channel({ results: { PING: { ok: false, reason: 'the command timed out', elapsedMs: 8000 } } });
+    const { commands } = channel({
+      results: {
+        // The bridge itself gives up, not the tab: the whole envelope comes back.
+        PING: {
+          envelope: {
+            ok: false,
+            reason: 'no reply within 8s — the Instagram tab may be closed, asleep, or not on instagram.com',
+            severity: 'tab',
+            result: null,
+            commandId: 'cmd_to',
+            elapsedMs: 8000,
+            timedOut: true,
+          },
+        },
+      },
+    });
     const result = await commands.send(CommandType.PING, {}, { tabId: 7, allowUnprepared: true });
     assert.equal(result.ok, false);
     assert.equal(result.severity, 'tab');
     assert.match(result.reason, /stopped answering a PING command after 8s/);
-    assert.equal(result.raw, 'the command timed out');
+    assert.equal(result.commandId, 'cmd_to');
+    assert.equal(result.value, null);
+    assert.match(result.raw, /no reply within 8s/);
   });
 
   test('a command that needs the tab moved is moved and sent once more', async () => {
     const { commands, posted, fake } = channel({
       results: {
         EXECUTE_FOLLOW: ({ posted: seen }) => (seen.filter((entry) => entry.type === 'EXECUTE_FOLLOW').length === 1
-          ? { ok: true, result: { ok: false, reason: 'this tab is showing a different profile', value: { needsNavigation: true, url: 'https://www.instagram.com/omar/' } }, elapsedMs: 3 }
-          : { ok: true, result: { ok: true, value: { state: 'following' } }, elapsedMs: 9 }),
+          ? { ok: false, reason: 'this tab is showing a different profile', value: { needsNavigation: true, url: 'https://www.instagram.com/omar/' }, elapsedMs: 3 }
+          : { ok: true, value: { state: 'following' }, elapsedMs: 9 }),
       },
     });
     const result = await commands.sendWithNavigation(CommandType.EXECUTE_FOLLOW, { username: 'omar' }, { tabId: 7 });
@@ -482,7 +531,7 @@ describe('the command channel', () => {
 
   test('a move that fails is reported with both reasons', async () => {
     const { commands, tabs } = channel({
-      results: { EXECUTE_DM: { ok: true, result: { ok: false, reason: 'wrong profile', value: { needsNavigation: true, url: 'https://www.instagram.com/omar/' } } } },
+      results: { EXECUTE_DM: { ok: false, reason: 'wrong profile', value: { needsNavigation: true, url: 'https://www.instagram.com/omar/' } } },
     });
     // The tab is there, but Chrome refuses to move it (discarded or crashed).
     tabs.navigate = async () => ({ ok: false, reason: 'the tab could not be moved (The tab was discarded)' });
@@ -527,7 +576,7 @@ describe('the command channel', () => {
     const { commands, posted } = channel({
       storage,
       results: {
-        GET_CONTEXT: { ok: true, result: { ok: true, value: { viewer: { id: '77', username: 'me' } } } },
+        GET_CONTEXT: { ok: true, value: { viewer: { id: '77', username: 'me' } } },
       },
     });
     const resolved = await commands.resolveWorkspace({ tabId: 7 });
@@ -543,8 +592,8 @@ describe('the command channel', () => {
     const { commands, posted, state } = channel({
       storage,
       results: {
-        GET_CONTEXT: { ok: true, result: { ok: true, value: { viewer: { id: '88', username: 'other_account' } } } },
-        PROBE: { ok: true, result: { ok: true, value: { viewer: { id: '88', username: 'other_account', followers: 10, following: 5 }, session: { loggedIn: true } } } },
+        GET_CONTEXT: { ok: true, value: { viewer: { id: '88', username: 'other_account' } } },
+        PROBE: { ok: true, value: { viewer: { id: '88', username: 'other_account', followers: 10, following: 5 }, session: { loggedIn: true } } },
       },
     });
     const resolved = await commands.resolveWorkspace({ tabId: 7 });
@@ -556,7 +605,7 @@ describe('the command channel', () => {
   });
 
   test('a logged-out tab is told apart from a tab that will not answer', async () => {
-    const { commands } = channel({ results: { PROBE: { ok: true, result: { ok: true, value: { viewer: null, session: { loggedIn: false } } } } } });
+    const { commands } = channel({ results: { PROBE: { ok: true, value: { viewer: null, session: { loggedIn: false } } } } });
     const resolved = await commands.resolveWorkspace({ force: true, tabId: 7 });
     assert.equal(resolved.ok, false);
     assert.equal(resolved.reason, 'this tab is not logged in to Instagram');
@@ -564,7 +613,7 @@ describe('the command channel', () => {
   });
 
   test('a probe with no viewer asks for a reload rather than guessing an id', async () => {
-    const { commands } = channel({ results: { PROBE: { ok: true, result: { ok: true, value: { viewer: null, session: { loggedIn: true } } } } } });
+    const { commands } = channel({ results: { PROBE: { ok: true, value: { viewer: null, session: { loggedIn: true } } } } });
     const resolved = await commands.resolveWorkspace({ force: true, tabId: 7 });
     assert.equal(resolved.ok, false);
     assert.match(resolved.reason, /did not say which account/);

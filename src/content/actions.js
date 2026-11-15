@@ -76,6 +76,53 @@ function tickOf(ctx) {
   return ctx?.wait ?? interruptibleWait;
 }
 
+/** The jitter source. Injectable so a test can make "random" deterministic. */
+function randomOf(ctx) {
+  return typeof ctx?.random === 'function' ? ctx.random : Math.random;
+}
+
+/**
+ * Where in the element to press.
+ *
+ * Never the exact centre: a hundred clicks that all land on the same pixel of a
+ * button is a fingerprint no human produces. The point is inside the element and
+ * away from its edges, so a jittered press cannot slip onto a neighbour.
+ */
+export function jitterPoint(rect, random = Math.random) {
+  if (!rect || !Number.isFinite(rect.width) || rect.width <= 0) return { clientX: 0, clientY: 0 };
+  const padX = Math.min(6, rect.width * 0.2);
+  const padY = Math.min(4, rect.height * 0.2);
+  return {
+    clientX: Math.round(rect.left + padX + random() * Math.max(1, rect.width - padX * 2)),
+    clientY: Math.round(rect.top + padY + random() * Math.max(1, rect.height - padY * 2)),
+  };
+}
+
+/**
+ * The points a pointer passes on the way to a target.
+ *
+ * A content script cannot move the operating system's cursor — that would need
+ * the `debugger` permission, which this extension deliberately does not ask for.
+ * What it can do is stop teleporting: the events that precede a press start where
+ * the last press ended and arrive in a few uneven steps, which is what a real
+ * pointer stream looks like to a listener on the page.
+ */
+export function approachPath(from, to, random = Math.random) {
+  const start = { clientX: Number(from?.clientX ?? 0), clientY: Number(from?.clientY ?? 0) };
+  const end = { clientX: Number(to?.clientX ?? 0), clientY: Number(to?.clientY ?? 0) };
+  const steps = 3 + Math.floor(random() * 2);
+  const points = [];
+  for (let step = 1; step <= steps; step += 1) {
+    const t = step / (steps + 1);
+    points.push({
+      clientX: Math.round(start.clientX + (end.clientX - start.clientX) * t + (random() - 0.5) * 14),
+      clientY: Math.round(start.clientY + (end.clientY - start.clientY) * t + (random() - 0.5) * 14),
+    });
+  }
+  points.push({ clientX: end.clientX, clientY: end.clientY });
+  return points;
+}
+
 /** Is an action-block dialog on screen right now? */
 export function isActionBlocked(document) {
   return Boolean(findActionBlockDialog(document));
@@ -132,29 +179,47 @@ export async function humanClick(ctx, element, options = {}) {
   }
   await wait(settleMs, { signal });
 
+  const random = randomOf(ctx);
   const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
-  const point = {
-    clientX: rect ? Math.round(rect.left + rect.width / 2) : 0,
-    clientY: rect ? Math.round(rect.top + rect.height / 2) : 0,
-  };
-  const detail = { bubbles: true, cancelable: true, view: ctx.window ?? undefined, ...point };
+  const point = jitterPoint(rect, random);
 
-  for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']) {
+  // Arrive, then press. `ctx.pointer` remembers where the last press ended, so a
+  // run that follows twenty people produces twenty short journeys rather than
+  // twenty clicks that appear from nowhere.
+  ctx.pointer = ctx.pointer ?? {
+    clientX: rect ? Math.round(rect.left + rect.width * 3) : 0,
+    clientY: rect ? Math.round(rect.top - rect.height * 2) : 0,
+  };
+  const dispatch = (type, at, target = element) => {
+    const detail = { bubbles: true, cancelable: true, view: ctx.window ?? undefined, ...at };
     try {
       if (type.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
-        element.dispatchEvent(new PointerEvent(type, { ...detail, pointerId: 1, isPrimary: true, pointerType: 'mouse' }));
+        target.dispatchEvent(new PointerEvent(type, { ...detail, pointerId: 1, isPrimary: true, pointerType: 'mouse' }));
       } else if (type === 'focus') {
-        element.focus?.();
-      } else if (typeof MouseEvent !== 'undefined' && (type === 'mousedown' || type === 'mouseup' || type === 'click')) {
-        element.dispatchEvent(new MouseEvent(type, detail));
+        target.focus?.();
+      } else if (typeof MouseEvent !== 'undefined' && (type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'mousemove')) {
+        target.dispatchEvent(new MouseEvent(type, detail));
       } else {
-        element.dispatchEvent({ type, ...detail });
+        target.dispatchEvent({ type, ...detail });
       }
     } catch {
-      element.dispatchEvent({ type, ...detail });
+      target.dispatchEvent({ type, ...detail });
     }
-    if (type === 'pointerdown' || type === 'mouseup') await wait(40 + Math.round(Math.random() * 60), { signal });
+  };
+
+  for (const step of approachPath(ctx.pointer, point, random)) {
+    if (signal?.aborted) return false;
+    dispatch('pointermove', step);
+    dispatch('mousemove', step);
+    ctx.pointer = step;
+    await wait(8 + Math.round(random() * 18), { signal });
   }
+
+  for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']) {
+    dispatch(type, point);
+    if (type === 'pointerdown' || type === 'mouseup') await wait(40 + Math.round(random() * 60), { signal });
+  }
+  ctx.pointer = point;
   return true;
 }
 
@@ -352,7 +417,7 @@ export async function composeMessage(ctx, options = {}) {
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing');
     if (index > 0) document.execCommand?.('insertLineBreak');
     document.execCommand?.('insertText', false, lines[index]);
-    await tickOf(ctx)(60 + Math.round(Math.random() * 90), { signal });
+    await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
   }
 
   const rendered = readComposerText(target);

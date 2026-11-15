@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ALWAYS_ACCEPTED,
@@ -34,11 +34,35 @@ function pair(options = {}) {
   };
 }
 
+const liveLoops = [];
+
 function loop(content, handlers, extra = {}) {
   const signal = { aborted: false };
   const promise = content.runCommandLoop({ handlers, signal, ...extra });
-  return { signal, promise };
+  const run = { signal, promise };
+  liveLoops.push(run);
+  return run;
 }
+
+/**
+ * Every loop is stopped after its test, even one whose assertions threw.
+ *
+ * A command loop on a virtual clock is a hot microtask spin: left running it
+ * keeps the process alive forever and, because a child process's stdout is
+ * buffered until exit, the reporter prints nothing at all. The failure then looks
+ * like a hang instead of a failed assertion.
+ */
+afterEach(() => {
+  const pending = liveLoops.splice(0, liveLoops.length);
+  for (const run of pending) {
+    run.signal.aborted = true;
+    // Not awaited: an async root-level hook leaves a promise the runner waits on,
+    // and with every other test skipped that shows up as "cancelledByParent"
+    // instead of a clean run. Flagging the signal is enough — the loop exits on
+    // its own next turn, and the catch keeps a rejection from escaping.
+    run.promise.catch(() => null);
+  }
+});
 
 describe('keys and ids', () => {
   test('keys are namespaced by workspace so two accounts never collide', () => {
@@ -291,5 +315,72 @@ describe('status channel', () => {
     assert.equal(await storage.get(keyFor('77', 'command')), null);
     assert.equal(await storage.get(keyFor('77', 'result')), null);
     assert.equal(await storage.get(keyFor('77', 'status')), null);
+  });
+});
+
+describe('handler answers', () => {
+  test('a refusal from a handler is posted as a refusal, with its detail kept', async () => {
+    const { dashboard, content } = pair();
+    const run = loop(content, {
+      [CommandType.EXECUTE_FOLLOW]: async () => ({
+        ok: false,
+        reason: 'this tab is showing a different profile',
+        severity: null,
+        value: { needsNavigation: true, url: 'https://www.instagram.com/omar/' },
+      }),
+    });
+    const answer = await dashboard.postCommand(CommandType.EXECUTE_FOLLOW, { username: 'omar' }, { timeoutMs: 4000 });
+    assert.equal(answer.ok, false, 'a refusal must not ride inside a success');
+    assert.equal(answer.reason, 'this tab is showing a different profile');
+    assert.equal(answer.result.needsNavigation, true, 'the value survives, so the dashboard knows where to move the tab');
+    assert.equal(answer.result.url, 'https://www.instagram.com/omar/');
+    run.signal.aborted = true;
+    await run.promise;
+  });
+
+  test('a refusal with no inner detail still carries its reason', async () => {
+    const { dashboard, content } = pair();
+    const run = loop(content, { [CommandType.PING]: async () => ({ ok: false, reason: 'not logged in' }) });
+    const answer = await dashboard.postCommand(CommandType.PING, {}, { timeoutMs: 4000 });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.reason, 'not logged in');
+    assert.equal(answer.result.ok, false, 'with no inner value the whole answer is kept');
+    run.signal.aborted = true;
+    await run.promise;
+  });
+
+  test('a severity travels with the refusal', async () => {
+    const { dashboard, content } = pair();
+    const run = loop(content, {
+      [CommandType.EXECUTE_FOLLOW]: async () => ({ ok: false, reason: 'Instagram blocked the follow', severity: 'account', value: null }),
+    });
+    const answer = await dashboard.postCommand(CommandType.EXECUTE_FOLLOW, {}, { timeoutMs: 4000 });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.severity, 'account', 'severity has to survive the mailbox or the dashboard cannot trip its breaker');
+    run.signal.aborted = true;
+    await run.promise;
+  });
+
+  test('a plain value is still posted as a success', async () => {
+    const { dashboard, content } = pair();
+    const run = loop(content, { [CommandType.PING]: async () => ({ pong: true, page: '/sara/' }) });
+    const answer = await dashboard.postCommand(CommandType.PING, {}, { timeoutMs: 4000 });
+    assert.equal(answer.ok, true);
+    assert.deepEqual(answer.result, { pong: true, page: '/sara/' });
+    run.signal.aborted = true;
+    await run.promise;
+  });
+
+  test('a success that mentions ok inside its payload is not mistaken for a refusal', async () => {
+    const { dashboard, content } = pair();
+    const run = loop(content, {
+      [CommandType.COLLECT_LEADS]: async () => ({ ok: true, leads: 3, meta: { ok: false, note: 'one row was skipped' } }),
+    });
+    const answer = await dashboard.postCommand(CommandType.COLLECT_LEADS, {}, { timeoutMs: 4000 });
+    assert.equal(answer.ok, true);
+    assert.equal(answer.result.leads, 3);
+    assert.equal(answer.result.meta.ok, false, 'an inner ok:false is data, not a refusal');
+    run.signal.aborted = true;
+    await run.promise;
   });
 });

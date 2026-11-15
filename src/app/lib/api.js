@@ -328,11 +328,12 @@ export function createTabController({
  * turns that distinction into advice, because "reload the Instagram tab" and
  * "wait for the active window to open" are different actions.
  */
-export function explainFailure(type, result, { tabLabel = 'the Instagram tab' } = {}) {
-  if (result?.ok) return null;
-  const reason = String(result?.reason ?? 'no answer');
-  if (/timed out|timeout/i.test(reason)) {
-    return `${tabLabel} stopped answering a ${type} command after ${Math.round((result?.elapsedMs ?? 0) / 1000)}s. `
+export function explainFailure(type, posted, { tabLabel = 'the Instagram tab' } = {}) {
+  if (!posted || posted.ok) return null;
+  const reason = String(posted.reason ?? 'no answer');
+  const seconds = Math.round(Number(posted.elapsedMs ?? 0) / 1000);
+  if (posted.timedOut || /no reply within|timed out|timeout/i.test(reason)) {
+    return `${tabLabel} stopped answering a ${type} command after ${seconds}s. `
       + 'Reload the Instagram tab, make sure you are still logged in, and try again.';
   }
   if (/no handler|cannot handle/i.test(reason)) {
@@ -543,7 +544,10 @@ export function createCommandChannel({
       // finished importing, so the first ping can legitimately find nobody home.
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const ping = await bridge().postCommand(CommandType.PING, {}, { timeoutMs: Math.min(timeoutMs, 6_000) });
-        if (ping?.ok) return { ok: true, tab, context: ping.result?.value ?? null };
+        // postCommand's `result` IS the answer's value: the ok/reason/severity
+        // fields are lifted out of the row, so digging for `.value` again reads
+        // a healthy tab as a dead one.
+        if (ping?.ok) return { ok: true, tab, context: ping.result ?? null };
         await sleep(400);
       }
       return { ok: false, reason: 'the content script is in the tab but nothing answered; reload the Instagram tab and try again', tab };
@@ -557,24 +561,16 @@ export function createCommandChannel({
         if (!ready.ok && !options.allowUnprepared) return { ok: false, reason: ready.reason, value: null, severity: 'tab' };
       }
       const posted = await bridge().postCommand(type, payload, { timeoutMs, signal: options.signal ?? null });
-      if (!posted?.ok) {
-        return {
-          ok: false,
-          reason: explainFailure(type, posted),
-          raw: posted?.reason ?? null,
-          value: null,
-          severity: /timed out|no handler|withdrawn/i.test(String(posted?.reason ?? '')) ? 'tab' : 'unknown',
-          elapsedMs: posted?.elapsedMs ?? 0,
-        };
-      }
-      const result = posted.result ?? {};
+      if (!posted) return { ok: false, reason: 'the mailbox returned nothing', value: null, severity: 'tab', elapsedMs: 0, commandId: null };
       return {
-        ok: Boolean(result.ok),
-        reason: result.ok ? null : String(result.reason ?? 'the tab refused the command'),
-        value: result.value ?? null,
-        severity: result.severity ?? null,
+        ok: Boolean(posted.ok),
+        reason: posted.ok ? null : explainFailure(type, posted),
+        raw: posted.ok ? null : (posted.reason ?? null),
+        value: posted.result ?? null,
+        severity: posted.severity ?? (posted.ok ? null : 'unknown'),
         elapsedMs: posted.elapsedMs ?? 0,
         commandId: posted.commandId ?? null,
+        timedOut: Boolean(posted.timedOut),
       };
     },
 
@@ -601,7 +597,11 @@ export function createCommandChannel({
     /** Stop whatever the tab is doing. Never times out into silence. */
     async stop(reason = 'stopped from the dashboard') {
       const posted = await bridge().postStop(reason);
-      return { ok: Boolean(posted?.ok), reason: posted?.ok ? null : String(posted?.reason ?? 'the tab did not answer the stop'), value: posted?.result?.value ?? null };
+      return {
+        ok: Boolean(posted?.ok),
+        reason: posted?.ok ? null : String(posted?.reason ?? 'the tab did not answer the stop'),
+        value: posted?.result ?? null,
+      };
     },
 
     /**
