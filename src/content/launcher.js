@@ -272,19 +272,21 @@ export function describeStatus(status) {
 
   if (status.phase) {
     const stage = PHASE_LABEL[status.phase] ?? status.note ?? 'Working';
+    const total = Number.isFinite(status.total) ? status.total : (Number.isFinite(status.count) ? status.count : null);
     const parts = [];
-    if (Number.isFinite(status.total)) parts.push(`${status.total} row${status.total === 1 ? '' : 's'} so far`);
+    if (total !== null) parts.push(`${total} row${total === 1 ? '' : 's'} so far`);
     if (Number.isFinite(status.page)) parts.push(`page ${status.page}`);
     if (Number.isFinite(status.scrolls)) parts.push(`scroll ${status.scrolls}`);
+    else if (Number.isFinite(status.step) && status.step > 0) parts.push(`step ${status.step}`);
     if (Number.isFinite(status.suspects)) parts.push(`${status.suspects} to check`);
     // A progress bar only when there is something honest to divide by: a
     // half-filled bar invented from a guess is worse than no bar.
-    const progress = Number.isFinite(status.total) && Number.isFinite(status.limit) && status.limit > 0
-      ? Math.max(0, Math.min(1, status.total / status.limit))
+    const progress = total !== null && Number.isFinite(status.limit) && status.limit > 0
+      ? Math.max(0, Math.min(1, total / status.limit))
       : null;
     return {
       stage,
-      detail: status.source ? `From @${status.source}` : (status.post ? `Post ${status.post}` : ''),
+      detail: status.note ? String(status.note) : (status.source ? `From @${status.source}` : (status.post ? `Post ${status.post}` : '')),
       counter: parts.join(' · '),
       progress,
       tone: 'accent',

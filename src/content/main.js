@@ -15,6 +15,15 @@
 
 import { Pacer, PacingStopped, AccountFlagged, interruptibleWait } from './pacing.js';
 import { detectSession, detectAppId, detectAsbd, detectViewerFromDom, harvestDocIds, probeViewer, runProbe } from './probe.js';
+import { createVirtualCursor } from './human.js';
+import {
+  collectHashtagDom,
+  collectOpenDialogDom,
+  collectPostCommentsDom,
+  collectPostLikersDom,
+  collectProfileListDom,
+  collectRecentPostLikersDom,
+} from './browser-collector.js';
 import {
   ApiError,
   createApi,
@@ -155,6 +164,7 @@ export function createContentRuntime(deps = {}) {
     controller: null,
     profileCache: new Map(),
     viewer: deps.viewer ?? domViewer ?? null,
+    virtualCursor: deps.virtualCursor ?? (document ? createVirtualCursor(document) : null),
 
     refreshSession() {
       const freshCookies = deps.cookieString ?? document?.cookie ?? '';
@@ -205,6 +215,7 @@ export function createContentRuntime(deps = {}) {
       return controller.signal;
     },
     endRun() {
+      runtime.virtualCursor?.hide?.();
       runtime.current = null;
       runtime.controller = null;
       runtime.pacer = null;
@@ -214,6 +225,7 @@ export function createContentRuntime(deps = {}) {
     /** Stop the run in flight. Always safe, always immediate. */
     stop(reason = 'stopped') {
       const was = runtime.current;
+      runtime.virtualCursor?.hide?.();
       runtime.controller?.abort();
       runtime.pacer?.stop();
       runtime.endRun();
@@ -248,8 +260,11 @@ export function ctxOf(runtime, { status = null } = {}) {
     request: runtime.request,
     pacer: runtime.pacer,
     wait: runtime.deps.wait ?? interruptibleWait,
+    random: runtime.deps.random,
     now: runtime.deps.now,
+    domTimeoutMs: runtime.deps.domTimeoutMs,
     getSelection: runtime.deps.getSelection,
+    virtualCursor: runtime.virtualCursor,
     signal: runtime.signal,
     status,
   };
@@ -352,7 +367,14 @@ function recentPostsFor(runtime, target) {
   return posts.slice(0, 6);
 }
 
-/** Collect from one source. Always returns `{ ok, rows, reason }`. */
+/**
+ * Collect from one source strictly via visible human-like browser DOM
+ * automation (ZERO Instagram API calls).
+ *
+ * Always returns `{ ok, rows, leads, edges, reason }` — or `{ ok: false,
+ * needsNavigation: true, url, reason }` when the open Instagram tab needs to
+ * navigate to the target profile, post, or hashtag first.
+ */
 export async function collectFromSource(runtime, {
   source,
   targetUsername = null,
@@ -368,122 +390,72 @@ export async function collectFromSource(runtime, {
     return { ok: false, rows: [], edges: [], reason: `unknown source: ${source}` };
   }
   const ctx = ctxOf(runtime, { status: onProgress });
-  let target = null;
+  const cleanTarget = String(targetUsername ?? runtime.pageUsername ?? '').trim().replace(/^@+/, '') || null;
 
-  if (NEEDS_PROFILE.includes(source)) {
-    const resolved = await resolveTarget(runtime, { username: targetUsername ?? runtime.pageUsername, userId: targetUserId });
-    if (!resolved.ok) return { ok: false, rows: [], edges: [], reason: resolved.reason, code: resolved.code ?? null, source };
-    target = resolved.profile;
-    if (!target.id) return { ok: false, rows: [], edges: [], reason: noNumericIdMessage(target.username), code: 'no_numeric_id', source };
-  }
-
-  // Provenance label: a profile source is the account, a post source is the post,
-  // a hashtag source is the tag. This is only how the dashboard names where a lead
-  // came from; none of it is sent to Instagram.
+  // Provenance label: how the dashboard names where a lead came from.
   let sourceAccount;
-  if (NEEDS_PROFILE.includes(source)) sourceAccount = target?.username ?? runtime.pageUsername ?? 'current-page';
+  if (NEEDS_PROFILE.includes(source)) sourceAccount = cleanTarget ?? 'current-page';
   else if (source === CollectSource.POST_LIKERS || source === CollectSource.POST_COMMENTS) sourceAccount = shortcode ? `post/${shortcode}` : (runtime.pageUsername ?? 'current-page');
-  else if (source === CollectSource.HASHTAG_GRID && tag) sourceAccount = `#${tag}`;
+  else if (source === CollectSource.HASHTAG_GRID && tag) sourceAccount = `#${String(tag).replace(/^#+/, '')}`;
   else sourceAccount = runtime.pageUsername ?? 'current-page';
+
   let result;
 
   switch (source) {
     case CollectSource.FOLLOWERS:
     case CollectSource.FOLLOWING:
-      result = await fetchFriendshipList(ctx, {
-        userId: target.id,
-        path: source === CollectSource.FOLLOWERS ? 'followers' : 'following',
+      result = await collectProfileListDom(ctx, {
+        kind: source === CollectSource.FOLLOWERS ? 'followers' : 'following',
+        targetUsername: cleanTarget,
         limit,
         signal: runtime.signal,
         onProgress,
       });
       break;
 
-    case CollectSource.POST_LIKERS: {
-      const media = shortcode
-        ? await fetchMediaIdForShortcode(ctx, { shortcode, signal: runtime.signal })
-        : { ok: false, mediaId: null, reason: 'no shortcode was given' };
-      if (!media.ok) return { ok: false, rows: [], edges: [], reason: media.reason, source };
-      result = await fetchLikers(ctx, { mediaId: media.mediaId, docIds: runtime.docIds, limit, signal: runtime.signal, onProgress });
-      result = { ...result, refId: shortcode ?? media.mediaId, refLabel: media.caption || null };
+    case CollectSource.PROFILE_RECENT_LIKERS:
+      result = await collectRecentPostLikersDom(ctx, {
+        targetUsername: cleanTarget,
+        limit,
+        signal: runtime.signal,
+        onProgress,
+      });
       break;
-    }
 
-    case CollectSource.POST_COMMENTS: {
-      const media = shortcode
-        ? await fetchMediaIdForShortcode(ctx, { shortcode, signal: runtime.signal })
-        : { ok: false, mediaId: null, reason: 'no shortcode was given' };
-      if (!media.ok) return { ok: false, rows: [], edges: [], reason: media.reason, source };
-      const comments = await fetchComments(ctx, { mediaId: media.mediaId, docIds: runtime.docIds, limit, signal: runtime.signal, onProgress });
-      if (!comments.ok) return { ok: false, rows: [], edges: [], reason: comments.reason, source };
-      result = { ok: true, rows: comments.rows.map(commentToUserRow), commentTexts: comments.rows, refId: shortcode ?? media.mediaId };
+    case CollectSource.POST_LIKERS:
+      result = await collectPostLikersDom(ctx, {
+        shortcode,
+        limit,
+        signal: runtime.signal,
+        onProgress,
+      });
       break;
-    }
 
-    case CollectSource.PROFILE_RECENT_LIKERS: {
-      const posts = recentPostsFor(runtime, target);
-      if (!posts.length) {
-        return { ok: false, rows: [], edges: [], code: 'no_recent_posts', reason: `@${target.username} has no readable recent posts (private account, or no posts).`, source };
-      }
-      const rows = [];
-      const perPost = Math.max(10, Math.round(limit / posts.length));
-      for (const post of posts) {
-        if (runtime.signal?.aborted) break;
-        // The likers endpoint is read by media id, exactly like the single-post
-        // path. The profile payload already carries the id; a post found only as a
-        // page anchor is resolved to its id first.
-        let mediaId = post.mediaId;
-        if (!mediaId && post.shortcode) {
-          const media = await fetchMediaIdForShortcode(ctx, { shortcode: post.shortcode, signal: runtime.signal });
-          if (!media.ok) {
-            onProgress?.({ phase: source, note: media.reason, post: post.shortcode });
-            continue;
-          }
-          mediaId = media.mediaId;
-        }
-        if (!mediaId) continue;
-        const likers = await fetchLikers(ctx, { mediaId, docIds: runtime.docIds, limit: perPost, signal: runtime.signal, onProgress });
-        if (!likers.ok) {
-          onProgress?.({ phase: source, note: likers.reason, post: post.shortcode ?? mediaId });
-          continue;
-        }
-        for (const row of likers.rows) rows.push({ ...row, refId: post.shortcode ?? mediaId });
-      }
-      result = { ok: rows.length > 0, rows, reason: rows.length ? null : 'no likers could be read from the recent posts' };
+    case CollectSource.POST_COMMENTS:
+      result = await collectPostCommentsDom(ctx, {
+        shortcode,
+        limit,
+        signal: runtime.signal,
+        onProgress,
+      });
       break;
-    }
 
     case CollectSource.OPEN_LIST_DIALOG:
-      result = await scrapeModalUserList(ctx, {
-        document: runtime.document,
-        findList: () => findScrollableList(runtime.document),
+      result = await collectOpenDialogDom(ctx, {
         limit,
         signal: runtime.signal,
         onProgress,
       });
       break;
 
-    case CollectSource.HASHTAG_GRID: {
-      // A hashtag grid is only the right grid when the tab is actually on that
-      // hashtag; otherwise the scrape would quietly collect whatever the owner
-      // happens to have open. Ask the dashboard to navigate first — it moves the
-      // tab and resends this same command exactly once.
-      if (tag) {
-        const wanted = `/explore/tags/${encodeURIComponent(tag)}`;
-        const path = String(runtime.location?.pathname ?? runtime.document?.location?.pathname ?? '');
-        if (!path.toLowerCase().startsWith(wanted.toLowerCase())) {
-          return {
-            ok: false,
-            needsNavigation: true,
-            url: `${IG_ORIGIN}/explore/tags/${encodeURIComponent(tag)}/`,
-            reason: `Opening #${tag} first...`,
-            source,
-          };
-        }
-      }
-      result = scrapeGridAuthors(runtime.document, { limit });
+    case CollectSource.HASHTAG_GRID:
+      result = await collectHashtagDom(ctx, {
+        tag,
+        limit,
+        signal: runtime.signal,
+        onProgress,
+      });
       break;
-    }
 
     case CollectSource.SAVED_GRID:
       result = scrapeGridAuthors(runtime.document, { limit });
@@ -496,7 +468,15 @@ export async function collectFromSource(runtime, {
   }
 
   if (!result?.ok) {
-    return { ok: false, rows: [], edges: [], reason: result?.reason ?? 'the source returned nothing', source };
+    return {
+      ok: false,
+      rows: [],
+      edges: [],
+      reason: result?.reason ?? 'the source returned nothing',
+      ...(result?.needsNavigation ? { needsNavigation: true, url: result.url } : {}),
+      ...(result?.code ? { code: result.code } : {}),
+      source,
+    };
   }
 
   const built = toLeads({
@@ -507,25 +487,22 @@ export async function collectFromSource(runtime, {
     weights,
     refId: result.refId ?? null,
     commentTexts: result.commentTexts ?? null,
-    targetIsPrivate: Boolean(target?.isPrivate),
-    // A dialog or a grid has no score signal: every row scores the same, so
-    // re-sorting it alphabetically would scramble the order the owner sees on
-    // screen. Ranked sources keep the score order.
+    targetIsPrivate: false,
+    // Keep visual on-screen order for dialog/grid reads; score-rank engagement sources.
     keepOrder: DOM_ONLY_SOURCES.includes(source) || source === CollectSource.CURRENT_PAGE,
   });
+
   return {
     ok: true,
     source,
     sourceAccount,
-    target: target ? { username: target.username, id: target.id, isPrivate: target.isPrivate } : null,
-    // Each entry is { key, lead, edges, score }: the dashboard upserts the lead
-    // and its provenance edges from one object, highest score first.
+    target: cleanTarget ? { username: cleanTarget, id: targetUserId ? String(targetUserId) : null, isPrivate: false } : null,
     scored: built.leads,
     leads: built.leads.map((entry) => entry.lead),
     edges: built.edges,
     reason: built.leads.length ? null : 'the source returned rows but none had a username',
     pages: result.pages ?? null,
-    strategy: result.strategy ?? null,
+    strategy: result.strategy ?? 'browser-dom',
   };
 }
 
@@ -1019,6 +996,7 @@ export function createHandlers(runtime, deps = {}) {
  */
 export async function beginRun(runtime, kind, { pacing = {}, status = null, refuseWhenLoggedOut = true } = {}) {
   if (runtime.isBusy()) return { ok: false, reason: `a ${runtime.current} run is already in progress in this tab` };
+  runtime.refreshSession?.();
   if (refuseWhenLoggedOut && !runtime.session.loggedIn) {
     return { ok: false, reason: 'this tab is not logged in to Instagram; log in normally, then run the collection again' };
   }

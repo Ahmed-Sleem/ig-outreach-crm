@@ -623,9 +623,9 @@ export function createCommandChannel({
       const first = await this.send(type, payload, options);
       const wanted = first?.value?.url ?? null;
       if (first?.ok || !first?.value?.needsNavigation || !wanted || tabId === null || tabId === undefined) return first;
-      const moved = await tabs.navigate(tabId, wanted);
+      const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus) });
       if (!moved.ok) return { ...first, reason: `${first.reason} — and the tab could not be moved there (${moved.reason})` };
-      await sleep(options.settleMs ?? 1200);
+      await sleep(options.settleMs ?? 2000);
       const second = await this.send(type, payload, { ...options, tabId });
       return { ...second, navigated: true, firstReason: first.reason };
     },

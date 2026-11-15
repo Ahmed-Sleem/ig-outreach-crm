@@ -271,6 +271,12 @@ export function createRunController(deps = {}) {
     state.tabId = tab.tabId;
     emit({ type: 'run', runId: run.runId, source, tabId: tab.tabId, tabLabel: tab.label });
 
+    // Bring the Instagram tab into view so the owner can watch the human-like
+    // cursor, clicks and scrolling work visibly in front of them.
+    if (options.focusTab !== false && typeof api.tabs.focus === 'function') {
+      await api.tabs.focus(tab.tabId);
+    }
+
     const watcher = api.watch((row) => emit({ type: 'status', status: row }), { intervalMs: options.statusIntervalMs ?? 1_000 });
     try {
       const answer = await api.sendWithNavigation(CommandType.COLLECT_LEADS, {
@@ -283,11 +289,11 @@ export function createRunController(deps = {}) {
         weights,
         workspaceId: api.workspaceId,
         pacing: options.pacing ?? null,
-        // A hashtag grid needs the tab to settle on the tag page before the resend
-        // scrapes it, so it gets a longer wait than the default navigation settle.
-        // 'hashtag_grid' is the frozen CollectSource value (the runner stays free of
-        // a content-layer import for one string).
-      }, { tabId: tab.tabId, ...(source === 'hashtag_grid' ? { settleMs: 2500 } : {}) });
+      }, {
+        tabId: tab.tabId,
+        focus: options.focusTab !== false,
+        settleMs: 2500,
+      });
 
       if (state.stopRequested) {
         await api.finishRun(run.runId, { status: 'stopped', reason: state.stopReason ?? 'stopped by the owner' });
@@ -371,8 +377,23 @@ export function createRunController(deps = {}) {
     const tabs = await api.tabs.listTabs();
     const worker = await api.tabs.worker();
     const picked = pickTabFrom(tabs, { tabId: null, username: options.username ?? null, workerTabId: worker?.id ?? null });
-    if (!picked?.tab) return { ok: false, reason: 'no Instagram tab is open; open the profile you want to collect from' };
-    return { ok: true, tabId: picked.tab.id, label: picked.tab.url ?? 'the Instagram tab', tab: picked.tab };
+    if (picked?.tab) return { ok: true, tabId: picked.tab.id, label: picked.tab.url ?? 'the Instagram tab', tab: picked.tab };
+    // No Instagram tab is open yet: open one visibly for the owner if the browser
+    // controller supports it so collection works with zero manual tab-hunting.
+    if (typeof api.tabs.openInstagram === 'function') {
+      const startUrl = options.username
+        ? `https://www.instagram.com/${encodeURIComponent(String(options.username).replace(/^@+/, ''))}/`
+        : options.shortcode
+          ? `https://www.instagram.com/p/${encodeURIComponent(String(options.shortcode))}/`
+          : options.tag
+            ? `https://www.instagram.com/explore/tags/${encodeURIComponent(String(options.tag).replace(/^#+/, ''))}/`
+            : 'https://www.instagram.com/';
+      const opened = await api.tabs.openInstagram(startUrl, { active: true });
+      if (opened?.ok && opened.tab?.id) {
+        return { ok: true, tabId: opened.tab.id, label: opened.tab.url ?? startUrl, tab: opened.tab, created: true };
+      }
+    }
+    return { ok: false, reason: 'no Instagram tab is open; open instagram.com and try again' };
   }
 
   function stop(reason = 'stopped by the owner') {

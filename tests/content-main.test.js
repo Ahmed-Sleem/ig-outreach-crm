@@ -280,24 +280,68 @@ describe('COLLECT_LEADS from the page', () => {
   });
 });
 
-describe('COLLECT_LEADS from the api', () => {
-  const profileBody = {
-    data: {
-      user: {
-        id: '555',
-        username: 'comp_a',
-        is_private: false,
-        edge_followed_by: { count: 9000 },
-        edge_follow: { count: 400 },
-      },
-    },
-  };
+describe('COLLECT_LEADS via browser-DOM automation (zero Instagram API calls)', () => {
+  function mountUserRow(doc, list, username, fullName = '') {
+    const row = doc.createElement('div');
+    row.setAttribute('role', 'listitem');
+    const a = doc.createElement('a');
+    a.setAttribute('href', `/${username}/`);
+    a.textContent = username;
+    const span = doc.createElement('span');
+    span.textContent = fullName || username;
+    row.append(a, span);
+    list.append(row);
+  }
 
-  test('followers of a target are collected, scored and given provenance', async () => {
-    const { rt, calls } = runtime('profile', { username: 'sara_shop' }, [
-      [/web_profile_info/, { body: profileBody }],
-      [/friendships\/555\/followers/, () => userList(['ali', 'sara', 'omar'])],
-    ]);
+  function profileWithFollowersDom(target = 'comp_a', users = ['ali', 'sara', 'omar']) {
+    const doc = installDom();
+    const header = doc.createElement('header');
+    const link = doc.createElement('a');
+    link.setAttribute('href', `/${target}/followers/`);
+    link.textContent = `${users.length} followers`;
+    link.click = () => {
+      const dialog = doc.createElement('div');
+      dialog.setAttribute('role', 'dialog');
+      const list = doc.createElement('div');
+      list.style.overflowY = 'auto';
+      list.clientHeight = 200;
+      list.scrollHeight = 400;
+      for (const u of users) mountUserRow(doc, list, u, u);
+      dialog.append(list);
+      doc.body.append(dialog);
+    };
+    header.append(link);
+    doc.body.append(header);
+    let t = 1000;
+    const calls = [];
+    const rt = createContentRuntime({
+      document: doc,
+      location: { href: `https://www.instagram.com/${target}/`, pathname: `/${target}/` },
+      cookieString: LOGGED_IN,
+      fetchImpl: async (url) => { calls.push({ url }); throw new Error('API fetch must not be called'); },
+      wait: async (ms = 0) => { t += Math.max(10, Number(ms) || 10); },
+      now: () => t,
+      random: () => 0.5,
+      domTimeoutMs: 300,
+    });
+    return { doc, rt, calls };
+  }
+
+  test('followers of a target on a different page asks to navigate visibly first', async () => {
+    const { rt, calls } = runtime('profile', { username: 'sara_shop' }, []);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
+      source: CollectSource.FOLLOWERS,
+      targetUsername: 'comp_a',
+      workspaceId: '77',
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.value.needsNavigation, true);
+    assert.equal(result.value.url, 'https://www.instagram.com/comp_a/');
+    assert.equal(calls.length, 0);
+  });
+
+  test('followers of a target are collected via DOM dialog, scored, and given provenance with zero API calls', async () => {
+    const { rt, calls } = profileWithFollowersDom('comp_a', ['ali', 'sara', 'omar']);
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
       source: CollectSource.FOLLOWERS,
       targetUsername: 'comp_a',
@@ -306,104 +350,119 @@ describe('COLLECT_LEADS from the api', () => {
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.value.leads.length, 3);
     assert.equal(result.value.sourceAccount, 'comp_a');
-    assert.equal(result.value.target.id, '555');
-    assert.equal(result.value.strategy, 'v1');
+    assert.equal(result.value.strategy, 'browser-dom');
     assert.equal(result.value.edges[0].edgeType, EdgeType.FOLLOWED_BY_SOURCE);
     assert.equal(result.value.edges[0].sourceAccount, 'comp_a');
-    assert.ok(calls.some((call) => call.url.includes('web_profile_info')));
-    assert.ok(calls.some((call) => call.url.includes('friendships/555/followers')));
+    assert.equal(calls.length, 0, 'zero Instagram API calls');
   });
 
-  test('the target profile is read once per run, not once per source', async () => {
-    const { rt, calls } = runtime('profile', {}, [
-      [/web_profile_info/, { body: profileBody }],
-      [/friendships\/555\/followers/, () => userList(['ali'])],
-    ]);
-    await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWERS, targetUsername: 'comp_a', workspaceId: '77' });
-    await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWING, targetUsername: 'comp_a', workspaceId: '77' });
-    assert.equal(calls.filter((call) => call.url.includes('web_profile_info')).length, 1);
-  });
+  test('an action-block dialog stops collection immediately with account severity and releases the tab', async () => {
+    const { doc, rt } = profileWithFollowersDom('comp_a', ['ali']);
+    const block = doc.createElement('div');
+    block.setAttribute('role', 'dialog');
+    block.textContent = 'Try Again Later';
+    doc.body.append(block);
 
-  test('a target with no numeric id is refused with the guidance wording and code, not treated as empty', async () => {
-    const { rt } = runtime('profile', {}, [[/web_profile_info/, { body: { data: { user: { username: 'comp_a' } } } }]]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWERS, targetUsername: 'comp_a', workspaceId: '77' });
-    assert.equal(result.ok, false);
-    assert.equal(result.value.code, 'no_numeric_id');
-    assert.match(result.reason, /Could not get @comp_a's numeric ID from Instagram/);
-  });
-
-  test('a refused list read reports the tiers it tried', async () => {
-    const { rt } = runtime('profile', {}, [
-      [/web_profile_info/, { body: profileBody }],
-      [/friendships/, { status: 400, body: { message: 'nope' } }],
-      [/graphql\/query/, { body: { data: { user: { edge_followed_by: { edges: [], page_info: { has_next_page: false } } } } } }],
-    ]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWERS, targetUsername: 'comp_a', workspaceId: '77' });
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /v1/);
-    assert.match(result.reason, /graphql/);
-  });
-
-  test('feedback_required is an account-level stop, not a failed collection', async () => {
-    const { rt } = runtime('profile', {}, [
-      [/web_profile_info/, { body: profileBody }],
-      [/friendships/, { body: { message: 'feedback_required' } }],
-    ]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWERS, targetUsername: 'comp_a', workspaceId: '77' });
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
+      source: CollectSource.FOLLOWERS,
+      targetUsername: 'comp_a',
+      workspaceId: '77',
+    });
     assert.equal(result.ok, false);
     assert.equal(result.severity, 'account');
-    assert.match(result.reason, /feedback_required/);
+    assert.match(result.reason, /Try Again Later|action-block/i);
     assert.equal(rt.isBusy(), false, 'a stopped run must release the tab');
   });
 
-  test('likers need a shortcode resolved to a media id first', async () => {
-    const { rt, calls } = runtime('profile', {}, [
-      [/web_profile_info/, { body: profileBody }],
-      [/media\/AbC\/info/, { body: { items: [{ id: '999', caption: { text: 'linen dress' } }] } }],
-      [/api\/graphql/, { body: { data: { likes: { edges: [{ node: { username: 'ali', pk: '1' } }], page_info: { has_next_page: false } } } } }],
-    ]);
+  test('post likers navigates when not on the post, then clicks likes & reads DOM with zero API calls', async () => {
+    const { rt: wrongRt } = runtime('explore', {}, []);
+    const nav = await runCommand(wrongRt, CommandType.COLLECT_LEADS, {
+      source: CollectSource.POST_LIKERS,
+      shortcode: 'AbC123',
+      workspaceId: '77',
+    });
+    assert.equal(nav.ok, false);
+    assert.equal(nav.value.needsNavigation, true);
+    assert.equal(nav.value.url, 'https://www.instagram.com/p/AbC123/');
+
+    const doc = installDom();
+    const article = doc.createElement('article');
+    const likesBtn = doc.createElement('a');
+    likesBtn.setAttribute('href', '/p/AbC123/liked_by/');
+    likesBtn.textContent = '24 likes';
+    likesBtn.click = () => {
+      const dlg = doc.createElement('div');
+      dlg.setAttribute('role', 'dialog');
+      const list = doc.createElement('div');
+      list.style.overflowY = 'auto';
+      list.clientHeight = 200;
+      list.scrollHeight = 300;
+      mountUserRow(doc, list, 'ali', 'Ali');
+      dlg.append(list);
+      doc.body.append(dlg);
+    };
+    article.append(likesBtn);
+    doc.body.append(article);
+
+    let t = 1000;
+    const calls = [];
+    const rt = createContentRuntime({
+      document: doc,
+      location: { href: 'https://www.instagram.com/p/AbC123/', pathname: '/p/AbC123/' },
+      cookieString: LOGGED_IN,
+      fetchImpl: async (url) => { calls.push({ url }); throw new Error('API fetch must not be called'); },
+      wait: async (ms = 0) => { t += Math.max(10, Number(ms) || 10); },
+      now: () => t,
+      random: () => 0.5,
+      domTimeoutMs: 300,
+    });
+
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
       source: CollectSource.POST_LIKERS,
-      targetUsername: 'comp_a',
-      shortcode: 'AbC',
+      shortcode: 'AbC123',
       workspaceId: '77',
     });
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.value.leads[0].username, 'ali');
     assert.equal(result.value.edges[0].edgeType, EdgeType.LIKED_POST);
-    assert.equal(result.value.edges[0].refId, 'AbC');
-    assert.ok(calls.some((call) => call.url.includes('media/AbC/info')));
+    assert.equal(result.value.edges[0].refId, 'AbC123');
+    assert.equal(calls.length, 0);
   });
 
-  test('likers without a shortcode are refused', async () => {
-    const { rt } = runtime('profile', {}, [[/web_profile_info/, { body: profileBody }]]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.POST_LIKERS, targetUsername: 'comp_a', workspaceId: '77' });
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /no shortcode/);
-  });
+  test('post comments carry their DOM text onto the edge and their buyer intent onto the lead', async () => {
+    const doc = installDom();
+    const article = doc.createElement('article');
+    const addComment = (username, body) => {
+      const li = doc.createElement('li');
+      const a = doc.createElement('a');
+      a.setAttribute('href', `/${username}/`);
+      a.textContent = username;
+      const span = doc.createElement('span');
+      span.setAttribute('dir', 'auto');
+      span.textContent = body;
+      const time = doc.createElement('time');
+      time.textContent = '1h';
+      li.append(a, span, time);
+      article.append(li);
+    };
+    addComment('buyer_one', 'How much is the price please?');
+    addComment('fan_two', 'So beautiful, great work!');
+    doc.body.append(article);
 
-  test('comments carry their text onto the edge and their intent onto the lead', async () => {
-    const { rt } = runtime('profile', {}, [
-      [/web_profile_info/, { body: profileBody }],
-      [/media\/AbC\/info/, { body: { items: [{ id: '999' }] } }],
-      [/api\/graphql/, {
-        body: {
-          data: {
-            comments: {
-              edges: [
-                { node: { id: 'c1', text: 'How much is the price please?', owner: { username: 'buyer_one', id: '11' } } },
-                { node: { id: 'c2', text: 'So beautiful, great work!', owner: { username: 'fan_two', id: '12' } } },
-              ],
-              page_info: { has_next_page: false },
-            },
-          },
-        },
-      }],
-    ]);
+    let t = 1000;
+    const rt = createContentRuntime({
+      document: doc,
+      location: { href: 'https://www.instagram.com/p/AbC123/', pathname: '/p/AbC123/' },
+      cookieString: LOGGED_IN,
+      wait: async (ms = 0) => { t += Math.max(10, Number(ms) || 10); },
+      now: () => t,
+      random: () => 0.5,
+      domTimeoutMs: 300,
+    });
+
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
       source: CollectSource.POST_COMMENTS,
-      targetUsername: 'comp_a',
-      shortcode: 'AbC',
+      shortcode: 'AbC123',
       workspaceId: '77',
     });
     assert.equal(result.ok, true, result.reason);
@@ -414,21 +473,6 @@ describe('COLLECT_LEADS from the api', () => {
     assert.ok(buyer.priorityScore > fan.priorityScore, 'a buyer-intent comment must outrank praise');
     assert.equal(fan.hasBuyerIntent, false);
     assert.equal(result.value.edges.find((edge) => edge.leadKey.endsWith('buyer_one')).sample, 'How much is the price please?');
-  });
-
-  test('comments without a harvested doc id are refused, not faked', async () => {
-    const { rt } = runtime('profile', { docIds: [] }, [
-      [/web_profile_info/, { body: profileBody }],
-      [/media\/AbC\/info/, { body: { items: [{ id: '999' }] } }],
-    ]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
-      source: CollectSource.POST_COMMENTS,
-      targetUsername: 'comp_a',
-      shortcode: 'AbC',
-      workspaceId: '77',
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /doc_id/);
   });
 });
 
@@ -839,39 +883,26 @@ describe('stop and error classification', () => {
   });
 });
 
-describe('collect sources after the audit fixes', () => {
-  const likersBody = { data: { likes: { edges: [{ node: { pk: '1', username: 'liker_a', full_name: 'A' } }, { node: { pk: '2', username: 'liker_b', full_name: 'B' } }], page_info: { has_next_page: false } } } };
-  const mediaInfo = (id) => ({ body: { items: [{ id, taken_at: 1700000000, caption: { text: 'hi' } }] } });
-  const profileWithPosts = { data: { user: { id: '77', username: 'sara_shop', full_name: 'Sara', edge_followed_by: { count: 10 }, edge_follow: { count: 5 }, edge_owner_to_timeline_media: { count: 2, edges: [{ node: { id: '111', shortcode: 'AAA' } }, { node: { id: '222', shortcode: 'BBB' } }] } } } };
-  const privateProfile = { data: { user: { id: '88', username: 'priv_account', is_private: true, edge_followed_by: { count: 0 }, edge_owner_to_timeline_media: { count: 0, edges: [] } } } };
-
-  test('a post source works from a shortcode alone, with no profile read (F3)', async () => {
-    const { rt, calls } = runtime('explore', {}, [[/media\/AbC\/info/, mediaInfo('555')], [/graphql/, { body: likersBody }]]);
+describe('collect sources via visible browser navigation', () => {
+  test('a post source asks to navigate to the post when open on another route', async () => {
+    const { rt, calls } = runtime('explore', {}, []);
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.POST_LIKERS, shortcode: 'AbC', workspaceId: '77' });
-    assert.equal(result.ok, true, result.reason);
-    assert.equal(result.value.leads.length, 2);
-    assert.equal(result.value.sourceAccount, 'post/AbC');
-    assert.ok(!calls.some((c) => /web_profile_info/.test(c.url)), 'a post source must not read a profile');
+    assert.equal(result.ok, false);
+    assert.equal(result.value.needsNavigation, true);
+    assert.equal(result.value.url, 'https://www.instagram.com/p/AbC/');
+    assert.equal(calls.length, 0);
   });
 
-  test('recent likers come from the profile payload media ids, not a guessed shortcode (F4)', async () => {
-    const { rt, calls } = runtime('profile', { username: 'sara_shop' }, [[/web_profile_info/, { body: profileWithPosts }], [/graphql/, { body: likersBody }]]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.PROFILE_RECENT_LIKERS, targetUsername: 'sara_shop', workspaceId: '77', limit: 20 });
-    assert.equal(result.ok, true, result.reason);
-    assert.equal(result.value.leads.length, 2);
-    assert.equal(result.value.sourceAccount, 'sara_shop');
-    assert.ok(calls.every((c) => !/\/media\//.test(c.url)), 'the media id came with the profile, so no shortcode lookup was needed');
-  });
-
-  test('a profile with no readable recent posts says so honestly (F4)', async () => {
-    const { rt } = runtime('profile', { username: 'priv_account' }, [[/web_profile_info/, { body: privateProfile }]]);
+  test('recent likers on a profile with no visible posts reports no_recent_posts honestly', async () => {
+    const { rt, calls } = runtime('profile', { username: 'priv_account' }, []);
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.PROFILE_RECENT_LIKERS, targetUsername: 'priv_account', workspaceId: '77' });
     assert.equal(result.ok, false);
     assert.equal(result.value.code, 'no_recent_posts');
-    assert.match(result.value.reason, /no readable recent posts/);
+    assert.match(result.value.reason, /no visible recent posts|private account/i);
+    assert.equal(calls.length, 0);
   });
 
-  test('a hashtag collect navigates to the tag instead of scraping whatever is open (F6)', async () => {
+  test('a hashtag collect navigates to the tag instead of scraping whatever is open', async () => {
     const { rt } = runtime('explore');
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.HASHTAG_GRID, tag: 'linen', workspaceId: '77' });
     assert.equal(result.ok, false);
@@ -880,7 +911,7 @@ describe('collect sources after the audit fixes', () => {
     assert.match(result.value.reason, /Opening #linen/);
   });
 
-  test('a hashtag collect on the tag page scrapes it and touches no network (F6)', async () => {
+  test('a hashtag collect on the tag page scrapes it and touches no network', async () => {
     const { rt, calls } = runtime('grid', { usernames: ['brand_eg', 'shop.cairo'] });
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.HASHTAG_GRID, tag: 'linen', workspaceId: '77' });
     assert.equal(result.ok, true, result.reason);
@@ -889,39 +920,7 @@ describe('collect sources after the audit fixes', () => {
     assert.equal(calls.length, 0);
   });
 
-  test('resolveTarget falls back to fetchProfileById when userId is known and username read fails (F10)', async () => {
-    const { rt, calls } = runtime('explore', {}, [
-      [/web_profile_info/, { status: 404, body: { message: 'not found' } }],
-      [/users\/555\/info/, { body: { user: { pk: '555', username: 'comp_a', full_name: 'Comp A', follower_count: 100, following_count: 20 } } }],
-      [/friendships\/555\/followers/, { body: { users: [{ pk: '1', username: 'ali', full_name: 'Ali' }], next_max_id: null } }],
-    ]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
-      source: CollectSource.FOLLOWERS,
-      targetUsername: 'comp_a',
-      targetUserId: '555',
-      workspaceId: '77',
-    });
-    assert.equal(result.ok, true, result.reason);
-    assert.equal(result.value.leads.length, 1);
-    assert.equal(result.value.leads[0].username, 'ali');
-    assert.ok(calls.some((c) => /users\/555\/info/.test(c.url)), 'the by-id fallback must call users/{id}/info');
-  });
-
-  test('a 404 on an open profile page is not masked by an empty-id DOM scrape (F5)', async () => {
-    const { rt } = runtime('profile', { username: 'comp_a' }, [
-      [/web_profile_info/, { status: 404, body: { message: 'not found' } }],
-    ]);
-    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
-      source: CollectSource.FOLLOWERS,
-      targetUsername: 'comp_a',
-      workspaceId: '77',
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.value.code, 'not_found', 'must preserve not_found rather than turning it into no_numeric_id');
-    assert.match(result.reason, /http_404/);
-  });
-
-  test('syncRelationships reports no_numeric_id with the guidance wording when ID is unavailable (F5)', async () => {
+  test('syncRelationships reports no_numeric_id with the guidance wording when ID is unavailable', async () => {
     const { rt } = runtime('profile', { username: 'comp_a' }, [
       [/web_profile_info/, { body: { data: { user: { username: 'comp_a' } } } }],
     ]);
