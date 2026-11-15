@@ -14,7 +14,7 @@
  * validated by parseSnapshot field by field before a single row is written.
  */
 
-import { btn, card, el, clear, empty, field, note, stat, table, toast, fmtNum, fmtDate, relTime } from '../lib/ui.js';
+import { btn, card, el, clear, empty, field, modal, note, stat, table, toast, fmtNum, fmtDate, relTime } from '../lib/ui.js';
 import {
   LEAD_CSV_COLUMNS,
   MIME,
@@ -183,6 +183,18 @@ export function createBackupView(ctx = {}) {
     await renderSavePoints();
   }
 
+  // Deleting a save point is permanent, so the red-outline button asks once.
+  function confirmRemoveSnapshot(row) {
+    modal({
+      title: 'Delete this save point?',
+      body: note(`\"${row.label ?? 'Save point'}\" will be permanently removed from this browser. Your leads and buckets are not affected.`, 'warning'),
+      actions: [
+        { label: 'Cancel', variant: 'ghost' },
+        { label: 'Delete save point', variant: 'danger-solid', onClick: () => { void removeSnapshot(row.snapshotId); } },
+      ],
+    });
+  }
+
   async function renderSavePoints() {
     const body = el('div');
     let rows = [];
@@ -211,7 +223,7 @@ export function createBackupView(ctx = {}) {
           el('div', { class: 'row' }, [
             el('button', { class: 'btn btn--sm', text: 'Restore', onclick: () => restoreSnapshot(row.snapshotId) }),
             el('button', { class: 'btn btn--sm btn--ghost', text: 'Download', onclick: () => downloadSnapshot(row.snapshotId) }),
-            el('button', { class: 'btn btn--sm btn--danger', text: 'Delete', onclick: () => removeSnapshot(row.snapshotId) }),
+            el('button', { class: 'btn btn--sm btn--danger', text: 'Delete', onclick: () => confirmRemoveSnapshot(row) }),
           ]),
         ]),
         { numeric: [1, 2] },

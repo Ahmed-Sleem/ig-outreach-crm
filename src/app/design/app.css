@@ -184,6 +184,9 @@ button { font-family: inherit; }
 .btn--primary:hover:not(:disabled) { background: var(--c-primary-hover); border-color: var(--c-primary-hover); }
 .btn--danger { border-color: var(--c-danger); color: var(--c-danger); }
 .btn--danger:hover:not(:disabled) { background: var(--c-danger-fade); }
+/* Filled red is reserved for the confirm step of a destructive action. */
+.btn--danger-solid { background: var(--c-danger); border-color: var(--c-danger); color: var(--c-text-invert); font-weight: var(--fw-medium); }
+.btn--danger-solid:hover:not(:disabled) { background: var(--c-danger); border-color: var(--c-danger); filter: brightness(1.1); }
 .btn--sm { padding: var(--sp-1) var(--sp-3); font-size: var(--fs-sm); }
 .btn--ghost { border-color: transparent; background: transparent; }
 .btn--ghost:hover:not(:disabled) { background: var(--c-surface-hover); }

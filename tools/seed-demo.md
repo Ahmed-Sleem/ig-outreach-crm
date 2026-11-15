@@ -70,6 +70,7 @@ console.log(`Seeded ${i} demo leads into workspace "${WS}". Reload the dashboard
 ## After seeding
 
 Reload the dashboard. Shot 1 (empty Collect state) must be captured **before**
-seeding; shots 2–6 want the seeded library. To start over, clear the library from
-Settings → Backup & export → Restore/reset, or delete the demo leads by key
-`${WS}:${username.toLowerCase()}` with `db.deleteLead(leadKey)`.
+seeding; shots 2–6 want the seeded library. To start over, delete the demo leads by
+key `${WS}:${username.toLowerCase()}` with `db.deleteLead(leadKey)`, or clear the
+whole database from DevTools → Application → IndexedDB → `ig-outreach-crm` →
+Delete database.

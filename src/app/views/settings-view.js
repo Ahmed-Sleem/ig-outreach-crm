@@ -9,7 +9,7 @@
  * change what a running campaign is allowed to do.
  */
 
-import { btn, card, chipList, field, note, slider, toggle, el, clear, toast } from '../lib/ui.js';
+import { btn, card, chipList, field, modal, note, slider, toggle, el, clear, toast } from '../lib/ui.js';
 import { HARD_CEILINGS, TrustPreset, presetLimits } from '../../core/governor.js';
 import { clampSafetySettings } from '../../storage/settings.js';
 
@@ -162,12 +162,25 @@ export function createSettingsView(ctx = {}) {
     replaceCard(weightsCard, body);
   }
 
+  // Resetting throws away the owner's unsaved tuning, so it is a red-outline
+  // button that asks once before clearing the draft. Nothing is written until Save.
+  function confirmReset() {
+    modal({
+      title: 'Reset all settings to defaults?',
+      body: note('Every limit, the active window and the ranking weights return to their defaults. This clears unsaved changes; nothing is written until you press Save.', 'warning'),
+      actions: [
+        { label: 'Cancel', variant: 'ghost' },
+        { label: 'Reset to defaults', variant: 'danger-solid', onClick: () => { draft = clampSafetySettings({}).settings; render(); } },
+      ],
+    });
+  }
+
   function renderActions() {
     const dirty = snapshot(draft) !== savedSnapshot;
     clear(actions);
     actions.append(
       dirty ? el('span', { class: 'small faint', text: 'Unsaved changes' }) : null,
-      btn('Reset to defaults', { variant: 'ghost', onClick: () => { draft = clampSafetySettings({}).settings; render(); } }),
+      btn('Reset to defaults', { variant: 'danger', onClick: () => confirmReset() }),
       btn('Save settings', {
         variant: 'primary', disabled: !dirty, busyLabel: 'Saving…',
         onClick: async () => { await save(); },
