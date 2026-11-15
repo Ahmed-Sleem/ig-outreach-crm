@@ -278,11 +278,16 @@ export function createRunController(deps = {}) {
         targetUsername: options.username ?? null,
         targetUserId: options.userId ?? null,
         shortcode: options.shortcode ?? null,
+        tag: options.tag ?? null,
         limit: options.limit ?? 200,
         weights,
         workspaceId: api.workspaceId,
         pacing: options.pacing ?? null,
-      }, { tabId: tab.tabId });
+        // A hashtag grid needs the tab to settle on the tag page before the resend
+        // scrapes it, so it gets a longer wait than the default navigation settle.
+        // 'hashtag_grid' is the frozen CollectSource value (the runner stays free of
+        // a content-layer import for one string).
+      }, { tabId: tab.tabId, ...(source === 'hashtag_grid' ? { settleMs: 2500 } : {}) });
 
       if (state.stopRequested) {
         await api.finishRun(run.runId, { status: 'stopped', reason: state.stopReason ?? 'stopped by the owner' });

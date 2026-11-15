@@ -22,7 +22,7 @@ import {
   fetchFriendshipList,
   fetchLikers,
   fetchMediaIdForShortcode,
-  fetchProfileByUsername,
+  readProfileByUsername,
   lookupFollowship,
   normaliseProfile,
   normaliseUserRow,
@@ -78,6 +78,17 @@ export const NEEDS_TARGET = Object.freeze([
   CollectSource.FOLLOWING,
   CollectSource.POST_LIKERS,
   CollectSource.POST_COMMENTS,
+  CollectSource.PROFILE_RECENT_LIKERS,
+]);
+
+/**
+ * The subset of `NEEDS_TARGET` that genuinely needs a resolved profile (a numeric
+ * id) before it can read. Post sources work from a shortcode alone, so gating them
+ * behind a profile read is what made them impossible to run from the dashboard.
+ */
+export const NEEDS_PROFILE = Object.freeze([
+  CollectSource.FOLLOWERS,
+  CollectSource.FOLLOWING,
   CollectSource.PROFILE_RECENT_LIKERS,
 ]);
 
@@ -241,10 +252,17 @@ export async function resolveTarget(runtime, { username = null, userId = null, f
   const ctx = ctxOf(runtime);
   let profile = null;
   let reason = null;
+  let code = null;
   if (username) {
-    const byName = await fetchProfileByUsername(ctx, { username, signal: runtime.signal });
+    const byName = await readProfileByUsername(ctx, {
+      username,
+      signal: runtime.signal,
+      appId: runtime.appId,
+      canRetryAppId: runtime.appIdSource !== 'injected',
+      document: runtime.document,
+    });
     if (byName.ok) profile = byName.user;
-    else reason = byName.reason;
+    else { reason = byName.reason; code = byName.code ?? null; }
   }
   if (!profile && userId) {
     const byId = await runtime.deps.fetchProfileById
@@ -260,10 +278,43 @@ export async function resolveTarget(runtime, { username = null, userId = null, f
       if (scraped.ok) profile = { ...scraped.user, id: scraped.user.id || userId || '' };
     }
   }
-  if (!profile) return { ok: false, profile: null, reason: reason ?? `could not read the profile for ${username ?? userId}` };
+  if (!profile) return { ok: false, profile: null, code, reason: reason ?? `could not read the profile for ${username ?? userId}` };
   const cached = { ok: true, profile, reason: null };
   runtime.profileCache.set(key, cached);
   return cached;
+}
+
+/** A shortcode out of a post href: /p/CODE/, /reel/CODE/, /reels/CODE/, /tv/CODE/. */
+function shortcodeFromHref(href) {
+  const match = String(href ?? '').match(/\/(?:p|reels|reel|tv)\/([A-Za-z0-9_-]{6,})/);
+  return match?.[1] ?? null;
+}
+
+/**
+ * The recent posts to read likers from. The profile payload's own timeline comes
+ * first because it carries the media id (no extra request); only when the open
+ * page really is that profile are the rendered post anchors used as a fallback.
+ * At most six posts, as before.
+ */
+function recentPostsFor(runtime, target) {
+  const posts = [];
+  const seen = new Set();
+  const push = (mediaId, shortcode) => {
+    const key = shortcode || mediaId;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    posts.push({ mediaId: mediaId || null, shortcode: shortcode || null });
+  };
+  for (const post of target?.recentPosts ?? []) push(post.mediaId, post.shortcode);
+  const onThisProfile = runtime.pageUsername && target?.username && nameKey(runtime.pageUsername) === nameKey(target.username);
+  if (posts.length < 6 && onThisProfile) {
+    for (const anchor of runtime.document?.querySelectorAll?.('a') ?? []) {
+      const code = shortcodeFromHref(anchor.getAttribute?.('href'));
+      if (code) push(null, code);
+      if (posts.length >= 6) break;
+    }
+  }
+  return posts.slice(0, 6);
 }
 
 /** Collect from one source. Always returns `{ ok, rows, reason }`. */
@@ -272,6 +323,7 @@ export async function collectFromSource(runtime, {
   targetUsername = null,
   targetUserId = null,
   shortcode = null,
+  tag = null,
   limit = 200,
   weights = {},
   workspaceId = 'default',
@@ -283,14 +335,21 @@ export async function collectFromSource(runtime, {
   const ctx = ctxOf(runtime, { status: onProgress });
   let target = null;
 
-  if (NEEDS_TARGET.includes(source)) {
+  if (NEEDS_PROFILE.includes(source)) {
     const resolved = await resolveTarget(runtime, { username: targetUsername ?? runtime.pageUsername, userId: targetUserId });
-    if (!resolved.ok) return { ok: false, rows: [], edges: [], reason: resolved.reason, source };
+    if (!resolved.ok) return { ok: false, rows: [], edges: [], reason: resolved.reason, code: resolved.code ?? null, source };
     target = resolved.profile;
-    if (!target.id) return { ok: false, rows: [], edges: [], reason: `${target.username} has no numeric id in the profile payload; the list endpoints need one`, source };
+    if (!target.id) return { ok: false, rows: [], edges: [], reason: `${target.username} has no numeric id in the profile payload; the list endpoints need one`, code: 'no_numeric_id', source };
   }
 
-  const sourceAccount = target?.username ?? runtime.pageUsername ?? 'current-page';
+  // Provenance label: a profile source is the account, a post source is the post,
+  // a hashtag source is the tag. This is only how the dashboard names where a lead
+  // came from; none of it is sent to Instagram.
+  let sourceAccount;
+  if (NEEDS_PROFILE.includes(source)) sourceAccount = target?.username ?? runtime.pageUsername ?? 'current-page';
+  else if (source === CollectSource.POST_LIKERS || source === CollectSource.POST_COMMENTS) sourceAccount = shortcode ? `post/${shortcode}` : (runtime.pageUsername ?? 'current-page');
+  else if (source === CollectSource.HASHTAG_GRID && tag) sourceAccount = `#${tag}`;
+  else sourceAccount = runtime.pageUsername ?? 'current-page';
   let result;
 
   switch (source) {
@@ -327,20 +386,33 @@ export async function collectFromSource(runtime, {
     }
 
     case CollectSource.PROFILE_RECENT_LIKERS: {
-      const codes = runtime.deps.recentShortcodes
-        ? await runtime.deps.recentShortcodes(ctx, { username: target.username, limit: 6 })
-        : [];
-      if (!codes.length) return { ok: false, rows: [], edges: [], reason: 'no recent posts could be read from this profile', source };
+      const posts = recentPostsFor(runtime, target);
+      if (!posts.length) {
+        return { ok: false, rows: [], edges: [], code: 'no_recent_posts', reason: `@${target.username} has no readable recent posts (private account, or no posts).`, source };
+      }
       const rows = [];
-      const perPost = Math.max(10, Math.round(limit / codes.length));
-      for (const code of codes) {
+      const perPost = Math.max(10, Math.round(limit / posts.length));
+      for (const post of posts) {
         if (runtime.signal?.aborted) break;
-        const likers = await fetchLikers(ctx, { shortcode: code, docIds: runtime.docIds, limit: perPost, signal: runtime.signal, onProgress });
+        // The likers endpoint is read by media id, exactly like the single-post
+        // path. The profile payload already carries the id; a post found only as a
+        // page anchor is resolved to its id first.
+        let mediaId = post.mediaId;
+        if (!mediaId && post.shortcode) {
+          const media = await fetchMediaIdForShortcode(ctx, { shortcode: post.shortcode, signal: runtime.signal });
+          if (!media.ok) {
+            onProgress?.({ phase: source, note: media.reason, post: post.shortcode });
+            continue;
+          }
+          mediaId = media.mediaId;
+        }
+        if (!mediaId) continue;
+        const likers = await fetchLikers(ctx, { mediaId, docIds: runtime.docIds, limit: perPost, signal: runtime.signal, onProgress });
         if (!likers.ok) {
-          onProgress?.({ phase: source, note: likers.reason, post: code });
+          onProgress?.({ phase: source, note: likers.reason, post: post.shortcode ?? mediaId });
           continue;
         }
-        for (const row of likers.rows) rows.push({ ...row, refId: code });
+        for (const row of likers.rows) rows.push({ ...row, refId: post.shortcode ?? mediaId });
       }
       result = { ok: rows.length > 0, rows, reason: rows.length ? null : 'no likers could be read from the recent posts' };
       break;
@@ -356,7 +428,28 @@ export async function collectFromSource(runtime, {
       });
       break;
 
-    case CollectSource.HASHTAG_GRID:
+    case CollectSource.HASHTAG_GRID: {
+      // A hashtag grid is only the right grid when the tab is actually on that
+      // hashtag; otherwise the scrape would quietly collect whatever the owner
+      // happens to have open. Ask the dashboard to navigate first — it moves the
+      // tab and resends this same command exactly once.
+      if (tag) {
+        const wanted = `/explore/tags/${encodeURIComponent(tag)}`;
+        const path = String(runtime.location?.pathname ?? runtime.document?.location?.pathname ?? '');
+        if (!path.toLowerCase().startsWith(wanted.toLowerCase())) {
+          return {
+            ok: false,
+            needsNavigation: true,
+            url: `${IG_ORIGIN}/explore/tags/${encodeURIComponent(tag)}/`,
+            reason: `Opening #${tag} first...`,
+            source,
+          };
+        }
+      }
+      result = scrapeGridAuthors(runtime.document, { limit });
+      break;
+    }
+
     case CollectSource.SAVED_GRID:
       result = scrapeGridAuthors(runtime.document, { limit });
       break;

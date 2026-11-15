@@ -24,6 +24,8 @@
 
 import { classifyResponse, interruptibleWait } from './pacing.js';
 import { gridTileAuthors, userLinksFrom, usernameFromPath } from './selectors.js';
+import { APP_ID_CANDIDATES } from './probe.js';
+import { isValidUsername, normaliseUsername } from '../app/lib/target.js';
 
 export const WWW_ORIGIN = 'https://www.instagram.com';
 export const I_ORIGIN = 'https://i.instagram.com';
@@ -361,15 +363,36 @@ export function normaliseUserRows(rows) {
  * profile page. A profile that cannot be read returns `{ ok: false }` — the
  * caller must not treat that as "this account has no followers".
  */
-export async function fetchProfileByUsername(ctx, { username, signal = null }) {
-  const url = `${WWW_ORIGIN}/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-  const response = await spaceRead(ctx, url, { signal }).catch((error) => {
-    if (error instanceof ApiError) throw error;
-    return { verdict: { action: 'error', reason: error.message }, status: null, body: null };
-  });
+export async function fetchProfileByUsername(ctx, { username, signal = null, appId = null }) {
+  const name = normaliseUsername(username);
+  if (!isValidUsername(name)) {
+    return { ok: false, user: null, source: null, code: 'invalid_username', status: null, reason: `"${username}" is not a valid Instagram username` };
+  }
+  const url = `${WWW_ORIGIN}/api/v1/users/web_profile_info/?username=${encodeURIComponent(name)}`;
+  let response;
+  try {
+    response = await spaceRead(ctx, url, { signal, ...(appId ? { appId } : {}) });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      // A login / challenge / feedback / rate-limit refusal keeps throwing so every
+      // caller still stops the run; the code is attached only to give the dashboard
+      // its own wording. The safety behaviour itself is untouched.
+      if (!error.code) error.code = profileFailureCode(error.status, error.reason);
+      throw error;
+    }
+    return { ok: false, user: null, source: null, code: 'network', status: null, reason: error?.message ?? 'profile request failed' };
+  }
   const user = response.body?.data?.user;
-  if (user) return { ok: true, user: normaliseProfile(user), source: 'web_profile_info' };
-  return { ok: false, user: null, source: null, reason: `web_profile_info refused (${describeRefusal(response)})` };
+  if (user) {
+    const profile = normaliseProfile(user);
+    if (!profile.id) {
+      return { ok: false, user: profile, source: 'web_profile_info', code: 'no_numeric_id', status: response.status ?? 200, reason: 'no numeric id in the profile payload' };
+    }
+    return { ok: true, user: profile, source: 'web_profile_info', code: null, status: response.status ?? 200 };
+  }
+  const status = response.status ?? null;
+  const code = status >= 200 && status < 300 ? 'no_user_in_body' : profileFailureCode(status, response.verdict?.reason);
+  return { ok: false, user: null, source: null, code, status, reason: `web_profile_info refused (${describeRefusal(response)})` };
 }
 
 export async function fetchProfileById(ctx, { userId, signal = null }) {
@@ -403,7 +426,28 @@ export function normaliseProfile(raw) {
     publicEmail: String(user?.public_email ?? '') || null,
     publicPhone: String(user?.public_phone_number?.national_number ?? user?.contact_phone_number ?? '') || null,
     city: String(user?.city_name ?? user?.city_id ?? '') || null,
+    recentPosts: recentPostsFrom(user),
   };
+}
+
+/**
+ * The recent timeline posts `web_profile_info` already carries, as
+ * `{ mediaId, shortcode }` (at most 12). "Recent likers on a profile" reads these
+ * instead of guessing shortcodes off the rendered page.
+ */
+function recentPostsFrom(user) {
+  const edges = user?.edge_owner_to_timeline_media?.edges ?? [];
+  const posts = [];
+  for (const edge of edges) {
+    const node = edge?.node;
+    if (!node) continue;
+    const mediaId = String(node.id ?? node.pk ?? '');
+    const shortcode = String(node.shortcode ?? '');
+    if (!mediaId && !shortcode) continue;
+    posts.push({ mediaId, shortcode });
+    if (posts.length >= 12) break;
+  }
+  return posts;
 }
 
 /** One honest sentence about why a read produced nothing. */
@@ -428,11 +472,15 @@ export function scrapeProfileFromDom(document) {
   }
   const username = document.querySelector('h1, header h2')?.textContent?.trim() ?? null;
   if (!username) return { ok: false, user: null, reason: 'no username element found on the page' };
+  // A DOM scrape used to hardcode id: '', which made every later "no numeric id"
+  // failure look like the endpoint's fault. Recover the id from the page's own
+  // embedded JSON when this page really is that profile.
+  const pageId = scrapeProfileIdFromPage(document, username)?.id ?? '';
   return {
     ok: true,
     source: 'dom',
     user: {
-      id: '',
+      id: pageId,
       username,
       fullName: '',
       biography: document.querySelector('header section div')?.textContent?.trim() ?? '',
@@ -728,3 +776,129 @@ export function scrapeOpenProfile(document, { location = null } = {}) {
 }
 
 export { gridTileAuthors, userLinksFrom, usernameFromPath };
+
+/* ------------------------------------------------------- profile diagnostics */
+
+/**
+ * Map an HTTP status (or a pacing verdict reason) onto the small, stable set of
+ * profile-read codes the dashboard turns into one honest sentence. The codes are
+ * a contract with the UI, so they never carry raw endpoint text.
+ */
+function profileFailureCode(status, reason) {
+  const text = String(reason ?? '').toLowerCase();
+  if (/challenge|feedback|checkpoint|spam|flagged|blocked/.test(text)) return 'blocked';
+  if (/login|log_in|auth|session|private_account/.test(text)) return 'login_required';
+  if (/rate|throttl|429|too_many/.test(text)) return 'rate_limited';
+  switch (Number(status)) {
+    case 401: return 'login_required';
+    case 403: return 'blocked';
+    case 404: return 'not_found';
+    case 429: return 'rate_limited';
+    case 400: return 'invalid_username';
+    default: return Number(status) >= 500 ? 'network' : 'not_found';
+  }
+}
+
+/** Escape a username so it can sit inside a RegExp source safely. */
+function escapeForRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Concatenate the page's embedded JSON (script text + meta content), capped. */
+function collectPageJson(document) {
+  const parts = [];
+  let total = 0;
+  const cap = 4000000;
+  const add = (text) => {
+    const value = String(text ?? '');
+    if (!value || total >= cap) return;
+    parts.push(value);
+    total += value.length;
+  };
+  for (const script of document.querySelectorAll?.('script') ?? []) add(script.textContent);
+  for (const meta of document.querySelectorAll?.('meta') ?? []) add(meta.getAttribute?.('content'));
+  return parts.join('\n');
+}
+
+/**
+ * Fallback A — recover a numeric id from the page the owner already has open.
+ *
+ * This only ever runs when the open page IS the target profile: the logged-in
+ * viewer's own id is embedded in the JSON of every page, so an unguarded scan
+ * would happily return the wrong account. Two deterministic shapes are looked
+ * for, and the first number on the page is never trusted on its own:
+ *   1. an id sitting in the same JSON object as a matching "username":"<name>";
+ *   2. a "profilePage_<id>" token.
+ * Returns a normalised user with the id filled in, or null when nothing matches.
+ */
+export function scrapeProfileIdFromPage(document, username) {
+  const name = normaliseUsername(username).toLowerCase();
+  if (!document || !name) return null;
+  const pageName = String(usernameFromPath(document?.location?.pathname) ?? '').toLowerCase();
+  if (pageName !== name) return null;
+
+  const json = collectPageJson(document);
+  if (!json) return null;
+
+  const escaped = escapeForRegExp(name);
+  const patterns = [
+    new RegExp(`"username"\\s*:\\s*"${escaped}"[\\s\\S]{0,400}?"(?:id|pk)"\\s*:\\s*"?(\\d{5,})"?`, 'i'),
+    new RegExp(`"(?:id|pk)"\\s*:\\s*"?(\\d{5,})"?[\\s\\S]{0,400}?"username"\\s*:\\s*"${escaped}"`, 'i'),
+    /"profilePage_(\d{5,})"/,
+  ];
+  for (const pattern of patterns) {
+    const match = json.match(pattern);
+    if (match?.[1]) {
+      return { id: String(match[1]), username: name, fullName: '', biography: '', followers: 0, following: 0, posts: 0, isPrivate: false, isVerified: false };
+    }
+  }
+  return null;
+}
+
+/**
+ * Read a profile by username, made diagnosable and recoverable.
+ *
+ * Wraps `fetchProfileByUsername` with the two recovery steps the dashboard needs:
+ * one alternate-app-id retry for a transient 400/404, and the page-JSON fallback
+ * for a 200 that carried no usable id. Every failure comes back with a stable
+ * `code` so the UI can say one honest sentence instead of leaking endpoint text.
+ * A login / challenge / rate-limit refusal still throws (and still stops the run).
+ */
+export async function readProfileByUsername(ctx, {
+  username,
+  signal = null,
+  appId = null,
+  appIdCandidates = APP_ID_CANDIDATES,
+  canRetryAppId = false,
+  document = null,
+} = {}) {
+  const name = normaliseUsername(username);
+  if (!isValidUsername(name)) {
+    return {
+      ok: false, user: null, source: null, code: 'invalid_username', status: null,
+      reason: `"${username}" is not a valid Instagram username`,
+      hint: 'Usernames use letters, numbers, dots and underscores, up to 30 characters.',
+    };
+  }
+
+  let attempt = await fetchProfileByUsername(ctx, { username: name, signal, appId });
+
+  // One retry with the next candidate app id — only for a transient 400/404, and
+  // only when the first attempt used the page-detected id rather than a guess.
+  if (!attempt.ok && canRetryAppId && (attempt.status === 400 || attempt.status === 404)) {
+    const nextId = (appIdCandidates ?? []).map((id) => String(id)).find((id) => id && id !== String(appId ?? ''));
+    if (nextId) {
+      const retry = await fetchProfileByUsername(ctx, { username: name, signal, appId: nextId });
+      if (retry.ok) return retry;
+      if (attempt.code === 'not_found' && retry.code !== 'not_found') attempt = retry;
+    }
+  }
+  if (attempt.ok) return attempt;
+
+  // Fallback A: the open page may itself carry the numeric id for this username.
+  if (attempt.code === 'no_numeric_id' || attempt.code === 'no_user_in_body' || attempt.code === 'not_found') {
+    const pageUser = scrapeProfileIdFromPage(document ?? ctx?.document, name);
+    if (pageUser) return { ok: true, user: pageUser, source: 'page-json', code: null, status: null };
+  }
+  return attempt;
+}

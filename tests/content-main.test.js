@@ -837,3 +837,54 @@ describe('stop and error classification', () => {
     assert.ok(result.value.caveat.length > 20);
   });
 });
+
+describe('collect sources after the audit fixes', () => {
+  const likersBody = { data: { likes: { edges: [{ node: { pk: '1', username: 'liker_a', full_name: 'A' } }, { node: { pk: '2', username: 'liker_b', full_name: 'B' } }], page_info: { has_next_page: false } } } };
+  const mediaInfo = (id) => ({ body: { items: [{ id, taken_at: 1700000000, caption: { text: 'hi' } }] } });
+  const profileWithPosts = { data: { user: { id: '77', username: 'sara_shop', full_name: 'Sara', edge_followed_by: { count: 10 }, edge_follow: { count: 5 }, edge_owner_to_timeline_media: { count: 2, edges: [{ node: { id: '111', shortcode: 'AAA' } }, { node: { id: '222', shortcode: 'BBB' } }] } } } };
+  const privateProfile = { data: { user: { id: '88', username: 'priv_account', is_private: true, edge_followed_by: { count: 0 }, edge_owner_to_timeline_media: { count: 0, edges: [] } } } };
+
+  test('a post source works from a shortcode alone, with no profile read (F3)', async () => {
+    const { rt, calls } = runtime('explore', {}, [[/media\/AbC\/info/, mediaInfo('555')], [/graphql/, { body: likersBody }]]);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.POST_LIKERS, shortcode: 'AbC', workspaceId: '77' });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.value.leads.length, 2);
+    assert.equal(result.value.sourceAccount, 'post/AbC');
+    assert.ok(!calls.some((c) => /web_profile_info/.test(c.url)), 'a post source must not read a profile');
+  });
+
+  test('recent likers come from the profile payload media ids, not a guessed shortcode (F4)', async () => {
+    const { rt, calls } = runtime('profile', { username: 'sara_shop' }, [[/web_profile_info/, { body: profileWithPosts }], [/graphql/, { body: likersBody }]]);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.PROFILE_RECENT_LIKERS, targetUsername: 'sara_shop', workspaceId: '77', limit: 20 });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.value.leads.length, 2);
+    assert.equal(result.value.sourceAccount, 'sara_shop');
+    assert.ok(calls.every((c) => !/\/media\//.test(c.url)), 'the media id came with the profile, so no shortcode lookup was needed');
+  });
+
+  test('a profile with no readable recent posts says so honestly (F4)', async () => {
+    const { rt } = runtime('profile', { username: 'priv_account' }, [[/web_profile_info/, { body: privateProfile }]]);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.PROFILE_RECENT_LIKERS, targetUsername: 'priv_account', workspaceId: '77' });
+    assert.equal(result.ok, false);
+    assert.equal(result.value.code, 'no_recent_posts');
+    assert.match(result.value.reason, /no readable recent posts/);
+  });
+
+  test('a hashtag collect navigates to the tag instead of scraping whatever is open (F6)', async () => {
+    const { rt } = runtime('explore');
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.HASHTAG_GRID, tag: 'linen', workspaceId: '77' });
+    assert.equal(result.ok, false);
+    assert.equal(result.value.needsNavigation, true);
+    assert.equal(result.value.url, 'https://www.instagram.com/explore/tags/linen/');
+    assert.match(result.value.reason, /Opening #linen/);
+  });
+
+  test('a hashtag collect on the tag page scrapes it and touches no network (F6)', async () => {
+    const { rt, calls } = runtime('grid', { usernames: ['brand_eg', 'shop.cairo'] });
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.HASHTAG_GRID, tag: 'linen', workspaceId: '77' });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.value.leads.length, 2);
+    assert.equal(result.value.sourceAccount, '#linen');
+    assert.equal(calls.length, 0);
+  });
+});

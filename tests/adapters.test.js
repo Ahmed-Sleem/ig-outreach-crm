@@ -25,6 +25,7 @@ import {
   normaliseUserRow,
   parseBody,
   parseCountText,
+  readProfileByUsername,
   rowKeyOf,
   rowsOfEdges,
   rowsOfUserList,
@@ -32,6 +33,7 @@ import {
   scrapeModalUserList,
   scrapeOpenProfile,
   scrapeProfileFromDom,
+  scrapeProfileIdFromPage,
   spaceRead,
   walkPaged,
 } from '../src/content/adapters.js';
@@ -645,5 +647,100 @@ describe('DOM-only adapters', () => {
     assert.equal(row.hasAnonymousPic, true);
     assert.equal(row.profilePicUrl, 'u');
     assert.equal(row.followers, null);
+  });
+});
+
+describe('profile read diagnostics and recovery', () => {
+  const profileBody = {
+    data: { user: { id: '7712345', username: 'sara_shop', full_name: 'Sara', edge_followed_by: { count: 10 }, edge_follow: { count: 5 }, edge_owner_to_timeline_media: { count: 2 } } },
+  };
+  const noIdBody = { data: { user: { username: 'sara_shop', full_name: 'Sara' } } };
+
+  function fakeProfileDocument(pathname, scriptText) {
+    return {
+      location: { pathname },
+      querySelectorAll: (selector) => (selector === 'script' ? [{ textContent: scriptText }] : []),
+    };
+  }
+
+  test('an invalid username is refused with a code and makes no request', async () => {
+    const { ctx, calls } = makeCtx([]);
+    const result = await readProfileByUsername(ctx, { username: 'not a user!!' });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'invalid_username');
+    assert.equal(calls.length, 0);
+  });
+
+  test('a leading @ is normalised before the request', async () => {
+    const { ctx, calls } = makeCtx([[/web_profile_info/, { body: profileBody }]]);
+    const result = await readProfileByUsername(ctx, { username: '@sara_shop' });
+    assert.equal(result.ok, true);
+    assert.match(calls[0].url, /username=sara_shop/);
+  });
+
+  test('a 200 with no numeric id is reported as no_numeric_id, not a vague refusal', async () => {
+    const { ctx } = makeCtx([[/web_profile_info/, { body: noIdBody }]]);
+    const result = await fetchProfileByUsername(ctx, { username: 'sara_shop' });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'no_numeric_id');
+    assert.equal(result.user.username, 'sara_shop');
+  });
+
+  test('a 429 is reported as rate_limited', async () => {
+    const { ctx } = makeCtx([[/web_profile_info/, { status: 429, body: { message: 'slow down' } }]]);
+    const result = await fetchProfileByUsername(ctx, { username: 'sara_shop' });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'rate_limited');
+    assert.equal(result.status, 429);
+  });
+
+  test('a 401 still throws so the run stops, and carries a login_required code', async () => {
+    const { ctx } = makeCtx([[/web_profile_info/, { status: 401, body: { message: 'login' } }]]);
+    await assert.rejects(
+      () => fetchProfileByUsername(ctx, { username: 'sara_shop' }),
+      (error) => error.name === 'ApiError' && error.code === 'login_required',
+    );
+  });
+
+  test('a transient 404 is retried once with the next app id when the first was page-detected', async () => {
+    const { ctx, calls } = makeCtx([[/web_profile_info/, (url, init, n) => (n === 1 ? { status: 404, body: { message: 'nope' } } : { body: profileBody })]]);
+    const result = await readProfileByUsername(ctx, { username: 'sara_shop', appId: '936619743392459', canRetryAppId: true, appIdCandidates: ['111', '222'] });
+    assert.equal(result.ok, true);
+    assert.equal(result.user.id, '7712345');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].init.headers['x-ig-app-id'], '111');
+  });
+
+  test('no retry happens when the first app id was not page-detected', async () => {
+    const { ctx, calls } = makeCtx([[/web_profile_info/, { status: 404, body: { message: 'nope' } }]]);
+    const result = await readProfileByUsername(ctx, { username: 'ghost', appId: '936619743392459', canRetryAppId: false, appIdCandidates: ['111'] });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'not_found');
+    assert.equal(calls.length, 1);
+  });
+
+  test('the page fallback recovers the id when the open page is that profile', async () => {
+    const { ctx } = makeCtx([[/web_profile_info/, { body: noIdBody }]]);
+    const document = fakeProfileDocument('/sara_shop/', '{"username":"sara_shop","id":"7712345"}');
+    const result = await readProfileByUsername(ctx, { username: 'sara_shop', document });
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'page-json');
+    assert.equal(result.user.id, '7712345');
+  });
+
+  test('the page fallback never grabs the viewer id from an unrelated page', () => {
+    const document = fakeProfileDocument('/feed/', '{"ds_user_id":"9999999","username":"sara_shop","id":"7712345"}');
+    assert.equal(scrapeProfileIdFromPage(document, 'sara_shop'), null);
+  });
+
+  test('the page fallback ignores a number that is not beside the target username', () => {
+    const document = fakeProfileDocument('/sara_shop/', '{"ds_user_id":"9999999","username":"sara_shop","full_name":"S"}');
+    assert.equal(scrapeProfileIdFromPage(document, 'sara_shop'), null);
+  });
+
+  test('the page fallback reads a profilePage token', () => {
+    const document = fakeProfileDocument('/sara_shop/', 'noise "profilePage_7712345" noise');
+    const found = scrapeProfileIdFromPage(document, 'sara_shop');
+    assert.equal(found?.id, '7712345');
   });
 });
