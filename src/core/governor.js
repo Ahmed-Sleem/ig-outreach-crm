@@ -328,11 +328,14 @@ export const ActionType = Object.freeze({
   DM_COLD: 'DM_COLD',
 });
 
-function dayKey(now) {
+/** The daily counter bucket's name. Exported so the budget readout and the
+ * counters can never disagree about which day "today" is. */
+export function dayKey(now) {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-function hourKey(now) {
+/** The hourly counter bucket's name. */
+export function hourKey(now) {
   return `${dayKey(now)}T${String(now.getHours()).padStart(2, '0')}`;
 }
 
