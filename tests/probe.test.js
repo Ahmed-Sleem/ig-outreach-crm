@@ -9,6 +9,7 @@ import {
   detectAsbd,
   detectPageTokens,
   detectSession,
+  detectViewerFromDom,
   findEmbeddedJson,
   harvestDocIds,
   probeDom,
@@ -208,5 +209,73 @@ describe('runProbe', () => {
     const probe = await runProbe({ document: doc, cookieString: LOGGED_IN, request });
     assert.equal(probe.viewer, null);
     assert.equal(probe.paths[Path.INTERNAL_API].available, true);
+  });
+});
+
+describe('detectViewerFromDom (zero-API browser viewer detection)', () => {
+  test('reads the signed-in handle from the navigation rail Profile link', () => {
+    const doc = installDom();
+    const nav = doc.createElement('nav');
+    const explore = doc.createElement('a');
+    explore.setAttribute('href', '/explore/');
+    explore.textContent = 'Explore';
+    const profile = doc.createElement('a');
+    profile.setAttribute('href', '/cairo_atelier/');
+    const img = doc.createElement('img');
+    img.setAttribute('alt', "cairo_atelier's profile picture");
+    profile.append(img);
+    const label = doc.createElement('span');
+    label.textContent = 'Profile';
+    profile.append(label);
+    nav.append(explore, profile);
+    doc.body.append(nav);
+
+    const viewer = detectViewerFromDom(doc, 'ds_user_id=991122');
+    assert.equal(viewer.username, 'cairo_atelier');
+    assert.equal(viewer.id, '991122');
+    assert.equal(viewer.source, 'dom_nav_profile');
+  });
+
+  test('reads Arabic profile picture alt text when no Profile label is present', () => {
+    const doc = installDom();
+    const nav = doc.createElement('div');
+    nav.setAttribute('role', 'navigation');
+    const img = doc.createElement('img');
+    img.setAttribute('alt', 'صورة الملف الشخصي لـ nour_craft');
+    nav.append(img);
+    doc.body.append(nav);
+
+    const viewer = detectViewerFromDom(doc, 'ds_user_id=4455');
+    assert.equal(viewer.username, 'nour_craft');
+    assert.equal(viewer.id, '4455');
+    assert.equal(viewer.source, 'dom_nav_avatar');
+  });
+
+  test('reads embedded page script viewer JSON without any network call', async () => {
+    const doc = pageWithScripts([
+      '{"viewer":{"id":"881234","username":"nile_goods","full_name":"Nile Goods"}}',
+    ]);
+    let networkCalled = false;
+    const probe = await runProbe({
+      document: doc,
+      cookieString: 'ds_user_id=881234',
+      request: async () => { networkCalled = true; return null; },
+    });
+    assert.equal(networkCalled, false, 'DOM viewer detection makes zero API calls');
+    assert.equal(probe.viewer.username, 'nile_goods');
+    assert.equal(probe.viewer.id, '881234');
+    assert.equal(probe.session.loggedIn, true);
+  });
+
+  test('ignores reserved routes in nav links', () => {
+    const doc = installDom();
+    const nav = doc.createElement('nav');
+    const a = doc.createElement('a');
+    a.setAttribute('href', '/accounts/');
+    a.textContent = 'Profile';
+    nav.append(a);
+    doc.body.append(nav);
+
+    assert.equal(detectViewerFromDom(doc, ''), null);
   });
 });

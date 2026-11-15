@@ -122,10 +122,13 @@ export function createApp(deps = {}) {
   let activeTab = launch.tab && views[launch.tab] ? launch.tab : 'collector';
   let nextActionAt = null;
   let cachedBudget = null;
+  let connectionInfo = null;
+  let connectionBusy = false;
   let tickCount = 0;
   let worker = null;
   let fallbackTimer = null;
   let statusWatcher = null;
+  let onWindowFocus = null;
 
   /* ------------------------------------------------------------ top bar */
 
@@ -155,24 +158,93 @@ export function createApp(deps = {}) {
   function connectionStatus(overview) {
     if (overview?.lockedUntil) {
       const when = new Date(overview.lockedUntil).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
-      return { variant: 'danger', text: `Locked until ${when}` };
+      return { variant: 'danger', text: `Locked until ${when}`, title: overview.lockReason ?? 'Circuit breaker active' };
     }
-    if (overview?.viewerUsername) return { variant: 'ok', text: `Connected as @${overview.viewerUsername}` };
-    return { variant: 'warn', text: 'Not connected' };
+    const username = connectionInfo?.viewerUsername || overview?.viewerUsername || null;
+    if (username) {
+      return {
+        variant: 'ok',
+        text: `Connected as @${username}`,
+        title: connectionInfo?.tabId ? 'Click to switch to your Instagram tab' : 'Instagram workspace active',
+      };
+    }
+    if (connectionInfo?.connected) {
+      return {
+        variant: 'ok',
+        text: 'Connected (Instagram open)',
+        title: 'Instagram is open and signed in. Click to focus or refresh.',
+      };
+    }
+    if (connectionInfo?.tabFound && !connectionInfo?.loggedIn) {
+      return {
+        variant: 'warn',
+        text: 'Log in on Instagram',
+        title: 'Instagram tab is open, but you are signed out. Click to focus it.',
+      };
+    }
+    if (connectionInfo && !connectionInfo.tabFound) {
+      return {
+        variant: 'warn',
+        text: 'Open Instagram',
+        title: 'No Instagram tab is open. Click to open instagram.com.',
+      };
+    }
+    return { variant: 'warn', text: 'Not connected', title: 'Click to connect to an open Instagram tab' };
+  }
+
+  async function syncConnection({ openIfMissing = false, focusTab = false, announce = false } = {}) {
+    if (connectionBusy || typeof api.detectConnection !== 'function') return null;
+    connectionBusy = true;
+    try {
+      const res = await api.detectConnection({ openIfMissing, focusTab });
+      if (res) connectionInfo = res;
+      if (announce) {
+        if (res?.connected) {
+          toast(res.viewerUsername ? `Connected as @${res.viewerUsername}.` : 'Connected to your open Instagram tab.', 'ok');
+        } else if (res?.reason) {
+          toast(res.reason, 'info');
+        }
+      }
+      await refreshShell();
+      return res;
+    } catch {
+      return null;
+    } finally {
+      connectionBusy = false;
+    }
   }
 
   /**
    * Header right: a status dot with one line of text, and a single overflow menu
-   * holding Settings and Backup & export. The quota meters, the phase read-out and
-   * the Stop button no longer live here — the meters moved to the Outreach screen
-   * and Stop lives in the run banner, which exists only while a run is active.
+   * holding Settings and Backup & export. Clicking the status pill either focuses
+   * the connected Instagram tab or opens Instagram and connects automatically.
    */
   function renderHeaderRight(overview) {
     const host = $('#shell-right', doc);
     if (!host) return;
     clear(host);
     const status = connectionStatus(overview);
-    const pill = el('div', { class: `session-pill session-pill--${status.variant}`, id: 'session-pill' }, [
+    const canInteract = typeof api.detectConnection === 'function';
+    const pill = el(canInteract ? 'button' : 'div', {
+      class: `session-pill session-pill--${status.variant}${canInteract ? ' session-pill--btn' : ''}`,
+      id: 'session-pill',
+      ...(canInteract ? {
+        type: 'button',
+        title: status.title ?? status.text,
+        onclick: () => {
+          if (connectionInfo?.tabFound && connectionInfo?.tabId && typeof api.tabs?.focus === 'function') {
+            if (connectionInfo.connected) {
+              void api.tabs.focus(connectionInfo.tabId);
+              void syncConnection({ openIfMissing: false, focusTab: false, announce: false });
+              return;
+            }
+            void syncConnection({ openIfMissing: false, focusTab: true, announce: true });
+            return;
+          }
+          void syncConnection({ openIfMissing: true, focusTab: true, announce: true });
+        },
+      } : {}),
+    }, [
       el('span', { class: 'session-pill__dot' }),
       el('span', { class: 'session-pill__text', text: status.text }),
     ]);
@@ -334,8 +406,15 @@ export function createApp(deps = {}) {
       tickCount += 1;
       paintCountdown();
       // A full telemetry re-read once every ten seconds keeps the quota meters
-      // honest without hammering IndexedDB on every beat.
-      if (tickCount % 10 === 0) void refreshShell();
+      // honest without hammering IndexedDB on every beat. If Instagram was not
+      // detected yet, re-check open tabs automatically so connecting is zero-click.
+      if (tickCount % 10 === 0) {
+        if (!connectionInfo?.connected && typeof api.detectConnection === 'function') {
+          void syncConnection({ openIfMissing: false, focusTab: false, announce: false });
+        } else {
+          void refreshShell();
+        }
+      }
     };
     try {
       const url = chromeApi?.runtime?.getURL?.('app/lib/scheduler.worker.js');
@@ -393,6 +472,18 @@ export function createApp(deps = {}) {
 
     startScheduler();
     await refreshShell();
+    // Auto-detect an open, logged-in Instagram tab right on boot (zero API calls)
+    // and re-check whenever the owner returns to the dashboard tab.
+    if (typeof api.detectConnection === 'function') {
+      void syncConnection({ openIfMissing: false, focusTab: false, announce: false });
+      const win = globalThis.window;
+      if (win && typeof win.addEventListener === 'function') {
+        onWindowFocus = () => {
+          void syncConnection({ openIfMissing: false, focusTab: false, announce: false });
+        };
+        win.addEventListener('focus', onWindowFocus);
+      }
+    }
     // Not navigate(): activeTab is already the target, and navigate() no-ops on the
     // current tab. Render the tab bar to reflect it and mount the view directly.
     renderTabs();
@@ -401,6 +492,10 @@ export function createApp(deps = {}) {
 
   function destroy() {
     stopScheduler();
+    if (onWindowFocus && globalThis.window && typeof globalThis.window.removeEventListener === 'function') {
+      globalThis.window.removeEventListener('focus', onWindowFocus);
+      onWindowFocus = null;
+    }
     statusWatcher?.dispose?.();
     bus?.close?.();
     views.collector.destroy();

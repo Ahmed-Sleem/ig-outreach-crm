@@ -14,7 +14,7 @@
  */
 
 import { Pacer, PacingStopped, AccountFlagged, interruptibleWait } from './pacing.js';
-import { detectSession, detectAppId, detectAsbd, harvestDocIds, probeViewer, runProbe } from './probe.js';
+import { detectSession, detectAppId, detectAsbd, detectViewerFromDom, harvestDocIds, probeViewer, runProbe } from './probe.js';
 import {
   ApiError,
   createApi,
@@ -134,10 +134,14 @@ export function createContentRuntime(deps = {}) {
     csrfToken: session.csrfToken,
   });
 
+  const domViewer = detectViewerFromDom(document, cookieString);
+
   const runtime = {
     document,
     location,
-    session,
+    session: domViewer && !session.loggedIn
+      ? { ...session, loggedIn: true, sessionUserId: session.sessionUserId ?? (domViewer.id || null) }
+      : session,
     appId,
     appIdSource,
     asbd,
@@ -150,7 +154,22 @@ export function createContentRuntime(deps = {}) {
     pacer: null,
     controller: null,
     profileCache: new Map(),
-    viewer: deps.viewer ?? null,
+    viewer: deps.viewer ?? domViewer ?? null,
+
+    refreshSession() {
+      const freshCookies = deps.cookieString ?? document?.cookie ?? '';
+      const freshSession = detectSession(freshCookies);
+      const freshDomViewer = detectViewerFromDom(document, freshCookies);
+      if (freshDomViewer) {
+        if (!runtime.viewer || (!runtime.viewer.username && freshDomViewer.username) || (!runtime.viewer.id && freshDomViewer.id)) {
+          runtime.viewer = { ...(runtime.viewer ?? {}), ...freshDomViewer, id: freshDomViewer.id || runtime.viewer?.id || '', username: freshDomViewer.username || runtime.viewer?.username || '' };
+        }
+      }
+      runtime.session = (freshSession.loggedIn || Boolean(runtime.viewer?.username || runtime.viewer?.id))
+        ? { ...freshSession, loggedIn: true, sessionUserId: freshSession.sessionUserId ?? (runtime.viewer?.id || null) }
+        : freshSession;
+      return runtime.session;
+    },
 
     get pathname() {
       return location?.pathname ?? '';
@@ -201,13 +220,14 @@ export function createContentRuntime(deps = {}) {
       return { stopped: Boolean(was), kind: was ?? null, reason };
     },
     context() {
+      const currentSession = runtime.refreshSession();
       return {
         url: location?.href ?? null,
         pathname: runtime.pathname,
         pageUsername: runtime.pageUsername,
-        loggedIn: session.loggedIn,
-        viewerUsername: runtime.viewer?.username ?? null,
-        viewerId: runtime.viewer?.id ?? null,
+        loggedIn: currentSession.loggedIn,
+        viewerUsername: runtime.viewer?.username || null,
+        viewerId: runtime.viewer?.id || currentSession.sessionUserId || null,
         appIdSource,
         asbdSource,
         docIdCount: docIds.length,
@@ -872,15 +892,24 @@ export function createHandlers(runtime, deps = {}) {
     [CommandType.GET_CONTEXT]: async () => runtime.context(),
 
     [CommandType.PROBE]: async () => {
+      const hasInjectedTransport = Boolean(runtime.deps.request || runtime.deps.fetchImpl);
       const probe = await runProbe({
         document: runtime.document,
         location: runtime.location,
         cookieString: runtime.deps.cookieString ?? runtime.document?.cookie ?? '',
-        request: runtime.deps.probeRequest === false ? null : runtime.request,
+        // In the real browser (no injected transport), NEVER call Instagram APIs:
+        // viewer is detected strictly from live DOM + cookies.
+        request: (runtime.deps.probeRequest === false || !hasInjectedTransport) ? null : runtime.request,
       });
-      // A probe is the cheapest place to learn the viewer, so remember it: the
-      // relationship sync and the accept check both need the numeric id.
-      if (probe.viewer?.id) runtime.viewer = probe.viewer;
+      if (probe.viewer?.id || probe.viewer?.username) {
+        runtime.viewer = {
+          ...(runtime.viewer ?? {}),
+          ...probe.viewer,
+          id: probe.viewer.id || runtime.viewer?.id || '',
+          username: probe.viewer.username || runtime.viewer?.username || '',
+        };
+      }
+      runtime.refreshSession();
       return probe;
     },
 
@@ -1064,16 +1093,26 @@ function listReadWithCount(result, knownCount, phase) {
  * without a page reload.
  */
 export async function ensureViewer(runtime) {
-  if (runtime.viewer) return runtime.viewer;
+  runtime.refreshSession?.();
+  if (runtime.viewer?.username || runtime.viewer?.id) return runtime.viewer;
   if (!runtime.session.loggedIn) return null;
-  const probed = await probeViewer({
-    request: runtime.request,
-    appId: runtime.appId,
-    asbd: runtime.asbd,
-    signal: runtime.signal,
-  });
-  runtime.viewer = probed;
-  return probed;
+  const fromDom = detectViewerFromDom(runtime.document, runtime.deps?.cookieString ?? runtime.document?.cookie ?? '');
+  if (fromDom) {
+    runtime.viewer = fromDom;
+    return fromDom;
+  }
+  const hasInjectedTransport = Boolean(runtime.deps?.request || runtime.deps?.fetchImpl);
+  if (runtime.deps?.probeRequest !== false && hasInjectedTransport) {
+    const probed = await probeViewer({
+      request: runtime.request,
+      appId: runtime.appId,
+      asbd: runtime.asbd,
+      signal: runtime.signal,
+    });
+    runtime.viewer = probed;
+    return probed;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ bootstrap */

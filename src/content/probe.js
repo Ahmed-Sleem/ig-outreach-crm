@@ -208,44 +208,225 @@ export async function probeViewer({ request, appId, asbd, signal }) {
   }
 }
 
-/** Full probe. Cheap and read-only apart from the optional viewer lookup. */
+/** Reserved Instagram routes that are navigation chrome, never usernames. */
+const VIEWER_RESERVED_PATHS = new Set([
+  'accounts', 'explore', 'reels', 'reel', 'direct', 'p', 'tv', 'stories',
+  'create', 'saved', 'notifications', 'activity', 'settings', 'about', 'legal',
+  'privacy', 'terms', 'help', 'developer', 'developers', 'threads', 'meta',
+  'lite', 'nametag', 'session', 'challenge', 'consent', 'oauth', 'api', 'graphql',
+  'a', 'c', 's', 'web', 'your_activity', 'archive', 'close_friends',
+]);
+
+function validViewerUsername(raw) {
+  const clean = String(raw ?? '').trim().replace(/^@/, '').replace(/^\/+|\/+$/g, '');
+  if (!clean || clean.length > 30) return null;
+  if (!/^[A-Za-z0-9._]+$/.test(clean)) return null;
+  if (VIEWER_RESERVED_PATHS.has(clean.toLowerCase())) return null;
+  return clean;
+}
+
+function usernameFromLinkHref(href) {
+  const raw = String(href ?? '').trim();
+  if (!raw) return null;
+  let path = raw;
+  try {
+    if (/^https?:/i.test(raw)) path = new URL(raw).pathname;
+  } catch { /* relative path */ }
+  const parts = path.split('?')[0].split('#')[0].split('/').filter(Boolean);
+  if (parts.length !== 1) return null;
+  return validViewerUsername(parts[0]);
+}
+
+function usernameFromProfilePicAlt(alt) {
+  const text = String(alt ?? '').trim();
+  if (!text) return null;
+  // English: "my_shop's profile picture" or "Profile picture of my_shop"
+  const en = text.match(/^([A-Za-z0-9._]{1,30})['’]s\s+profile\s+picture/i)
+    ?? text.match(/profile\s+picture\s+(?:of|for)\s+([A-Za-z0-9._]{1,30})/i);
+  if (en) return validViewerUsername(en[1]);
+  // Arabic: "صورة الملف الشخصي لـ my_shop" or "صورة الملف الشخصي لmy_shop"
+  const ar = text.match(/صورة\s+الملف\s+الشخصي\s+ل[ـ\s]*([A-Za-z0-9._]{1,30})/i);
+  if (ar) return validViewerUsername(ar[1]);
+  return null;
+}
+
+/**
+ * Detect the logged-in Instagram viewer strictly from the open page DOM and
+ * cookies — ZERO network or API requests.
+ *
+ * Checks, in order:
+ *   1. Left/bottom navigation Profile link (`a[href="/<username>/"]`) with a
+ *      profile-picture `<img>` or "Profile" / "الملف الشخصي" label.
+ *   2. Any `<img alt="<username>'s profile picture">` inside `<nav>` /
+ *      `[role="navigation"]`.
+ *   3. Embedded page `<script>` JSON already loaded by Instagram (`PolarisViewer`
+ *      / `CurrentUserInitialData` / `"viewer":{...}`), read locally without fetch.
+ *   4. The `ds_user_id` cookie alone (proves logged in even before sidebar renders).
+ */
+export function detectViewerFromDom(document, cookieString = '') {
+  const cookies = readCookies(cookieString ?? document?.cookie ?? '');
+  const cookieId = cookies.ds_user_id ? String(cookies.ds_user_id) : '';
+  const loggedIn = Boolean(cookies.sessionid || cookieId);
+  let username = '';
+  let fullName = '';
+  let id = cookieId;
+  let source = null;
+
+  if (document && typeof document.querySelectorAll === 'function') {
+    // 1. Navigation rail / bottom bar Profile link
+    const navScopes = [
+      ...document.querySelectorAll('nav, [role="navigation"], header'),
+    ];
+    const scopes = navScopes.length ? navScopes : [document];
+
+    for (const scope of scopes) {
+      let links = [];
+      try { links = [...scope.querySelectorAll('a[href]')]; } catch { links = []; }
+      for (const link of links) {
+        const candidate = usernameFromLinkHref(link.getAttribute?.('href') ?? link.href ?? '');
+        if (!candidate) continue;
+        const text = String(link.textContent ?? '').trim().toLowerCase();
+        const aria = String(link.getAttribute?.('aria-label') ?? '').trim().toLowerCase();
+        const img = link.querySelector?.('img[alt]');
+        const imgAlt = String(img?.getAttribute?.('alt') ?? '');
+        const looksLikeProfile =
+          /\bprofile\b|الملف الشخصي/i.test(text)
+          || /\bprofile\b|الملف الشخصي/i.test(aria)
+          || /profile\s+picture|صورة\s+الملف/i.test(imgAlt);
+        if (looksLikeProfile) {
+          username = candidate;
+          source = 'dom_nav_profile';
+          break;
+        }
+      }
+      if (username) break;
+
+      // 2. Profile picture alt inside nav even if href structure changed
+      let imgs = [];
+      try { imgs = [...scope.querySelectorAll('img[alt]')]; } catch { imgs = []; }
+      for (const img of imgs) {
+        const candidate = usernameFromProfilePicAlt(img.getAttribute?.('alt'));
+        if (candidate) {
+          username = candidate;
+          source = 'dom_nav_avatar';
+          break;
+        }
+      }
+      if (username) break;
+    }
+
+    // 3. Embedded page script JSON (read-only DOM text, zero network calls)
+    if (!username || !id) {
+      for (const script of scriptsOf(document)) {
+        const text = script.textContent;
+        if (!text || text.length < 40 || text.length > 4_000_000) continue;
+        if (!/viewer|CurrentUserInitialData|PolarisViewer|USER_ID/.test(text)) continue;
+
+        if (!username) {
+          const viewerMatch =
+            text.match(/"viewer"\s*:\s*\{[^{}]{0,600}?"username"\s*:\s*"([A-Za-z0-9._]{1,30})"/)
+            ?? text.match(/"PolarisViewer"[^{}]{0,200}\{[^{}]{0,600}?"username"\s*:\s*"([A-Za-z0-9._]{1,30})"/)
+            ?? text.match(/"CurrentUserInitialData"[\s\S]{0,400}?"USERNAME"\s*:\s*"([A-Za-z0-9._]{1,30})"/);
+          const candidate = validViewerUsername(viewerMatch?.[1]);
+          if (candidate) {
+            username = candidate;
+            source = source ?? 'embedded_dom_json';
+          }
+        }
+        if (!fullName) {
+          const fnMatch = text.match(/"viewer"\s*:\s*\{[^{}]{0,600}?"full_name"\s*:\s*"([^"\\]{1,80})"/);
+          if (fnMatch) fullName = fnMatch[1];
+        }
+        if (!id) {
+          const idMatch =
+            text.match(/"viewer"\s*:\s*\{[^{}]{0,600}?"id"\s*:\s*"(\d{4,})"/)
+            ?? text.match(/"USER_ID"\s*:\s*"(\d{4,})"/);
+          if (idMatch) id = idMatch[1];
+        }
+        if (username && id) break;
+      }
+    }
+  }
+
+  // Only return a viewer object when DOM actually identified a viewer (username
+  // or embedded viewer JSON). When only `ds_user_id` cookie is present, callers
+  // still have `session.loggedIn === true` and `session.sessionUserId === id`.
+  if (!username) return null;
+
+  return {
+    id: String(id || ''),
+    username,
+    fullName,
+    followers: null,
+    following: null,
+    isPrivate: false,
+    isVerified: false,
+    source: source ?? 'dom',
+  };
+}
+
+/** Full probe. Cheap and 100% read-only; detects viewer from live DOM first with zero API calls. */
 export async function runProbe({ document, location, cookieString, request = null } = {}) {
-  const session = detectSession(cookieString ?? document?.cookie ?? '');
+  const effectiveCookies = cookieString ?? document?.cookie ?? '';
+  const session = detectSession(effectiveCookies);
   const { appId, source: appIdSource } = detectAppId(document);
-  const { asbd, source: asbdSource } = detectAsbd(cookieString ?? document?.cookie ?? '');
+  const { asbd, source: asbdSource } = detectAsbd(effectiveCookies);
   const docIds = harvestDocIds(document);
   const embedded = findEmbeddedJson(document);
   const dom = probeDom(document);
   const tokens = detectPageTokens(document);
 
+  const domViewer = detectViewerFromDom(document, effectiveCookies);
+  // Prefer zero-API DOM detection. Only call `request` if explicitly passed AND DOM did not identify the viewer.
+  let viewer = domViewer;
+  if ((!viewer || !viewer.username) && typeof request === 'function') {
+    const apiViewer = await probeViewer({ request, appId, asbd });
+    if (apiViewer) {
+      viewer = {
+        ...(domViewer ?? {}),
+        ...apiViewer,
+        id: apiViewer.id || domViewer?.id || '',
+        username: apiViewer.username || domViewer?.username || '',
+      };
+    }
+  }
+
+  const effectiveLoggedIn = Boolean(session.loggedIn || viewer?.username || viewer?.id);
+  const effectiveSession = effectiveLoggedIn && !session.loggedIn
+    ? {
+      ...session,
+      loggedIn: true,
+      sessionUserId: session.sessionUserId ?? (viewer?.id || null),
+      note: 'Logged in (detected from live Instagram page DOM).',
+    }
+    : session;
+
   const paths = {
-    [Path.INTERNAL_API]: {
-      available: session.loggedIn && Boolean(appId),
-      confidence: appIdSource === 'page' ? 'high' : 'low',
-      detail: !session.loggedIn
-        ? 'Not logged in: the internal API will refuse everything.'
-        : appIdSource === 'page'
-          ? 'App id read from the live page.'
-          : 'App id not found in page scripts; using a documented constant that may be stale.',
+    [Path.DOM]: {
+      available: Object.values(dom).some((d) => d.ok) || effectiveLoggedIn,
+      confidence: 'high',
+      detail: 'Primary path: visible browser automation reading the live Instagram DOM directly (no API calls).',
     },
     [Path.EMBEDDED_JSON]: {
       available: embedded.length > 0,
       confidence: 'medium',
-      detail: embedded.length ? `${embedded.length} candidate JSON blob(s) in the page.` : 'No embedded profile JSON found.',
+      detail: embedded.length ? `${embedded.length} embedded JSON blob(s) already in the page.` : 'No embedded profile JSON found.',
     },
-    [Path.DOM]: {
-      available: Object.values(dom).some((d) => d.ok),
-      confidence: 'low',
-      detail: 'DOM reading is the last resort: Instagram obfuscates class names and renames them without notice.',
+    [Path.INTERNAL_API]: {
+      available: effectiveLoggedIn && Boolean(appId),
+      confidence: appIdSource === 'page' ? 'high' : 'low',
+      detail: !effectiveLoggedIn
+        ? 'Not logged in.'
+        : appIdSource === 'page'
+          ? 'App id read from the live page (unused by browser-driven collection).'
+          : 'App id not found in page scripts; fallback constant may be stale (unused by browser-driven collection).',
     },
   };
-
-  const viewer = request ? await probeViewer({ request, appId, asbd }) : null;
 
   return {
     probedAt: new Date().toISOString(),
     url: location?.href ?? null,
-    session,
+    session: effectiveSession,
     appId,
     appIdSource,
     asbd,
@@ -259,6 +440,6 @@ export async function runProbe({ document, location, cookieString, request = nul
     paths,
     anyPathAvailable: Object.values(paths).some((p) => p.available),
     caveat:
-      'Endpoints and field names are read from the live page on every session and are never cached. If a path reports available but returns nothing, Instagram changed its internals — that is expected over time.',
+      'All collection and outreach operate directly in your visible Instagram browser tab without calling Instagram private APIs.',
   };
 }

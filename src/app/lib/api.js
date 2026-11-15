@@ -260,6 +260,38 @@ export function createTabController({
     },
 
     /**
+     * Bring an Instagram tab into view so the owner can watch the browser
+     * automation work right in front of them.
+     */
+    async focus(tabId) {
+      if (tabId === null || tabId === undefined) return { ok: false, reason: 'no tab id' };
+      try {
+        const tab = await chrome.tabs.update(Number(tabId), { active: true });
+        if (tab?.windowId !== undefined && tab?.windowId !== null && typeof chrome.windows?.update === 'function') {
+          try { await chrome.windows.update(Number(tab.windowId), { focused: true }); } catch { /* window focus may be disallowed */ }
+        }
+        return { ok: true, tab: describeTab(tab) };
+      } catch (error) {
+        return { ok: false, reason: String(error?.message ?? error) };
+      }
+    },
+
+    /** Open a normal visible Instagram tab when none is open yet. */
+    async openInstagram(url = 'https://www.instagram.com/', options = {}) {
+      try {
+        const created = await chrome.tabs.create({ url, active: options.active !== false });
+        const tab = describeTab(created);
+        if (options.waitForLoad !== false && tab.id !== null) {
+          const loaded = await this.waitForLoad(tab.id, options);
+          return { ok: loaded.ok, tab: loaded.tab ?? tab, created: true, reason: loaded.reason ?? null };
+        }
+        return { ok: true, tab, created: true };
+      } catch (error) {
+        return { ok: false, tab: null, created: false, reason: String(error?.message ?? error) };
+      }
+    },
+
+    /**
      * Move a tab and wait for it to arrive.
      *
      * `chrome.tabs.update` throws for a discarded or crashed tab, and an uncaught
@@ -268,7 +300,11 @@ export function createTabController({
      */
     async navigate(tabId, url, options = {}) {
       try {
-        await chrome.tabs.update(Number(tabId), { url });
+        const update = options.focus ? { url, active: true } : { url };
+        const updated = await chrome.tabs.update(Number(tabId), update);
+        if (options.focus && updated?.windowId !== undefined && typeof chrome.windows?.update === 'function') {
+          try { await chrome.windows.update(Number(updated.windowId), { focused: true }); } catch { /* best-effort focus */ }
+        }
       } catch (error) {
         return { ok: false, reason: `the tab could not be moved (${String(error?.message ?? error)})` };
       }
@@ -645,11 +681,18 @@ export function createCommandChannel({
         await this.setWorkspace(remembered);
         if (tabId !== null) {
           const context = await this.send(CommandType.GET_CONTEXT, {}, { tabId, timeoutMs: 10_000, allowUnprepared: true });
-          const viewerId = context?.value?.viewer?.id ?? null;
+          const viewerId = context?.value?.viewerId ?? context?.value?.viewer?.id ?? null;
+          const viewerUsername = context?.value?.viewerUsername ?? context?.value?.viewer?.username ?? null;
+          const viewer = (viewerId || viewerUsername)
+            ? { id: viewerId ? String(viewerId) : '', username: viewerUsername ?? '' }
+            : (context?.value?.viewer ?? null);
           if (context.ok && viewerId && String(viewerId) !== remembered) {
             return this.resolveWorkspace({ force: true, tabId });
           }
-          if (context.ok) return { ok: true, workspaceId: remembered, viewer: context.value.viewer ?? null, remembered: true };
+          if (context.ok) {
+            if (viewerUsername) await this.setWorkspace(remembered, { viewerUsername });
+            return { ok: true, workspaceId: remembered, viewer, remembered: true };
+          }
         } else {
           return { ok: true, workspaceId: remembered, viewer: null, remembered: true };
         }
@@ -659,7 +702,8 @@ export function createCommandChannel({
       const probe = await this.send(CommandType.PROBE, {}, { tabId, allowUnprepared: tabId === null });
       if (!probe.ok) return { ok: false, workspaceId: BOOTSTRAP_WORKSPACE_ID, reason: probe.reason, viewer: null };
       const viewer = probe.value?.viewer ?? null;
-      if (!viewer?.id) {
+      const resolvedId = viewer?.id || probe.value?.session?.sessionUserId || null;
+      if (!resolvedId && !viewer?.username) {
         return {
           ok: false,
           workspaceId: BOOTSTRAP_WORKSPACE_ID,
@@ -669,8 +713,9 @@ export function createCommandChannel({
           viewer: null,
         };
       }
-      await this.setWorkspace(viewer.id, { viewerUsername: viewer.username ?? null });
-      return { ok: true, workspaceId: String(viewer.id), viewer, remembered: false };
+      const nextWorkspaceId = resolvedId ? String(resolvedId) : BOOTSTRAP_WORKSPACE_ID;
+      await this.setWorkspace(nextWorkspaceId, { viewerUsername: viewer?.username ?? null });
+      return { ok: true, workspaceId: nextWorkspaceId, viewer: { ...(viewer ?? {}), id: nextWorkspaceId }, remembered: false };
     },
   };
 }
@@ -929,6 +974,99 @@ export function createApiClient({
     get workspaceId() {
       return state.workspaceId;
     },
+    /**
+     * Check open Instagram tabs without API calls and sync the signed-in account.
+     *
+     * Queries open instagram.com tabs, injects the content script if the tab was
+     * opened before the extension loaded, reads the live DOM + session cookies via
+     * PING / GET_CONTEXT, and persists the detected workspace + @username so the
+     * dashboard never gets stuck showing "Not connected".
+     */
+    async detectConnection({ openIfMissing = false, focusTab = false, timeoutMs = 6_000 } = {}) {
+      let tabsList = [];
+      try {
+        tabsList = await controller.listTabs();
+      } catch {
+        return { connected: false, loggedIn: false, tabFound: false, tabId: null, viewerUsername: null, viewerId: null, reason: 'Could not inspect browser tabs.' };
+      }
+
+      if (!tabsList.length) {
+        if (!openIfMissing) {
+          return { connected: false, loggedIn: false, tabFound: false, tabId: null, viewerUsername: null, viewerId: null, reason: 'No Instagram tab is open yet.' };
+        }
+        const opened = await controller.openInstagram('https://www.instagram.com/', { active: true });
+        if (!opened?.ok || !opened.tab) {
+          return { connected: false, loggedIn: false, tabFound: false, tabId: null, viewerUsername: null, viewerId: null, reason: opened?.reason ?? 'Could not open instagram.com.' };
+        }
+        tabsList = [opened.tab];
+      }
+
+      const worker = typeof controller.worker === 'function' ? await controller.worker() : null;
+      const picked = pickTab(tabsList, { workerTabId: worker?.id ?? null });
+      const targetTab = picked?.tab ?? tabsList[0];
+      if (!targetTab?.id) {
+        return { connected: false, loggedIn: false, tabFound: false, tabId: null, viewerUsername: null, viewerId: null, reason: 'No usable Instagram tab found.' };
+      }
+
+      if (focusTab && typeof controller.focus === 'function') {
+        await controller.focus(targetTab.id);
+      }
+
+      const ready = await channel.prepare(targetTab.id, { timeoutMs });
+      if (!ready.ok) {
+        return {
+          connected: false,
+          loggedIn: false,
+          tabFound: true,
+          tabId: targetTab.id,
+          tabUrl: targetTab.url ?? null,
+          viewerUsername: null,
+          viewerId: null,
+          reason: ready.reason ?? 'Reload the Instagram tab to connect.',
+        };
+      }
+
+      let ctx = ready.context ?? null;
+      if (!ctx || (!ctx.viewerUsername && !ctx.viewerId && ctx.loggedIn !== false)) {
+        const probe = await channel.send(CommandType.PROBE, {}, { tabId: targetTab.id, timeoutMs: 8_000, allowUnprepared: true });
+        if (probe.ok && probe.value) {
+          ctx = {
+            ...(ctx ?? {}),
+            loggedIn: Boolean(probe.value.session?.loggedIn || probe.value.viewer?.username || probe.value.viewer?.id),
+            viewerUsername: probe.value.viewer?.username || ctx?.viewerUsername || null,
+            viewerId: probe.value.viewer?.id || probe.value.session?.sessionUserId || ctx?.viewerId || null,
+          };
+        }
+      }
+
+      const loggedIn = Boolean(ctx?.loggedIn || ctx?.viewerUsername || ctx?.viewerId);
+      const viewerId = ctx?.viewerId ? String(ctx.viewerId) : null;
+      const viewerUsername = ctx?.viewerUsername ? String(ctx.viewerUsername) : null;
+
+      if (loggedIn) {
+        const nextWsId = viewerId || state.workspaceId || BOOTSTRAP_WORKSPACE_ID;
+        if (nextWsId !== state.workspaceId || viewerUsername) {
+          await channel.setWorkspace(nextWsId, { viewerUsername });
+        }
+        await ledger.ensureWorkspace({
+          workspaceId: nextWsId,
+          viewerUsername,
+          viewer: { id: nextWsId, username: viewerUsername ?? '' },
+        });
+      }
+
+      return {
+        connected: loggedIn,
+        loggedIn,
+        tabFound: true,
+        tabId: targetTab.id,
+        tabUrl: targetTab.url ?? null,
+        viewerId,
+        viewerUsername,
+        reason: loggedIn ? null : 'Instagram is open, but you are not logged in yet.',
+      };
+    },
+
     /** Everything the top bar needs in one call. */
     async overview() {
       const [workspace, counters, groups, enabledTemplates] = await Promise.all([
