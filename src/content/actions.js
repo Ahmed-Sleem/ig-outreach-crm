@@ -26,6 +26,7 @@
  */
 
 import { interruptibleWait } from './pacing.js';
+import { generateHumanPath } from './human.js';
 import {
   Label,
   collapse,
@@ -207,15 +208,24 @@ export async function humanClick(ctx, element, options = {}) {
     }
   };
 
-  for (const step of approachPath(ctx.pointer, point, random)) {
+  const steps = generateHumanPath(ctx.pointer, point, {
+    random,
+    minSteps: 4,
+    maxSteps: 14,
+    allowOvershoot: false,
+  });
+  ctx.virtualCursor?.show?.(options.label ?? null);
+  for (const step of steps) {
     if (signal?.aborted) return false;
     dispatch('pointermove', step);
     dispatch('mousemove', step);
-    ctx.pointer = step;
+    ctx.virtualCursor?.move?.(step.clientX, step.clientY);
+    ctx.pointer = { clientX: step.clientX, clientY: step.clientY };
     await wait(8 + Math.round(random() * 18), { signal });
   }
 
   for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']) {
+    if (type === 'pointerdown') ctx.virtualCursor?.pulseClick?.(point.clientX, point.clientY);
     dispatch(type, point);
     if (type === 'pointerdown' || type === 'mouseup') await wait(40 + Math.round(random() * 60), { signal });
   }
