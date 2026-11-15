@@ -310,6 +310,24 @@ export async function lookupFollowship(ctx, { userId, username, path = 'follower
   };
 }
 
+/**
+ * Read a follower/following count from any of the shapes Instagram returns —
+ * and from this module's own output, so normalising twice is harmless. Losing a
+ * count on the second pass would silently re-rank every lead collected from a
+ * page that was read from the DOM.
+ */
+function countOf(user, keys) {
+  for (const key of keys) {
+    const value = key.includes('.')
+      ? key.split('.').reduce((node, part) => (node == null ? undefined : node[part]), user)
+      : user?.[key];
+    if (value === undefined || value === null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
 /** The shape the rest of the app uses, from any of the four list shapes. */
 export function normaliseUserRow(row) {
   const user = row?.user ?? row;
@@ -321,8 +339,8 @@ export function normaliseUserRow(row) {
     isVerified: Boolean(user?.is_verified ?? user?.isVerified),
     hasAnonymousPic: Boolean(user?.has_anonymous_profile_picture ?? user?.hasAnonymousProfilePicture),
     profilePicUrl: String(user?.profile_pic_url ?? user?.profile_pic_url_hd ?? ''),
-    followers: Number.isFinite(Number(user?.follower_count)) && user?.follower_count !== undefined ? Number(user?.follower_count) : null,
-    following: Number.isFinite(Number(user?.follow_count)) && user?.follow_count !== undefined ? Number(user?.follow_count) : null,
+    followers: countOf(user, ['follower_count', 'followers', 'edge_followed_by.count']),
+    following: countOf(user, ['follow_count', 'following', 'edge_follow.count']),
     friendship: user?.friendship_status ?? null,
     latestReelMedia: user?.latest_reel_media ?? null,
   };

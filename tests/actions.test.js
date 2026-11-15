@@ -557,7 +557,7 @@ describe('executeDm', () => {
 });
 
 describe('openDm', () => {
-  test('the Message button opens the thread and the composer is returned', async () => {
+  test('the Message button opens the thread and the result stays serialisable', async () => {
     const ctx = makeCtx();
     const doc = ctx.document;
     const header = doc.createElement('header');
@@ -565,8 +565,12 @@ describe('openDm', () => {
     doc.body.append(header);
     const result = await openDm(ctx, { document: doc });
     assert.equal(result.ok, true);
-    assert.ok(result.editor);
+    assert.equal(result.composerFound, true);
     assert.equal(result.existingThread, false);
+    // The composer node stays in the tab: openDm's result crosses the storage
+    // bridge, where a DOM node cannot be structured-cloned.
+    assert.equal(result.editor, undefined);
+    assert.doesNotThrow(() => JSON.stringify(result));
   });
 
   test('a profile with no Message button asks for navigation instead of failing silently', async () => {

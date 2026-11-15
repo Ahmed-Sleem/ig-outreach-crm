@@ -159,14 +159,27 @@ export function probeDom(document) {
  * Returns null when logged out or when the endpoint refuses: callers must treat
  * a null viewer as "no session", never as "no leads".
  */
+/**
+ * Unwrap one response.
+ *
+ * `createApi` returns `{ url, status, body, headers }` so a caller can inspect
+ * the HTTP status; a hand-rolled test request usually returns the parsed body
+ * directly. Both are accepted here rather than forcing every caller to adapt,
+ * because guessing wrong silently reads as "not logged in".
+ */
+function responseBody(result) {
+  if (result && typeof result === 'object' && typeof result.status === 'number' && 'body' in result) return result.body;
+  return result;
+}
+
 export async function probeViewer({ request, appId, asbd, signal }) {
   const url = 'https://www.instagram.com/api/v1/users/web_profile_info/?username=me';
   try {
-    const body = await request(url, { appId, asbd, signal, headers: { 'x-ig-www-claim': '0' } });
+    const body = responseBody(await request(url, { appId, asbd, signal, headers: { 'x-ig-www-claim': '0' } }));
     const viewer = body?.data?.user ?? null;
     if (!viewer) {
       // The username=me alias is not universal; fall back to the accounts API.
-      const account = await request('https://i.instagram.com/api/v1/accounts/current_user/?edit=true', { appId, asbd, signal });
+      const account = responseBody(await request('https://i.instagram.com/api/v1/accounts/current_user/?edit=true', { appId, asbd, signal }));
       const user = account?.user;
       if (!user) return null;
       return {

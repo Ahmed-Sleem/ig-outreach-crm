@@ -437,7 +437,9 @@ export async function openDm(ctx, options = {}) {
   if (!opened.found) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: opened.reason, needsNavigation: true };
   }
-  return success({ editor: opened.value, elapsedMs: opened.elapsedMs, existingThread: hasExistingThread(document) });
+  // The editor stays here: a DOM node cannot cross the storage bridge, and the
+  // caller only needs to know the composer is open.
+  return success({ elapsedMs: opened.elapsedMs, existingThread: hasExistingThread(document), composerFound: true });
 }
 
 /**
