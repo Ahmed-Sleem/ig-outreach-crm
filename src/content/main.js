@@ -246,6 +246,12 @@ export const BUYER_INTENTS = Object.freeze([
   Intent.SIZING,
 ]);
 
+/** The guidance shown whenever every ID source failed to produce a numeric id. */
+function noNumericIdMessage(name) {
+  const clean = String(name ?? '').replace(/^@+/, '') || 'this account';
+  return `Could not get @${clean}'s numeric ID from Instagram. Open their profile in this tab, wait for it to load, and press Collect again.`;
+}
+
 /** One profile read per run: the same target is asked for by every source. */
 export async function resolveTarget(runtime, { username = null, userId = null, force = false } = {}) {
   const key = nameKey(username) || `id:${userId}`;
@@ -274,12 +280,20 @@ export async function resolveTarget(runtime, { username = null, userId = null, f
   }
   if (!profile) {
     // The page itself, when it is the profile we were asked about.
+    // Never accept an empty-id DOM scrape as a "success": doing so would mask an
+    // earlier 404 or refusal and die later with a misleading no-numeric-id error.
     if (runtime.pageUsername && nameKey(runtime.pageUsername) === nameKey(username)) {
       const scraped = scrapeOpenProfile(runtime.document, { location: runtime.location });
-      if (scraped.ok) profile = { ...scraped.user, id: scraped.user.id || userId || '' };
+      const recoveredId = scraped.ok ? (scraped.user.id || userId || '') : '';
+      if (scraped.ok && recoveredId) profile = { ...scraped.user, id: recoveredId };
     }
   }
-  if (!profile) return { ok: false, profile: null, code, reason: reason ?? `could not read the profile for ${username ?? userId}` };
+  if (!profile) {
+    const finalReason = code === 'no_numeric_id'
+      ? noNumericIdMessage(username ?? userId)
+      : (reason ?? `could not read the profile for ${username ?? userId}`);
+    return { ok: false, profile: null, code, reason: finalReason };
+  }
   const cached = { ok: true, profile, reason: null };
   runtime.profileCache.set(key, cached);
   return cached;
@@ -340,7 +354,7 @@ export async function collectFromSource(runtime, {
     const resolved = await resolveTarget(runtime, { username: targetUsername ?? runtime.pageUsername, userId: targetUserId });
     if (!resolved.ok) return { ok: false, rows: [], edges: [], reason: resolved.reason, code: resolved.code ?? null, source };
     target = resolved.profile;
-    if (!target.id) return { ok: false, rows: [], edges: [], reason: `${target.username} has no numeric id in the profile payload; the list endpoints need one`, code: 'no_numeric_id', source };
+    if (!target.id) return { ok: false, rows: [], edges: [], reason: noNumericIdMessage(target.username), code: 'no_numeric_id', source };
   }
 
   // Provenance label: a profile source is the account, a post source is the post,
@@ -708,8 +722,8 @@ export async function syncRelationships(runtime, {
     return { ok: false, reason: 'the logged-in account id is unknown; open instagram.com and let the extension probe it first' };
   }
   const target = await resolveTarget(runtime, { username: targetUsername ?? runtime.pageUsername, userId: targetUserId });
-  if (!target.ok) return { ok: false, reason: target.reason };
-  if (!target.profile.id) return { ok: false, reason: `${target.profile.username} has no numeric id in the profile payload` };
+  if (!target.ok) return { ok: false, reason: target.reason, code: target.code ?? null };
+  if (!target.profile.id) return { ok: false, reason: noNumericIdMessage(target.profile.username), code: 'no_numeric_id' };
 
   const ctx = ctxOf(runtime, { status: onProgress });
   onProgress?.({ phase: 'their-following', source: target.profile.username });

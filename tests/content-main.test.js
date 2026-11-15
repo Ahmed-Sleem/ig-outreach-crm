@@ -324,11 +324,12 @@ describe('COLLECT_LEADS from the api', () => {
     assert.equal(calls.filter((call) => call.url.includes('web_profile_info')).length, 1);
   });
 
-  test('a target with no numeric id is refused with the reason, not treated as empty', async () => {
+  test('a target with no numeric id is refused with the guidance wording and code, not treated as empty', async () => {
     const { rt } = runtime('profile', {}, [[/web_profile_info/, { body: { data: { user: { username: 'comp_a' } } } }]]);
     const result = await runCommand(rt, CommandType.COLLECT_LEADS, { source: CollectSource.FOLLOWERS, targetUsername: 'comp_a', workspaceId: '77' });
     assert.equal(result.ok, false);
-    assert.match(result.reason, /no numeric id/);
+    assert.equal(result.value.code, 'no_numeric_id');
+    assert.match(result.reason, /Could not get @comp_a's numeric ID from Instagram/);
   });
 
   test('a refused list read reports the tiers it tried', async () => {
@@ -904,5 +905,29 @@ describe('collect sources after the audit fixes', () => {
     assert.equal(result.value.leads.length, 1);
     assert.equal(result.value.leads[0].username, 'ali');
     assert.ok(calls.some((c) => /users\/555\/info/.test(c.url)), 'the by-id fallback must call users/{id}/info');
+  });
+
+  test('a 404 on an open profile page is not masked by an empty-id DOM scrape (F5)', async () => {
+    const { rt } = runtime('profile', { username: 'comp_a' }, [
+      [/web_profile_info/, { status: 404, body: { message: 'not found' } }],
+    ]);
+    const result = await runCommand(rt, CommandType.COLLECT_LEADS, {
+      source: CollectSource.FOLLOWERS,
+      targetUsername: 'comp_a',
+      workspaceId: '77',
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.value.code, 'not_found', 'must preserve not_found rather than turning it into no_numeric_id');
+    assert.match(result.reason, /http_404/);
+  });
+
+  test('syncRelationships reports no_numeric_id with the guidance wording when ID is unavailable (F5)', async () => {
+    const { rt } = runtime('profile', { username: 'comp_a' }, [
+      [/web_profile_info/, { body: { data: { user: { username: 'comp_a' } } } }],
+    ]);
+    const result = await syncRelationships(rt, { targetUsername: 'comp_a', viewerId: '99' });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'no_numeric_id');
+    assert.match(result.reason, /Could not get @comp_a's numeric ID from Instagram/);
   });
 });
