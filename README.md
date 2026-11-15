@@ -42,12 +42,51 @@ The extension is being built engine-first: every rule is written as a pure, unit
 - Node.js 20 or newer, for the tests, the verification gate, and the one-command build. The extension itself has zero runtime dependencies.
 - Chrome 116 or newer.
 
+## What can I paste?
+
+The Collect screen asks one plain question first — *what do you want to collect
+from?* — then shows a single field that adapts to the answer:
+
+| Collect from | Paste | Example |
+|---|---|---|
+| An account | Their username | `linen.studio` |
+| A post | Its link or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
+| A hashtag | The tag, with or without `#` | `#homedecor` or `homedecor` |
+| What I have open | Nothing — it reads the page you have open | — |
+
+The field checks what you type as you type it and confirms it (for example
+`Account: @linen.studio`); **Collect** stays disabled until the input is valid, and
+pressing Enter collects. If something goes wrong you get one plain sentence — and
+the raw technical detail is tucked into a collapsed **Details** line, not thrown at
+you.
+
+## The everyday flow
+
+1. Open any Instagram profile, post or hashtag page. A small pill sits at the
+   bottom-right corner.
+2. Click the pill and choose **Collect followers** (or likers, commenters, and so
+   on). A new tab opens the dashboard already set to that source and starts
+   collecting.
+3. Review the people it found — username, name and warmth.
+4. Pick a bucket under **Save into** and click **Save**; they join your library.
+
+You can also do it from the dashboard itself: choose **An account**, paste a
+username, and click **Collect**.
+
+## Screenshots
+
+Dashboard captures are **pending**. This environment cannot drive Chrome with the
+extension loaded (and the in-page pill shot needs a logged-in Instagram session),
+so no images were fabricated. The exact list of the eight shots to produce — and
+how to produce them — is in [`docs/screenshots/TODO.md`](docs/screenshots/TODO.md);
+the fictional demo-data seed for them is in [`tools/seed-demo.md`](tools/seed-demo.md).
+
 ## Quick start
 
 ```bash
 git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
 cd ig-outreach-crm
-npm test                       # 704 tests, no dependencies
+npm test                       # 760 tests, no dependencies
 npm run verify                 # 24 checks: shape, hygiene, code invariants, links, tests
 node scripts/build.mjs         # writes the loadable folder to build/extension/
 node scripts/check-package.mjs build/extension   # verifies it the way Chrome would load it
@@ -66,8 +105,9 @@ in [INSTALL.md](INSTALL.md).
 | Core engines and local storage | Done, unit-tested |
 | Instagram read layer | Done — session-cookie + DOM-dialog paths, unit-tested; **not run live** |
 | Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, unit-tested; **not run live** |
-| Dashboard UI | Done — two tabs, one design system, virtual tables, drawers; unit-tested |
+| Dashboard UI | Done — Collect and Outreach screens, light theme, virtual tables, drawers; unit-tested |
 | Loadable `build/extension/` build | Done — `node scripts/build.mjs`, passes the package check |
+| README screenshots | Pending — cannot drive Chrome with the extension here; see `docs/screenshots/TODO.md` |
 | Run against a live Instagram account | Not performed |
 
 ## Repository layout
