@@ -325,12 +325,17 @@ describe('collection and outreach sessions', () => {
   });
 
   test('a failed collection keeps its reason and severity', async () => {
-    await putScrapeRun(runRecord({ workspaceId: ws, source: 'followers', runId: 'run_2' }));
+    // An explicit later startedAt than run_1: both would otherwise stamp
+    // Date.now() inside the same millisecond and the "newest first" sort would
+    // tie arbitrarily, which made this assertion flaky under a parallel run.
+    const startedLater = Date.now() + 1000;
+    await putScrapeRun({ ...runRecord({ workspaceId: ws, source: 'followers', runId: 'run_2' }), startedAt: startedLater });
     const row = await finishScrapeRun('run_2', { status: 'refused', reason: 'action block', severity: 'account' });
     assert.equal(row.status, 'refused');
     assert.equal(row.severity, 'account');
     const runs = await listScrapeRuns(ws, { kind: 'collect' });
     assert.equal(runs.length, 2);
+    assert.equal(runs.find((r) => r.runId === 'run_2').severity, 'account', 'found by identity');
     assert.equal(runs[0].runId, 'run_2', 'newest first');
   });
 

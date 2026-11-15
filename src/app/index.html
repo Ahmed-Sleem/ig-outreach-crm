@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instagram Outreach CRM</title>
+  <!--
+    No inline style="" attributes anywhere in this file: the extension CSP is
+    `style-src 'self'` with no 'unsafe-inline', so an inline style is blocked and
+    logs a console error. Every rule lives in tokens.css or app.css. The shell is
+    a set of empty roots; main.js builds the top bar and mounts a view into
+    #view-root. ui.js renders modal/drawer/toast into the three roots below.
+  -->
+  <link rel="stylesheet" href="design/tokens.css">
+  <link rel="stylesheet" href="design/app.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="shell__bar">
+      <div class="shell__left" id="shell-left"></div>
+      <div class="shell__center" id="shell-center"></div>
+      <div class="shell__right" id="shell-right"></div>
+    </header>
+    <div class="shell__body">
+      <main class="view" id="view-root"></main>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="drawer-root"></div>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

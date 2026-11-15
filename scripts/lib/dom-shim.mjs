@@ -37,6 +37,7 @@ class ClassList {
 class Element {
   constructor(tagName, doc) {
     this.tagName = tagName;
+    this.nodeType = tagName === '#fragment' ? 11 : 1;
     this.ownerDocument = doc;
     this.children = [];
     this.attributes = {};
@@ -334,7 +335,7 @@ class ShimSelection {
 }
 
 class TextNode {
-  constructor(text) { this.textContent = String(text); this.parentNode = null; }
+  constructor(text) { this.nodeType = 3; this.textContent = String(text); this.parentNode = null; }
   get outerHTML() { return escapeHtml(this.textContent); }
 }
 

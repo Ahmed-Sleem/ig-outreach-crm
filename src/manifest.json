@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Outreach CRM",
+  "version": "0.2.0",
+  "description": "A local-first relationship CRM and careful outreach autopilot for your own Instagram business account. Collect people who engage a niche, rank them, and follow or message at a human pace within strict daily limits. Everything is stored in this browser; nothing is uploaded. Use responsibly and in line with Instagram's Terms.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.instagram.com/*"
+  ],
+  "action": {
+    "default_title": "Open Instagram Outreach CRM",
+    "default_popup": "app/popup.html"
+  },
+  "options_page": "app/index.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.instagram.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/*.js",
+        "core/*.js",
+        "storage/*.js",
+        "app/*"
+      ],
+      "matches": [
+        "*://*.instagram.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self'"
+  },
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  }
+}

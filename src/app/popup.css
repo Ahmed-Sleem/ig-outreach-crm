@@ -1,0 +1,77 @@
+/*
+ * Toolbar popup. Deliberately tiny and dependency-free.
+ *
+ * No inline styles and no raw colours: the extension CSP is `style-src 'self'`
+ * with no 'unsafe-inline', and verify.sh fails the build on a hex colour in any
+ * CSS file but tokens.css. Everything here consumes tokens.
+ */
+
+.popup {
+  width: 280px;
+  margin: 0;
+  padding: var(--sp-4);
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+}
+
+.popup__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.popup__logo {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--c-primary), var(--c-viz-4));
+  display: grid;
+  place-items: center;
+  color: var(--c-text-invert);
+}
+
+/* The logo is an inline SVG so it stays crisp at any zoom and follows the theme
+   through currentColor. Sized in the tile, not with a style="" attribute. */
+.logo-mark { width: 19px; height: 19px; display: block; }
+
+.popup__title { font-size: var(--fs-base); font-weight: var(--fw-semi); }
+.popup__sub { font-size: var(--fs-xs); color: var(--c-text-faint); }
+
+.popup__btn {
+  display: block;
+  width: 100%;
+  margin-bottom: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-border-strong);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.popup__btn:hover { background: var(--c-surface-hover); }
+.popup__btn:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; }
+
+.popup__btn--primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: var(--c-text-invert);
+  font-weight: var(--fw-medium);
+}
+
+.popup__btn--primary:hover { filter: brightness(1.08); background: var(--c-primary); }
+
+.popup__status {
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+  margin-top: var(--sp-2);
+  line-height: var(--lh-base);
+}
+
+.popup__status--warn { color: var(--c-warning); }

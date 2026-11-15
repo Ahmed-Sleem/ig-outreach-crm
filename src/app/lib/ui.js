@@ -120,11 +120,11 @@ export function card(title, children, { hint = null } = {}) {
 }
 
 export function note(text, variant = '') {
-  return el('div', { class: `note ${variant ? `note--${variant}` : ''}` }, [text]);
+  return el('div', { class: `note ${variant ? `note--${variant}` : ''}`.trim() }, [text]);
 }
 
 export function badge(text, variant = '') {
-  return el('span', { class: `badge ${variant ? `badge--${variant}` : ''}`, text });
+  return el('span', { class: `badge ${variant ? `badge--${variant}` : ''}`.trim(), text });
 }
 
 export function empty(title, message, action = null) {
@@ -158,7 +158,7 @@ export function table(headers, rows, { numeric = [] } = {}) {
 export function toast(message, variant = '') {
   const root = $('#toasts');
   if (!root) return;
-  const node = el('div', { class: `toast ${variant ? `toast--${variant}` : ''}`, text: message });
+  const node = el('div', { class: `toast ${variant ? `toast--${variant}` : ''}`.trim(), text: message });
   root.append(node);
   setTimeout(() => {
     node.style.opacity = '0';
@@ -185,7 +185,7 @@ export function modal({ title, body, actions = [], onClose = null }) {
       body,
       el('div', { class: 'modal__actions' }, actions.map((a) =>
         el('button', {
-          class: `btn ${a.variant ? `btn--${a.variant}` : ''}`,
+          class: `btn ${a.variant ? `btn--${a.variant}` : ''}`.trim(),
           text: a.label,
           onclick: () => { const r = a.onClick?.(close); if (r !== false && !a.keepOpen) close(); },
         }))),
