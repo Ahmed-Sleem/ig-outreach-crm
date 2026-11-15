@@ -16,27 +16,17 @@
 import {
   btn, card, chipList, drawer, el, clear, field, note, scannedText,
   stateBadge, table, toast, warmthBadge, fmtNum, relTime,
+  segmented, detailsLine, banner,
 } from '../lib/ui.js';
 import { virtualTable } from '../lib/virtual-list.js';
 import { CollectSource } from '../../content/main.js';
+import { RunPhase } from '../lib/runner.js';
+import { SOURCE_FIELDS, SOURCE_GROUPS, parseTarget, describeTarget } from '../lib/target.js';
 import { listEdgesForLead, upsertLead } from '../../storage/db.js';
 
-const SOURCES = [
-  { value: CollectSource.FOLLOWERS, label: 'Followers of an account' },
-  { value: CollectSource.FOLLOWING, label: 'Following of an account' },
-  { value: CollectSource.POST_LIKERS, label: 'Likers of a post' },
-  { value: CollectSource.POST_COMMENTS, label: 'Commenters on a post' },
-  { value: CollectSource.PROFILE_RECENT_LIKERS, label: 'Recent likers on a profile' },
-  { value: CollectSource.HASHTAG_GRID, label: 'Hashtag grid authors' },
-  { value: CollectSource.SAVED_GRID, label: 'Saved-posts grid' },
-  { value: CollectSource.OPEN_LIST_DIALOG, label: 'An open follower/following dialog' },
-  { value: CollectSource.CURRENT_PAGE, label: 'Whoever is on the current tab' },
-];
-
-const SOURCE_NEEDS_TARGET = new Set([
-  CollectSource.FOLLOWERS, CollectSource.FOLLOWING, CollectSource.POST_LIKERS,
-  CollectSource.POST_COMMENTS, CollectSource.PROFILE_RECENT_LIKERS, CollectSource.HASHTAG_GRID,
-]);
+// The nine collect sources, their four plain groups, and the field each one needs
+// all live in lib/target.js (SOURCE_GROUPS / SOURCE_FIELDS), so the form, the live
+// validation and the parser read one description and can never drift apart.
 
 const TIERS = ['hot', 'warm', 'lukewarm', 'cold'];
 const SORTS = [
@@ -46,15 +36,14 @@ const SORTS = [
   { value: 'recent', label: 'Recently actioned' },
 ];
 
+// Five columns only, so the table fits a laptop without crowding; the score,
+// message state, sources and score breakdown all stay in the lead drawer.
 const COLUMNS = [
-  { key: 'priorityScore', label: 'Score', width: '68px', numeric: true, cell: (row) => String(Math.round(row.priorityScore ?? 0)) },
-  { key: 'username', label: 'Username', width: '1.5fr', cell: (row) => `@${row.username}` },
-  { key: 'fullName', label: 'Name', width: '1.5fr', cell: (row) => scannedText(row.fullName ?? '') },
-  { key: 'warmthTier', label: 'Warmth', width: '92px', cell: (row) => warmthBadge(row.warmthTier, row.priorityScore) },
-  { key: 'relState', label: 'Relationship', width: '132px', cell: (row) => stateBadge(row.relState) },
-  { key: 'dmState', label: 'Message', width: '132px', cell: (row) => stateBadge(row.dmState) },
-  { key: 'followers', label: 'Followers', width: '88px', numeric: true, cell: (row) => fmtNum(row.followers ?? null, { compact: true }) },
-  { key: 'sourceAccounts', label: 'Sources', width: '1.2fr', cell: (row) => (row.sourceAccounts ?? []).join(', ') || '—' },
+  { key: 'username', label: 'Username', width: '1.6fr', cell: (row) => `@${row.username}` },
+  { key: 'fullName', label: 'Name', width: '1.6fr', cell: (row) => scannedText(row.fullName ?? '') },
+  { key: 'warmthTier', label: 'Warmth', width: '96px', cell: (row) => warmthBadge(row.warmthTier, row.priorityScore) },
+  { key: 'relState', label: 'Status', width: '132px', cell: (row) => stateBadge(row.relState) },
+  { key: 'followers', label: 'Followers', width: '96px', numeric: true, cell: (row) => fmtNum(row.followers ?? null, { compact: true }) },
 ];
 
 /**
@@ -83,56 +72,262 @@ export function createCollectorView(ctx = {}) {
 
   /* ---------------------------------------------------------------- launcher */
 
-  function renderLauncher() {
-    let source = CollectSource.FOLLOWERS;
-    let username = '';
-    let limit = 200;
+  // Collect-form state. The picker, the adaptive field and the parser all read the
+  // same descriptors from lib/target.js, so the form can never offer a source the
+  // parser cannot validate, and the field always matches the chosen source.
+  let source = CollectSource.FOLLOWERS;
+  let rawInput = '';
+  let limit = 200;
+  let lastParse = null;
+  let validateTimer = null;
+  let targetFieldNode = null;
+  let collectBtn = null;
+  let initialApplied = false;
 
-    const sourceSelect = el('select', { class: 'select' });
-    for (const option of SOURCES) sourceSelect.append(el('option', { value: option.value, text: option.label }));
-    sourceSelect.value = source;
+  const stepSource = el('div', { class: 'col' });
+  const stepDetail = el('div', { class: 'col' });
+  const statusLine = el('div', { class: 'status-line small dim', role: 'status', 'aria-live': 'polite' });
+  const errorSlot = el('div', { class: 'col' });
+  const bannerSlot = el('div');
 
-    const targetField = field('Target account, post URL or hashtag', {
-      value: '', placeholder: 'competitor_handle  ·  /p/CxY…  ·  #linen',
-      onInput: (value) => { username = value.trim(); },
+  // One plain sentence per failure code plus what to do next. The raw internal
+  // string is kept in a collapsed Details line, so nothing is lost for debugging.
+  const HUMAN = {
+    invalid_username: () => 'That does not look like an Instagram username. Use letters, numbers, . and _ only.',
+    not_found: (name) => `Instagram could not find @${name}. Check the spelling, or the account may be private, removed or renamed.`,
+    login_required: () => 'You are logged out of Instagram in this browser. Log in, reload the tab, then try again.',
+    rate_limited: () => 'Instagram asked us to slow down. The run was paused. Wait a few minutes before trying again.',
+    no_numeric_id: (name) => `Could not get @${name}'s ID from Instagram. Open their profile in the Instagram tab, wait for it to load, then press Collect.`,
+    no_recent_posts: (name) => `@${name} has no readable recent posts (private account, or no posts).`,
+    network: () => 'Could not reach Instagram. Check your connection.',
+    no_tab: () => 'No Instagram tab is open. Open instagram.com in a tab and try again.',
+  };
+
+  function targetName() {
+    return lastParse?.username ?? lastParse?.shortcode ?? lastParse?.tag ?? (rawInput.trim() || 'this account');
+  }
+
+  function humanFor(code, technical) {
+    // Safety refusals keep pacing.js's own wording verbatim; never soften them.
+    if (code === 'blocked') return { message: technical ?? 'Instagram blocked an action.', safety: true };
+    const make = HUMAN[code];
+    if (make) return { message: make(targetName()), safety: false };
+    return { message: technical ?? 'The collection did not finish.', safety: false };
+  }
+
+  function metaFor(src) { return SOURCE_FIELDS[src] ?? SOURCE_FIELDS.current_page; }
+
+  function groupOfSource(src) {
+    const group = SOURCE_GROUPS.find((g) => g.options.some((o) => o.value === src));
+    return (group ?? SOURCE_GROUPS[0]).id;
+  }
+
+  function renderSourcePicker() {
+    clear(stepSource);
+    const groupId = groupOfSource(source);
+    stepSource.append(el('div', { class: 'step__label', text: 'Step 1 - What do you want to collect from?' }));
+    const groupBar = el('div', { class: 'source-groups', role: 'group', 'aria-label': 'What to collect from' });
+    for (const group of SOURCE_GROUPS) {
+      const on = group.id === groupId;
+      groupBar.append(el('button', {
+        class: `source-group ${on ? 'source-group--on' : ''}`.trim(),
+        type: 'button', 'aria-pressed': on ? 'true' : 'false', text: group.label,
+        onclick: () => setSource(group.options[0].value),
+      }));
+    }
+    stepSource.append(groupBar);
+    const group = SOURCE_GROUPS.find((g) => g.id === groupId);
+    if (group && group.options.length > 1) {
+      const options = group.options.map((o) => ({ id: o.value, label: o.label }));
+      stepSource.append(el('div', { class: 'mt-2' }, [segmented(options, source, { onSelect: (value) => setSource(value) })]));
+    }
+  }
+
+  function setSource(next) {
+    source = next;
+    renderSourcePicker();
+    renderDetail();
+  }
+
+  function renderDetail() {
+    clear(stepDetail);
+    const meta = metaFor(source);
+    stepDetail.append(el('div', { class: 'step__label', text: 'Step 2 - Details' }));
+    if (meta.needsField) {
+      const f = field(meta.label, {
+        value: rawInput, placeholder: meta.placeholder,
+        onInput: (value) => { rawInput = value; scheduleValidate(); },
+      });
+      targetFieldNode = f;
+      f.field.input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') { event.preventDefault(); if (collectEnabled()) void doCollect(); }
+      });
+      stepDetail.append(f);
+    } else {
+      targetFieldNode = null;
+      stepDetail.append(note(meta.helper, 'info'));
+    }
+    stepDetail.append(field('How many', {
+      type: 'number', value: String(limit), hint: 'Between 1 and 5000.',
+      onInput: (value) => { limit = Math.max(1, Math.min(5000, Number(value) || 200)); },
+    }));
+    validate(true);
+    updateCollectEnabled();
+  }
+
+  function collectEnabled() {
+    const meta = metaFor(source);
+    if (!meta.needsField) return true;
+    return Boolean(lastParse?.ok);
+  }
+
+  function updateCollectEnabled() {
+    if (!collectBtn) return;
+    const enabled = collectEnabled();
+    if (enabled) collectBtn.removeAttribute('disabled');
+    else collectBtn.setAttribute('disabled', '');
+    collectBtn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  }
+
+  function validate(quiet) {
+    const meta = metaFor(source);
+    if (!meta.needsField) { lastParse = null; return; }
+    const text = rawInput.trim();
+    if (!text) {
+      lastParse = null;
+      if (targetFieldNode) targetFieldNode.field.setHelper(meta.helper);
+      return;
+    }
+    lastParse = parseTarget(source, text);
+    if (!targetFieldNode) return;
+    if (lastParse.ok) targetFieldNode.field.setOk(`\u2713 ${describeTarget(lastParse)}`);
+    else if (!quiet) targetFieldNode.field.setError(lastParse.error);
+    else targetFieldNode.field.setHelper(meta.helper);
+  }
+
+  function scheduleValidate() {
+    if (validateTimer) clearTimeout(validateTimer);
+    validateTimer = setTimeout(() => { validateTimer = null; validate(false); updateCollectEnabled(); }, 150);
+    if (typeof validateTimer?.unref === 'function') validateTimer.unref();
+  }
+
+  function showCollectError(code, technical) {
+    clear(errorSlot);
+    const { message, safety } = humanFor(code, technical);
+    errorSlot.append(note(message, safety ? 'danger' : 'warning'));
+    if (technical && technical !== message) errorSlot.append(detailsLine('Details', technical));
+  }
+
+  // The pill sends the page it was clicked from; aim the collection at that exact
+  // tab, because opening the dashboard moves focus and "the active Instagram tab"
+  // is no longer the one the owner clicked.
+  async function resolveTabId(from) {
+    const query = globalThis.chrome?.tabs?.query;
+    if (typeof query !== 'function') return { tabId: undefined };
+    let found = [];
+    try { found = await query({ url: '*://*.instagram.com/*' }); } catch { found = []; }
+    if (!Array.isArray(found) || found.length === 0) return { tabId: undefined, noneFound: true };
+    const norm = (u) => String(u ?? '').split('#')[0];
+    if (from) {
+      const match = found.find((t) => norm(t.url) === norm(from));
+      if (match) return { tabId: match.id };
+    }
+    return { tabId: undefined };
+  }
+
+  async function doCollect() {
+    const meta = metaFor(source);
+    clear(errorSlot);
+    if (meta.needsField) {
+      const parsed = parseTarget(source, rawInput);
+      if (!parsed.ok) {
+        if (targetFieldNode) targetFieldNode.field.setError(parsed.error);
+        showCollectError(parsed.code, parsed.error);
+        return;
+      }
+      lastParse = parsed;
+    }
+    statusLine.textContent = 'Opening the source and reading it at a human pace...';
+    let tabId;
+    const from = ctx.initialRequest?.from ?? null;
+    if (from) {
+      const resolved = await resolveTabId(from);
+      if (resolved.noneFound) {
+        statusLine.textContent = '';
+        showCollectError('no_tab', 'Could not find the Instagram tab you clicked from. Open it again and press Collect.');
+        return;
+      }
+      tabId = resolved.tabId;
+    }
+    const out = await controller.collect({
+      source,
+      username: lastParse?.username ?? null,
+      shortcode: lastParse?.shortcode ?? null,
+      tag: lastParse?.tag ?? null,
+      limit,
+      statusIntervalMs: 1000,
+      tabId,
     });
-    const limitField = field('How many to collect', { type: 'number', value: '200', onInput: (value) => { limit = Math.max(1, Math.min(5000, Number(value) || 200)); } });
+    if (out.ok) {
+      statusLine.textContent = `Collected ${out.count}. Review the preview, then save it into a bucket.`;
+      lastPreview = { runId: out.runId, result: out.result };
+      renderPreview();
+    } else {
+      statusLine.textContent = '';
+      showCollectError(out.code, out.reason);
+      lastPreview = null;
+      renderPreview();
+    }
+  }
 
-    const status = el('div', { class: 'small dim mt-2' });
-    const collectBtn = btn('Collect', {
-      variant: 'primary', busyLabel: 'Collecting…',
-      onClick: async () => {
-        if (SOURCE_NEEDS_TARGET.has(source) && !username) {
-          status.textContent = 'This source needs a target account, post or hashtag.';
+  function renderLauncher() {
+    collectBtn = btn('Collect', { variant: 'primary', busyLabel: 'Collecting...', onClick: () => doCollect() });
+    collectBtn.classList.add('btn--lg');
+    renderSourcePicker();
+    renderDetail();
+    replaceCard(launcherCard, el('div', { class: 'col' }, [
+      bannerSlot,
+      stepSource,
+      stepDetail,
+      el('div', { class: 'step' }, [
+        el('div', { class: 'step__label', text: 'Step 3 - Collect' }),
+        el('div', { class: 'row' }, [collectBtn]),
+        statusLine,
+        errorSlot,
+      ]),
+    ]));
+    updateCollectEnabled();
+  }
+
+  // The pill can open the dashboard with a source and target already chosen and
+  // auto='1'. Pre-fill the form, then start once - unless a run is already going.
+  function applyInitialRequest() {
+    const req = ctx.initialRequest;
+    if (req && !initialApplied) {
+      initialApplied = true;
+      if (req.source && SOURCE_FIELDS[req.source]) source = req.source;
+      rawInput = req.username
+        ?? (req.shortcode ? `https://www.instagram.com/p/${req.shortcode}/` : (req.tag ? `#${req.tag}` : ''));
+      renderLauncher();
+      if (req.auto === '1') {
+        const busy = new Set([RunPhase.PREPARING, RunPhase.RUNNING, RunPhase.WAITING, RunPhase.STOPPING]);
+        if (busy.has(controller.state?.phase)) {
+          showCollectError(null, 'A run is already in progress.');
           return;
         }
-        status.textContent = 'Opening the source and reading it at a human pace…';
-        const out = await controller.collect({ source, username: username || null, limit, statusIntervalMs: 1000 });
-        if (out.ok) {
-          status.textContent = `Collected ${out.count}. Review the preview, then save it into a bucket.`;
-          lastPreview = { runId: out.runId, result: out.result };
-          renderPreview();
-        } else {
-          status.textContent = out.reason ?? 'The collection did not finish.';
-          lastPreview = null;
-          renderPreview();
-        }
-      },
-    });
-
-    const sourceWrap = el('label', { class: 'field' }, [el('span', { class: 'field__label', text: 'Source' }), sourceSelect]);
-    sourceSelect.addEventListener('change', () => {
-      source = sourceSelect.value;
-      const needsTarget = SOURCE_NEEDS_TARGET.has(source);
-      targetField.classList.toggle('hidden', !needsTarget);
-    });
-    targetField.classList.toggle('hidden', !SOURCE_NEEDS_TARGET.has(source));
-
-    replaceCard(launcherCard, el('div', { class: 'grid grid--2' }, [
-      el('div', { class: 'col' }, [sourceWrap, targetField]),
-      el('div', { class: 'col' }, [limitField, el('div', { class: 'row' }, [collectBtn]), status]),
-    ]));
+        const label = describeTarget(parseTarget(source, rawInput)) || 'this page';
+        clear(bannerSlot);
+        bannerSlot.append(banner(`Started from Instagram: collecting ${label}.`, {
+          variant: 'info',
+          actions: [btn('Stop', { variant: 'danger', onClick: () => controller.stop('stopped by the owner') })],
+        }));
+        void doCollect();
+      }
+      return;
+    }
+    renderLauncher();
   }
+
 
   /* ----------------------------------------------------------------- preview */
 
@@ -287,6 +482,13 @@ export function createCollectorView(ctx = {}) {
     cardNode.append(body);
   }
 
+  // The table caps its own height from the viewport (matching the CSS
+  // max-height: min(70vh, 640px)), never a number hard-coded in JS.
+  function tableViewportHeight() {
+    const vh = typeof globalThis.innerHeight === 'number' && globalThis.innerHeight > 0 ? globalThis.innerHeight : 800;
+    return Math.max(240, Math.min(Math.round(vh * 0.7), 640));
+  }
+
   async function refresh() {
     try {
       [allLeads, groups] = await Promise.all([api.leads({ limit: 20_000 }), api.groups()]);
@@ -301,7 +503,7 @@ export function createCollectorView(ctx = {}) {
     // position every time a filter box empties and refills.
     if (!vtable) {
       vtable = virtualTable(tableMount, {
-        columns: COLUMNS, rows, rowHeight: 38, viewportHeight: 520, overscan: 10,
+        columns: COLUMNS, rows, rowHeight: 38, viewportHeight: tableViewportHeight(), overscan: 10,
         rowClass: () => 'vtable__row--clickable',
         onRowClick: (row) => openDossier(row),
         emptyMessage: allLeads.length ? 'No leads match these filters.' : 'No leads yet — collect a source above, then save it into a bucket.',
@@ -316,7 +518,7 @@ export function createCollectorView(ctx = {}) {
     clear(root);
     root.append(launcherCard, previewCard, libraryCard);
     container.append(root);
-    renderLauncher();
+    applyInitialRequest();
     renderPreview();
     if (ctx.onRunEvent) unsubscribe.push(ctx.onRunEvent((event) => {
       // A collection finishing elsewhere, or a commit, should refresh the table.
@@ -330,6 +532,7 @@ export function createCollectorView(ctx = {}) {
 
   function destroy() {
     for (const off of unsubscribe.splice(0)) { try { off?.(); } catch { /* already gone */ } }
+    if (validateTimer) { clearTimeout(validateTimer); validateTimer = null; }
     vtable?.destroy();
     vtable = null;
     clear(root);

@@ -260,7 +260,7 @@ export function createRunController(deps = {}) {
     const settings = options.settings ?? await api.settings();
     const weights = options.weights ?? settings?.rankingWeights ?? {};
     const tab = await chooseTab(options);
-    if (!tab.ok) return finishCollect({ ok: false, reason: tab.reason, phase: RunPhase.FAILED });
+    if (!tab.ok) return finishCollect({ ok: false, reason: tab.reason, code: 'no_tab', phase: RunPhase.FAILED });
 
     const run = await api.startRun({
       source,
@@ -296,7 +296,7 @@ export function createRunController(deps = {}) {
       if (!answer.ok) {
         state.lastError = answer.reason;
         await api.finishRun(run.runId, { status: 'failed', reason: answer.reason, severity: answer.severity ?? null });
-        return finishCollect({ ok: false, reason: answer.reason, phase: RunPhase.FAILED, severity: answer.severity ?? null, runId: run.runId });
+        return finishCollect({ ok: false, reason: answer.reason, code: answer.value?.code ?? null, phase: RunPhase.FAILED, severity: answer.severity ?? null, runId: run.runId });
       }
       const result = answer.value ?? {};
       const leads = Array.isArray(result.leads) ? result.leads : [];
