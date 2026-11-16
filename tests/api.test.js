@@ -847,4 +847,45 @@ describe('the composed client', () => {
     assert.notEqual(client.bridge(), first, 'a new workspace is a new mailbox, not a reused key');
     assert.deepEqual(chrome.store.get(ACTIVE_WORKSPACE_KEY), { workspaceId: '88', at: 0 });
   });
+
+  test('prepare succeeds when Chrome reports status=loading on IG streams if live PING answers', async () => {
+    const tabs = {
+      async tabById() { return { id: 9, url: 'https://www.instagram.com/fightclubpoint/', status: 'loading', discarded: false }; },
+      async waitForLoad() { return { ok: false, reason: 'the tab was still loading after 4s', tab: { id: 9, url: 'https://www.instagram.com/fightclubpoint/', status: 'loading' } }; },
+      async inject() { return { ok: true }; },
+    };
+    const storageMap = new Map();
+    const storage = {
+      async get(k) { return storageMap.get(k) ?? null; },
+      async set(k, v) { storageMap.set(k, v); },
+    };
+    const bridge = {
+      async postCommand(type) {
+        assert.equal(type, CommandType.PING);
+        return { ok: true, result: { pong: true, pageUsername: 'fightclubpoint' } };
+      },
+    };
+    const channel = createCommandChannel({
+      storage,
+      tabs,
+      state: { workspaceId: '42' },
+      bridgeFor: () => bridge,
+      now: () => 123,
+      sleep: async () => {},
+    });
+    const res = await channel.prepare(9);
+    assert.equal(res.ok, true, 'succeeds via live PING instead of false not-loaded error');
+    assert.equal(storageMap.get(ACTIVE_WORKSPACE_KEY)?.workspaceId, '42', 'syncs active workspace before pinging');
+  });
+
+  test('pickTab matches usernames case-insensitively, matches post shortcodes, and prefers live tabs', () => {
+    const tabs = [
+      { id: 1, url: 'https://www.instagram.com/p/Dfc2iPGyqto/', active: false, discarded: false },
+      { id: 2, url: 'https://www.instagram.com/FightClubPoint/', active: false, discarded: true },
+      { id: 3, url: 'https://www.instagram.com/FightClubPoint/', active: false, discarded: false },
+    ];
+    assert.equal(pickTab(tabs, { username: 'fightclubpoint' }).tab.id, 3, 'case-insensitive match prefers non-discarded tab');
+    assert.equal(pickTab(tabs, { shortcode: 'Dfc2iPGyqto' }).tab.id, 1, 'matches post tab by shortcode');
+  });
 });
+

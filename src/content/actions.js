@@ -224,11 +224,13 @@ export async function humanClick(ctx, element, options = {}) {
     await wait(8 + Math.round(random() * 18), { signal });
   }
 
+  ctx.virtualCursor?.highlight?.(element);
   for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click']) {
     if (type === 'pointerdown') ctx.virtualCursor?.pulseClick?.(point.clientX, point.clientY);
     dispatch(type, point);
     if (type === 'pointerdown' || type === 'mouseup') await wait(40 + Math.round(random() * 60), { signal });
   }
+  ctx.virtualCursor?.clearHighlight?.();
   ctx.pointer = point;
   return true;
 }

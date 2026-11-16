@@ -36,6 +36,7 @@ import {
   findDialogLoadMoreButton,
   findDialogLoadingSpinner,
   findDialogs,
+  findLastVisibleUserLink,
   findLoadMoreCommentsButton,
   findNextPostButton,
   findPostGridLinks,
@@ -92,19 +93,48 @@ const NOOP_CURSOR = Object.freeze({
   move() {},
   pulseClick() {},
   label() {},
+  progress() {},
+  highlight() {},
+  clearHighlight() {},
   hide() {},
+  destroy() {},
 });
 
 function ensureCursor(ctx) {
-  // Never inject foreign DOM overlay elements into Instagram during live runs;
-  // use an injected cursor only when a caller/test explicitly supplies one.
   if (ctx.virtualCursor) return { cursor: ctx.virtualCursor, owned: false };
   return { cursor: NOOP_CURSOR, owned: false };
 }
 
-async function waitWhileLoading(ctx, scope, { maxWaitMs = 4200, signal = null } = {}) {
+/**
+ * Wait until new user rows appear OR the loading spinner finishes, without
+ * stalling forever on Instagram's permanent bottom infinite-scroll spinner.
+ */
+async function waitForDialogRows(ctx, getDialog, {
+  minUsers = 1,
+  excludeUsername = null,
+  respectSuggestedBoundary = true,
+  maxWaitMs = 3000,
+  signal = null,
+} = {}) {
   const wait = ctx.wait ?? interruptibleWait;
-  const stepMs = 350;
+  const stepMs = 250;
+  let waited = 0;
+  while (waited < maxWaitMs && !signal?.aborted) {
+    const dlg = getDialog();
+    if (!dlg) break;
+    const { users } = extractDialogUsers(dlg, { excludeUsername, respectSuggestedBoundary });
+    if (users.length >= minUsers) return users.length;
+    if (!findDialogLoadingSpinner(dlg) && waited >= 500) break;
+    await wait(stepMs, { signal });
+    waited += stepMs;
+  }
+  const dlg = getDialog();
+  return dlg ? extractDialogUsers(dlg, { excludeUsername, respectSuggestedBoundary }).users.length : 0;
+}
+
+async function waitWhileLoading(ctx, scope, { maxWaitMs = 2500, signal = null } = {}) {
+  const wait = ctx.wait ?? interruptibleWait;
+  const stepMs = 250;
   let waited = 0;
   while (waited < maxWaitMs && !signal?.aborted) {
     if (!findDialogLoadingSpinner(scope)) break;
@@ -130,8 +160,10 @@ async function closeDialogHuman(ctx, dialog, { signal = null } = {}) {
  * Followers, Following, or Likes modal while scrolling naturally.
  *
  * Handles all 2026 Instagram dialog behaviors:
- *   - Waits patiently while `<div role="progressbar">` / `Loading...` is active
+ *   - Re-acquires the dialog if React re-mounts it mid-load
+ *   - Waits intelligently for rows without blocking on Instagram's bottom spinner
  *   - Clicks in-dialog "See all followers" / "Load more" buttons (never "See All Suggestions")
+ *   - Falls back to `scrollIntoView` on the last visible row if a wrapper refuses `scrollTop`
  *   - Performs a scroll-up-then-down nudge when Instagram's virtual list stalls
  *   - Stops cleanly before "Suggested for you"
  *   - Treats Instagram-imposed partial caps ("Only X can see all followers", 50/100 limit)
@@ -144,6 +176,7 @@ export async function scrollDialogForUsers(ctx, dialog, {
   refId = null,
   phase = 'dialog',
   noun = 'people',
+  ariaLabel = null,
   maxStalls = 4,
   maxSteps = 120,
   onProgress = null,
@@ -152,15 +185,26 @@ export async function scrollDialogForUsers(ctx, dialog, {
 } = {}) {
   const wait = ctx.wait ?? interruptibleWait;
   const random = typeof ctx.random === 'function' ? ctx.random : Math.random;
+  const visual = ctx.virtualCursor ?? NOOP_CURSOR;
   const collected = existingMap ?? new Map();
+  let activeDialog = dialog;
   let stalls = 0;
   let steps = 0;
   let hitSuggested = false;
   let nudgedAtCount = -1;
   let loadMoreClicks = 0;
 
+  const getDialog = () => {
+    if (activeDialog && activeDialog.isConnected !== false) return activeDialog;
+    const fresh = (ariaLabel ? findVisibleDialog(ctx.document, { ariaLabel }) : null) ?? findVisibleDialog(ctx.document);
+    if (fresh) activeDialog = fresh;
+    return activeDialog;
+  };
+
   const absorb = () => {
-    const extracted = extractDialogUsers(dialog, { excludeUsername, respectSuggestedBoundary });
+    const dlg = getDialog();
+    if (!dlg) return 0;
+    const extracted = extractDialogUsers(dlg, { excludeUsername, respectSuggestedBoundary });
     if (extracted.hitSuggested) hitSuggested = true;
     let added = 0;
     for (const user of extracted.users) {
@@ -180,14 +224,23 @@ export async function scrollDialogForUsers(ctx, dialog, {
     return added;
   };
 
-  // If the dialog opened with a loading spinner still active, let the first batch render
-  await waitWhileLoading(ctx, dialog, { maxWaitMs: 3500, signal });
+  // Wait briefly if the dialog just opened and rows are still hydrating from network
+  visual.label?.(`Waiting for ${noun} to load…`);
+  await waitForDialogRows(ctx, getDialog, {
+    minUsers: 1,
+    excludeUsername,
+    respectSuggestedBoundary,
+    maxWaitMs: 5000,
+    signal,
+  });
   if (signal?.aborted) {
     return { rows: [...collected.values()].slice(0, limit), steps, hitSuggested, capped: false };
   }
 
   // Initial read of whatever is already rendered in the dialog
   absorb();
+  visual.progress?.(collected.size, limit);
+  visual.label?.(`Reading ${noun} · ${collected.size}/${limit}`);
   onProgress?.({
     phase,
     note: `Reading ${noun} (${collected.size}/${limit})…`,
@@ -199,16 +252,19 @@ export async function scrollDialogForUsers(ctx, dialog, {
   while (collected.size < limit && steps < maxSteps) {
     if (signal?.aborted) break;
     checkBlocked(ctx.document);
+    const dlg = getDialog();
+    if (!dlg) break;
     if (hitSuggested && collected.size > 0) break;
 
-    const scrollBox = findScrollableList(dialog) ?? dialog;
+    const scrollBox = findScrollableList(dlg) ?? dlg;
     steps += 1;
     const beforeSize = collected.size;
 
     // Click an explicit "See all followers" / "Load more" button if Instagram renders one
-    const loadMoreBtn = loadMoreClicks < 8 ? findDialogLoadMoreButton(dialog) : null;
+    const loadMoreBtn = loadMoreClicks < 8 ? findDialogLoadMoreButton(dlg) : null;
     if (loadMoreBtn) {
       loadMoreClicks += 1;
+      visual.label?.(`Clicking "See all" (${collected.size}/${limit})…`);
       onProgress?.({
         phase,
         note: `Loading more ${noun} (${collected.size}/${limit})…`,
@@ -217,21 +273,45 @@ export async function scrollDialogForUsers(ctx, dialog, {
         step: steps,
       });
       await humanClickTarget(ctx, loadMoreBtn, { signal, label: `Loading more ${noun}…` });
-      await wait(humanDelayMs(700, 1400, random), { signal });
-      await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+      await wait(humanDelayMs(600, 1200, random), { signal });
+      await waitForDialogRows(ctx, getDialog, {
+        minUsers: collected.size + 1,
+        excludeUsername,
+        respectSuggestedBoundary,
+        maxWaitMs: 2600,
+        signal,
+      });
     } else {
-      await humanScrollContainer(ctx, scrollBox, {
+      const visibleCountBefore = extractDialogUsers(dlg, { excludeUsername, respectSuggestedBoundary }).users.length;
+      const scrollRes = await humanScrollContainer(ctx, scrollBox, {
         signal,
         label: `Scrolling ${noun} (${collected.size}/${limit})…`,
       });
+      // Fallback: if scrollBox didn't actually move (unexpected wrapper), scroll the last visible row into view
+      if (scrollRes.movedPx === 0 && !signal?.aborted) {
+        const lastLink = findLastVisibleUserLink(dlg, { excludeUsername, respectSuggestedBoundary });
+        try {
+          lastLink?.scrollIntoView?.({ behavior: 'smooth', block: 'end' });
+        } catch {
+          try { lastLink?.scrollIntoView?.(false); } catch { /* shim */ }
+        }
+      }
       if (signal?.aborted) break;
-      await wait(humanDelayMs(650, 1450, random), { signal });
-      await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+      await wait(humanDelayMs(550, 1250, random), { signal });
+      await waitForDialogRows(ctx, getDialog, {
+        minUsers: visibleCountBefore + 1,
+        excludeUsername,
+        respectSuggestedBoundary,
+        maxWaitMs: 2200,
+        signal,
+      });
     }
 
     if (signal?.aborted) break;
 
     let added = absorb();
+    visual.progress?.(collected.size, limit);
+    visual.label?.(`Reading ${noun} · ${collected.size}/${limit}`);
     onProgress?.({
       phase,
       note: `Reading ${noun} · ${collected.size}/${limit} collected`,
@@ -250,12 +330,24 @@ export async function scrollDialogForUsers(ctx, dialog, {
       // (wakes up Instagram's lazy list IntersectionObserver when it sticks)
       if (nudgedAtCount !== collected.size && !signal?.aborted) {
         nudgedAtCount = collected.size;
-        await humanNudgeScroll(ctx, scrollBox, { signal, label: `Refreshing ${noun}…` });
-        await wait(humanDelayMs(750, 1550, random), { signal });
-        await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+        const freshBox = findScrollableList(getDialog() ?? dlg) ?? scrollBox;
+        visual.label?.(`Nudging list ↑↓ to load more (${collected.size}/${limit})…`);
+        await humanNudgeScroll(ctx, freshBox, { signal, label: `Nudging list ↑↓…` });
+        const lastLink = findLastVisibleUserLink(getDialog() ?? dlg, { excludeUsername, respectSuggestedBoundary });
+        try { lastLink?.scrollIntoView?.({ behavior: 'smooth', block: 'end' }); } catch { /* shim */ }
+        await wait(humanDelayMs(700, 1400, random), { signal });
+        await waitForDialogRows(ctx, getDialog, {
+          minUsers: collected.size + 1,
+          excludeUsername,
+          respectSuggestedBoundary,
+          maxWaitMs: 2600,
+          signal,
+        });
         added = absorb();
         if (added > 0) {
           stalls = 0;
+          visual.progress?.(collected.size, limit);
+          visual.label?.(`Reading ${noun} · ${collected.size}/${limit}`);
           onProgress?.({
             phase,
             note: `Reading ${noun} · ${collected.size}/${limit} collected`,
@@ -267,9 +359,7 @@ export async function scrollDialogForUsers(ctx, dialog, {
         }
       }
 
-      // If Instagram explicitly caps visible followers ("Only X can see all followers")
-      // and a nudge loaded nothing more, stop gracefully right away.
-      if (hasFollowerCapNotice(dialog) && stalls >= 2) break;
+      if (hasFollowerCapNotice(getDialog() ?? dlg) && stalls >= 2) break;
       if (stalls >= maxStalls) break;
     } else {
       stalls = 0;
@@ -277,7 +367,7 @@ export async function scrollDialogForUsers(ctx, dialog, {
   }
 
   const rows = [...collected.values()].slice(0, limit);
-  const capped = hasFollowerCapNotice(dialog) || (rows.length > 0 && rows.length < limit && !signal?.aborted);
+  const capped = hasFollowerCapNotice(getDialog() ?? dialog) || (rows.length > 0 && rows.length < limit && !signal?.aborted);
   return {
     rows,
     steps,
@@ -327,67 +417,81 @@ export async function collectProfileListDom(ctx, {
   try {
     checkBlocked(document);
     cursor.show(`Viewing @${target}…`);
+    cursor.progress?.(0, limit);
     onProgress?.({ phase, note: `Looking at @${target}…` });
     await humanArriveOnPage(ctx, { signal, label: `Viewing @${target}…` });
     if (signal?.aborted) return { ok: false, rows: [], reason: 'Stopped by owner.' };
 
-    // Wait briefly for the profile header & followers/following link to render
-    const triggerWait = await waitFor(
-      ctx,
-      () => findProfileListTrigger(document, listKind),
-      { timeoutMs: ctx.domTimeoutMs ?? 8000, intervalMs: 250, signal, label: `the ${listKind} link on @${target}` },
-    );
-
-    if (!triggerWait.found) {
-      if (isPrivateAccountPage(document)) {
-        return { ok: false, rows: [], reason: `@${target} is a private account; Instagram hides their ${listKind} list.` };
-      }
-      return {
-        ok: false,
-        rows: [],
-        reason: `Could not find the ${listKind} button on @${target}'s page. Make sure the profile loaded and you are logged in.`,
-      };
-    }
-
-    onProgress?.({ phase, note: `Opening @${target}'s ${listKind} list…` });
-    const clicked = await humanClickTarget(ctx, triggerWait.value, {
-      signal,
-      label: `Clicking ${listKind}…`,
-    });
-    if (!clicked || signal?.aborted) return { ok: false, rows: [], reason: 'Stopped by owner.' };
-
-    // Wait for Instagram's followers/following modal to appear & render rows
     const expectedLabel = listKind === 'following'
       ? /^(following|أتابع|يتابع|تتابعه)$/i
       : /^(followers|المتابعون|المتابعين)$/i;
-    const dialogWait = await waitFor(
-      ctx,
-      () => {
-        const dlg = findVisibleDialog(document, { ariaLabel: expectedLabel }) ?? findVisibleDialog(document);
-        if (!dlg) return null;
-        const { users } = extractDialogUsers(dlg, { excludeUsername: target });
-        if (users.length > 0 || findScrollableList(dlg) || findDialogLoadingSpinner(dlg) || hasFollowerCapNotice(dlg)) {
-          return dlg;
+
+    // If the user already has the requested Followers/Following dialog open on
+    // screen (e.g. they opened it manually before clicking Collect), read it
+    // directly instead of clicking behind the modal backdrop.
+    let dialog = findVisibleDialog(document, { ariaLabel: expectedLabel });
+    const openedByUs = !dialog;
+
+    if (!dialog) {
+      // Wait briefly for the profile header & followers/following link to render
+      const triggerWait = await waitFor(
+        ctx,
+        () => findProfileListTrigger(document, listKind),
+        { timeoutMs: ctx.domTimeoutMs ?? 10000, intervalMs: 250, signal, label: `the ${listKind} link on @${target}` },
+      );
+
+      if (!triggerWait.found) {
+        if (isPrivateAccountPage(document)) {
+          return { ok: false, rows: [], reason: `@${target} is a private account; Instagram hides their ${listKind} list.` };
         }
-        return null;
-      },
-      { timeoutMs: ctx.domTimeoutMs ?? 9000, intervalMs: 250, signal, label: `the ${listKind} dialog` },
-    );
-
-    if (!dialogWait.found) {
-      if (isPrivateAccountPage(document)) {
-        return { ok: false, rows: [], reason: `@${target} is private or hides their ${listKind} list.` };
+        return {
+          ok: false,
+          rows: [],
+          reason: `Could not find the ${listKind} button on @${target}'s page. Make sure the profile loaded and you are logged in.`,
+        };
       }
-      return {
-        ok: false,
-        rows: [],
-        reason: `Clicked ${listKind} on @${target}, but Instagram did not open the list (the account may hide it or require login).`,
-      };
-    }
 
-    const dialog = dialogWait.value;
-    // Brief human pause as the list pops open
-    await wait(humanDelayMs(450, 950, random), { signal });
+      cursor.label?.(`Clicking ${listKind} on @${target}…`);
+      onProgress?.({ phase, note: `Opening @${target}'s ${listKind} list…` });
+      const clicked = await humanClickTarget(ctx, triggerWait.value, {
+        signal,
+        label: `Clicking ${listKind}…`,
+      });
+      if (!clicked || signal?.aborted) return { ok: false, rows: [], reason: 'Stopped by owner.' };
+
+      // Wait for Instagram's followers/following modal to appear & begin rendering
+      cursor.label?.(`Waiting for ${listKind} list to open…`);
+      const dialogWait = await waitFor(
+        ctx,
+        () => {
+          const dlg = findVisibleDialog(document, { ariaLabel: expectedLabel }) ?? findVisibleDialog(document);
+          if (!dlg) return null;
+          const { users } = extractDialogUsers(dlg, { excludeUsername: target });
+          if (users.length > 0 || findScrollableList(dlg) || findDialogLoadingSpinner(dlg) || hasFollowerCapNotice(dlg)) {
+            return dlg;
+          }
+          return null;
+        },
+        { timeoutMs: ctx.domTimeoutMs ?? 12000, intervalMs: 250, signal, label: `the ${listKind} dialog` },
+      );
+
+      if (!dialogWait.found) {
+        if (isPrivateAccountPage(document)) {
+          return { ok: false, rows: [], reason: `@${target} is private or hides their ${listKind} list.` };
+        }
+        return {
+          ok: false,
+          rows: [],
+          reason: `Clicked ${listKind} on @${target}, but Instagram did not open the list (the account may hide it or require login).`,
+        };
+      }
+      dialog = dialogWait.value;
+      // Brief human pause as the list pops open
+      await wait(humanDelayMs(450, 950, random), { signal });
+    } else {
+      cursor.label?.(`Reading open ${listKind} list…`);
+      onProgress?.({ phase, note: `Reading open ${listKind} list on @${target}…` });
+    }
 
     const scraped = await scrollDialogForUsers(ctx, dialog, {
       limit,
@@ -395,11 +499,12 @@ export async function collectProfileListDom(ctx, {
       respectSuggestedBoundary: true,
       phase,
       noun: listKind,
+      ariaLabel: expectedLabel,
       onProgress,
       signal,
     });
 
-    if (!signal?.aborted) {
+    if (openedByUs && !signal?.aborted) {
       await closeDialogHuman(ctx, dialog, { signal });
     }
 

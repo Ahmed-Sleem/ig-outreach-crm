@@ -384,3 +384,98 @@ describe('handler answers', () => {
     await run.promise;
   });
 });
+
+describe('live Chrome resilience: context invalidation, onChanged wake-up & multi-tab routing', () => {
+  test('chromeStorageAdapter handles Extension context invalidated silently and runCommandLoop exits cleanly', async () => {
+    const fakeChrome = {
+      runtime: { id: 'ext-abc' },
+      storage: {
+        local: {
+          async get() { throw new Error('Extension context invalidated.'); },
+          async set() { throw new Error('Extension context invalidated.'); },
+          async remove() { throw new Error('Extension context invalidated.'); },
+        },
+      },
+    };
+    const adapter = chromeStorageAdapter(fakeChrome);
+    assert.equal(adapter.isDead(), false);
+    assert.equal(await adapter.get('k'), null, 'does not throw on invalidated context');
+    assert.equal(adapter.isDead(), true, 'marks adapter dead after invalidation error');
+
+    const bridge = createBridge({ storage: adapter, workspaceId: '77', sleep: async () => {} });
+    const res = await bridge.runCommandLoop({ handlers: {}, signal: { aborted: false } });
+    assert.equal(res.invalidated, true, 'loop exits with invalidated:true instead of looping/throwing');
+  });
+
+  test('chromeStorageAdapter detects runtime.id clearing on reload', async () => {
+    const fakeChrome = {
+      runtime: { id: undefined },
+      storage: {
+        local: {
+          async get() { throw new Error('should not be called when runtime.id is undefined'); },
+          async set() {},
+          async remove() {},
+        },
+      },
+    };
+    const adapter = chromeStorageAdapter(fakeChrome);
+    assert.equal(adapter.isDead(), true);
+    assert.equal(await adapter.get('k'), null);
+  });
+
+  test('waitForChange wakes up immediately when chrome.storage.onChanged fires', async () => {
+    const listeners = new Set();
+    const fakeChrome = {
+      runtime: { id: 'ext-live' },
+      storage: {
+        local: { async get() { return {}; }, async set() {}, async remove() {} },
+        onChanged: {
+          addListener(fn) { listeners.add(fn); },
+          removeListener(fn) { listeners.delete(fn); },
+        },
+      },
+    };
+    const adapter = chromeStorageAdapter(fakeChrome);
+    const start = Date.now();
+    const waitPromise = adapter.waitForChange('igcrm:v1:77:command', 5_000);
+    setTimeout(() => {
+      for (const fn of [...listeners]) fn({ 'igcrm:v1:77:command': { newValue: { ok: true } } }, 'local');
+    }, 10);
+    await waitPromise;
+    assert.ok(Date.now() - start < 500, 'woke up via onChanged without waiting 5s');
+    assert.equal(listeners.size, 0, 'listener cleaned up after wake-up');
+  });
+
+  test('multi-tab routing: command with targetTabId is ignored by other tabs and claimed only by target tab', async () => {
+    const storage = memoryStorageAdapter();
+    let t = 0;
+    const sleep = async (ms) => { t += ms; await new Promise((r) => setTimeout(r, 1)); };
+    const dashboard = createBridge({ storage, workspaceId: '77', now: () => t, sleep, pollMs: 25 });
+    const tabA = createBridge({ storage, workspaceId: '77', now: () => t, sleep, pollMs: 25 });
+    const tabB = createBridge({ storage, workspaceId: '77', now: () => t, sleep, pollMs: 25 });
+
+    const seenBy = [];
+    const sigA = { aborted: false };
+    const sigB = { aborted: false };
+    const loopA = tabA.runCommandLoop({
+      handlers: { [CommandType.PING]: async () => { seenBy.push('A'); return { from: 'A' }; } },
+      getTabId: () => 101,
+      signal: sigA,
+    });
+    const loopB = tabB.runCommandLoop({
+      handlers: { [CommandType.PING]: async () => { seenBy.push('B'); return { from: 'B' }; } },
+      getTabId: () => 102,
+      signal: sigB,
+    });
+
+    const ans = await dashboard.postCommand(CommandType.PING, {}, { timeoutMs: 2000, targetTabId: 102 });
+    assert.equal(ans.ok, true);
+    assert.deepEqual(ans.result, { from: 'B' });
+    assert.deepEqual(seenBy, ['B'], 'Tab A ignored command addressed to Tab B');
+
+    sigA.aborted = true;
+    sigB.aborted = true;
+    await Promise.all([loopA, loopB]);
+  });
+});
+

@@ -11,8 +11,11 @@
  */
 (async () => {
   const ready = Symbol.for('content_module_ready');
-  if (globalThis[ready]) return;
-  globalThis[ready] = true;
+  const runtimeId = (() => {
+    try { return chrome?.runtime?.id || '1'; } catch { return '1'; }
+  })();
+  if (globalThis[ready] === runtimeId) return;
+  globalThis[ready] = runtimeId;
   try {
     const src = chrome.runtime.getURL('content/main.js');
     const mod = await import(src);

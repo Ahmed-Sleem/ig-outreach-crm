@@ -23,6 +23,7 @@ import {
   collectProfileListDom,
   collectRecentPostLikersDom,
 } from './browser-collector.js';
+import { createVirtualCursor } from './human.js';
 import {
   ApiError,
   createApi,
@@ -145,6 +146,7 @@ export function createContentRuntime(deps = {}) {
     : null);
 
   const domViewer = detectViewerFromDom(document, cookieString);
+  let ownedVisualizer = null;
 
   const runtime = {
     document,
@@ -165,8 +167,8 @@ export function createContentRuntime(deps = {}) {
     controller: null,
     profileCache: new Map(),
     viewer: deps.viewer ?? domViewer ?? null,
-    // Do not inject a DOM cursor overlay into live Instagram pages; only use
-    // a virtualCursor if a caller/test explicitly injects one.
+    // Mounted ONLY during an active run inside a closed Shadow DOM so the owner
+    // can watch live actions in front of them, and removed completely on endRun().
     virtualCursor: deps.virtualCursor ?? null,
 
     refreshSession() {
@@ -208,17 +210,41 @@ export function createContentRuntime(deps = {}) {
       runtime.current = kind;
       runtime.signal = controller.signal;
       runtime.status = status;
+      // Mount the closed-Shadow-DOM live visualizer ONLY while a task is active
+      // (and remove it cleanly in endRun) so the owner can see every move, click,
+      // target highlight, and live count right on the Instagram page.
+      if (!deps.virtualCursor && deps.liveVisualizer !== false && document?.body) {
+        try {
+          ownedVisualizer?.destroy?.();
+          ownedVisualizer = createVirtualCursor(document, {
+            onStop: () => { runtime.stop('stopped-from-page'); },
+          });
+          runtime.virtualCursor = ownedVisualizer;
+          ownedVisualizer.show('Starting…');
+        } catch {
+          ownedVisualizer = null;
+        }
+      }
       // Pacing events are the reason a run looks slow, so they travel to the
       // dashboard and to the pill in this tab instead of staying in the pacer.
       // Wired once per run: onStatus appends, and a second listener would send
       // every wait twice.
       if (typeof status === 'function') {
-        runtime.pacer.onStatus((event) => status({ kind: 'pacing', runKind: kind, ...event }));
+        runtime.pacer.onStatus((event) => {
+          if (event?.reason) runtime.virtualCursor?.label?.(String(event.reason));
+          status({ kind: 'pacing', runKind: kind, ...event });
+        });
       }
       return controller.signal;
     },
     endRun() {
-      runtime.virtualCursor?.hide?.();
+      if (ownedVisualizer) {
+        ownedVisualizer.destroy();
+        ownedVisualizer = null;
+        runtime.virtualCursor = deps.virtualCursor ?? null;
+      } else {
+        runtime.virtualCursor?.hide?.();
+      }
       runtime.current = null;
       runtime.controller = null;
       runtime.pacer = null;
@@ -1177,15 +1203,27 @@ export function createContentBootstrap(deps = {}) {
       state.bridge = bridge;
       state.workspaceId = current;
       state.signal = signal;
+      let loopResult = null;
+      const tabIdSym = Symbol.for('content_tab_id');
+      const getTabId = deps.getTabId ?? (() => {
+        const id = globalThis[tabIdSym];
+        return id === null || id === undefined ? null : Number(id);
+      });
       try {
-        await bridge.runCommandLoop({
+        loopResult = await bridge.runCommandLoop({
           handlers,
           isBusy: () => runtime.isBusy(),
           signal,
+          getTabId,
           onCommand: () => { state.commands += 1; },
         });
       } catch (error) {
         state.lastError = `${error?.name ?? 'Error'}: ${error?.message ?? error}`;
+      }
+      if (loopResult?.invalidated || storage?.isDead?.()) {
+        state.stopped = true;
+        try { state.pill?.stop?.(); } catch { /* already gone */ }
+        return { stopped: true, invalidated: true, workspaceId: current };
       }
       if (state.stopped || signal.aborted) return { stopped: true, workspaceId: current };
       // A loop that ends on its own is a dead mailbox: the extension would stop

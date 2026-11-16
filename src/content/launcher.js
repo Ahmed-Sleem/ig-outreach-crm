@@ -746,6 +746,7 @@ export function createLauncher(deps = {}) {
  */
 export function installLauncher(deps = {}) {
   const location = deps.location ?? globalThis.location;
+  const chromeApi = deps.chrome ?? (typeof globalThis.chrome !== 'undefined' ? globalThis.chrome : null);
   const launcher = deps.launcher ?? createLauncher(deps);
   const setIntervalFn = deps.setInterval ?? globalThis.setInterval;
   const clearIntervalFn = deps.clearInterval ?? globalThis.clearInterval;
@@ -756,8 +757,21 @@ export function installLauncher(deps = {}) {
   let stopped = false;
   let timer = null;
 
+  const stop = () => {
+    stopped = true;
+    if (timer !== null && timer !== undefined) clearIntervalFn(timer);
+    timer = null;
+    launcher.unmount();
+  };
+
   const tick = async () => {
     if (stopped) return { mounted: false, navigated: false };
+    // If this tab's extension runtime was invalidated by an extension reload,
+    // stop polling and unmount cleanly instead of throwing storage errors.
+    if (chromeApi?.runtime && ('id' in chromeApi.runtime) && !chromeApi.runtime.id) {
+      stop();
+      return { mounted: false, navigated: false };
+    }
     const href = location?.href ?? '';
     const navigated = href !== lastUrl;
     if (navigated) {
@@ -768,7 +782,13 @@ export function installLauncher(deps = {}) {
       if (!launcher.isManaged) launcher.setExpanded(false);
     }
     const mounted = launcher.sync();
-    if (mounted) await launcher.refresh();
+    if (mounted) {
+      try {
+        await launcher.refresh();
+      } catch {
+        if (chromeApi?.runtime && ('id' in chromeApi.runtime) && !chromeApi.runtime.id) stop();
+      }
+    }
     return { mounted, navigated };
   };
 
@@ -779,11 +799,6 @@ export function installLauncher(deps = {}) {
   return {
     launcher,
     tick,
-    stop() {
-      stopped = true;
-      if (timer !== null && timer !== undefined) clearIntervalFn(timer);
-      timer = null;
-      launcher.unmount();
-    },
+    stop,
   };
 }

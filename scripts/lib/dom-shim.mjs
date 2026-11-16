@@ -146,7 +146,12 @@ class Element {
     // A detached node has no parent. Leaving the old reference behind made
     // "is this still in the page?" answer yes for a node the page had removed,
     // which is exactly the check a single-page-app re-mount depends on.
-    if (n && typeof n === 'object') n.parentNode = null;
+    if (n && typeof n === 'object') {
+      n.parentNode = null;
+      if (n.attributes?.id && n.ownerDocument?._ids?.get(n.attributes.id) === n) {
+        n.ownerDocument._ids.delete(n.attributes.id);
+      }
+    }
     return n;
   }
   remove() { this.parentNode?.removeChild(this); }

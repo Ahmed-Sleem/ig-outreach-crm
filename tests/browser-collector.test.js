@@ -16,12 +16,15 @@ import {
   findActionBlockDialog,
   findCloseDialogButton,
   findDialogLoadMoreButton,
+  findLastVisibleUserLink,
   findPostLikersTrigger,
   findProfileListTrigger,
+  findScrollableList,
   gridTileAuthors,
   hasFollowerCapNotice,
   userLinksFrom,
 } from '../src/content/selectors.js';
+import { CURSOR_HOST_ID, createVirtualCursor } from '../src/content/human.js';
 import { HOST_ID } from '../src/content/launcher.js';
 import { CollectSource, createContentRuntime, runCommand } from '../src/content/main.js';
 import { CommandType } from '../src/storage/bridge.js';
@@ -579,7 +582,7 @@ describe('browser-collector: 100% DOM automation (zero Instagram API calls)', ()
     assert.equal(comments[0].text, 'How much is this jacket?');
   });
 
-  test('stealth: live runtime has zero synthetic API client, zero cursor DOM overlay, and neutral host ID', () => {
+  test('stealth: live runtime has zero synthetic API client, zero idle cursor overlay, and neutral host ID', () => {
     const doc = installDom();
     const runtime = createContentRuntime({
       document: doc,
@@ -587,7 +590,99 @@ describe('browser-collector: 100% DOM automation (zero Instagram API calls)', ()
       cookieString: 'sessionid=abc; ds_user_id=77',
     });
     assert.equal(runtime.request, null, 'live runtime does not create a synthetic x-ig-* API fetch client');
-    assert.equal(runtime.virtualCursor, null, 'live runtime does not inject a foreign cursor overlay onto Instagram');
+    assert.equal(runtime.virtualCursor, null, 'idle runtime injects zero overlay DOM onto Instagram');
     assert.doesNotMatch(HOST_ID, /crm|bot|scraper|outreach/i, 'light-DOM launcher host ID is neutral');
+    assert.doesNotMatch(CURSOR_HOST_ID, /crm|bot|scraper|outreach/i, 'live visualizer host ID is neutral');
+
+    // During an active run, mounts closed-Shadow-DOM live visualizer; on endRun(), removes it cleanly
+    runtime.beginRun('collect:followers');
+    assert.ok(runtime.virtualCursor, 'mounts live visualizer during active run');
+    assert.ok(doc.getElementById(CURSOR_HOST_ID), 'live visualizer host mounted while running');
+    runtime.endRun();
+    assert.equal(runtime.virtualCursor, null, 'clears visualizer reference after run ends');
+    assert.equal(doc.getElementById(CURSOR_HOST_ID), null, 'completely removes overlay host when run finishes');
+  });
+
+  test('extractDialogUsers & findScrollableList resist decoy non-user scrollable divs (Chrome @fightclubpoint fix)', () => {
+    const doc = installDom();
+    const dialog = doc.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', 'Followers');
+
+    // Giant decoy overflow-y:auto container BEFORE the real list with 0 user links
+    const decoy = doc.createElement('div');
+    decoy.style.overflowY = 'auto';
+    decoy.scrollHeight = 4000;
+    decoy.clientHeight = 80;
+    dialog.append(decoy);
+
+    // Real user list container
+    const realList = doc.createElement('div');
+    realList.style.overflowY = 'scroll';
+    realList.scrollHeight = 900;
+    realList.clientHeight = 360;
+    for (const handle of ['sarvagya.raw', 'shivam14j', 'noraa.kalapacs']) {
+      const row = doc.createElement('div');
+      const a = doc.createElement('a');
+      a.setAttribute('href', `/${handle}/`);
+      a.textContent = handle;
+      row.append(a);
+      realList.append(row);
+    }
+    dialog.append(realList);
+    doc.body.append(dialog);
+
+    assert.equal(findScrollableList(dialog), realList, 'skips decoy non-user overflow div and picks real list');
+    const { users } = extractDialogUsers(dialog, { excludeUsername: 'fightclubpoint' });
+    assert.deepEqual(users.map((u) => u.username), ['sarvagya.raw', 'shivam14j', 'noraa.kalapacs']);
+    assert.equal(findLastVisibleUserLink(dialog)?.getAttribute('href'), '/noraa.kalapacs/');
+  });
+
+  test('collectProfileListDom reads an already-open Followers modal directly without clicking behind it', async () => {
+    const doc = installDom();
+    const dialog = doc.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', 'Followers');
+
+    const list = doc.createElement('div');
+    list.style.overflowY = 'scroll';
+    list.scrollHeight = 400;
+    list.clientHeight = 400;
+    for (const handle of ['alpha_lead', 'beta_lead', 'gamma_lead']) {
+      const a = doc.createElement('a');
+      a.setAttribute('href', `/${handle}/`);
+      a.textContent = handle;
+      list.append(a);
+    }
+    // Include IG's permanent bottom progressbar sentinel to verify it does not stall
+    const spinner = doc.createElement('div');
+    spinner.setAttribute('role', 'progressbar');
+    list.append(spinner);
+    dialog.append(list);
+    doc.body.append(dialog);
+
+    const out = await collectProfileListDom(makeCtx(doc, '/fightclubpoint/'), {
+      kind: 'followers',
+      targetUsername: 'fightclubpoint',
+      limit: 10,
+    });
+    assert.equal(out.ok, true);
+    assert.deepEqual(out.rows.map((r) => r.username), ['alpha_lead', 'beta_lead', 'gamma_lead']);
+  });
+
+  test('live visualizer HUD supports label, progress, target highlight, Stop callback, and clean destroy', () => {
+    const doc = installDom();
+    let stopped = false;
+    const vis = createVirtualCursor(doc, { onStop: () => { stopped = true; } });
+    vis.show('Clicking followers…');
+    vis.progress(12, 50);
+    const btn = doc.createElement('button');
+    btn.getBoundingClientRect = () => ({ left: 100, top: 200, width: 120, height: 32 });
+    vis.highlight(btn);
+    vis.clearHighlight();
+    assert.ok(doc.getElementById(CURSOR_HOST_ID), 'mounted on show');
+    vis.destroy();
+    assert.equal(doc.getElementById(CURSOR_HOST_ID), null, 'removed cleanly on destroy');
+    assert.equal(stopped, false);
   });
 });

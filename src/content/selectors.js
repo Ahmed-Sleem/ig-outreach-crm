@@ -229,29 +229,47 @@ function isNodeVisible(node) {
   return true;
 }
 
+function domDepth(node, stopAt) {
+  let depth = 0;
+  let cur = node;
+  while (cur && cur !== stopAt && depth < 60) {
+    depth += 1;
+    cur = cur.parentNode;
+  }
+  return depth;
+}
+
 /**
  * The scrollable list inside a followers/following/likers modal — the element
- * the human auto-scroller drives. Chosen by computed overflow and scrollable
- * room, never by a class name Instagram may rename.
+ * the human auto-scroller drives.
  *
- * In 2026 Instagram dialogs (e.g. Following with "Suggested for you" underneath),
- * the modal can contain TWO `overflow: hidden auto` containers: the real list
- * first, and a second Suggested list below it. We never pick a container that
- * sits exclusively AFTER the "Suggested for you" boundary.
+ * Prioritizes containers that ACTUALLY hold user profile links (`a[href]`) and
+ * have real scrollable room (`scrollHeight > clientHeight`), preferring the
+ * deepest matching `overflow-y: auto|scroll|overlay` container so we always
+ * scroll the real user list (never the Search bar or outer backdrop) and never
+ * pick a sub-scroller located after `"Suggested for you"`.
  */
 export function findScrollableList(root) {
   if (!root) return null;
   const boundary = findSuggestedBoundary(root);
   const orderMap = boundary ? buildOrderMap(root) : null;
-  let bestExplicit = null;
-  let bestExplicitRoom = 0;
-  let bestFallback = null;
-  let bestFallbackRoom = 0;
+
+  let bestUsersExplicit = null;
+  let bestUsersExplicitDepth = -1;
+  let bestUsersExplicitRoom = 0;
+
+  let bestUsersAny = null;
+  let bestUsersAnyRoom = 0;
+
   let firstOverflowWithUsers = null;
+
+  let bestGenericExplicit = null;
+  let bestGenericExplicitRoom = 0;
+  let bestGenericFallback = null;
+  let bestGenericFallbackRoom = 0;
 
   for (const node of qsa(root, 'div')) {
     if (!isNodeVisible(node)) continue;
-    // Skip any sub-scroller that lives entirely AFTER "Suggested for you"
     if (boundary && isAfterInRoot(node, boundary, orderMap)) continue;
 
     const overflowY = overflowYOf(node);
@@ -259,21 +277,41 @@ export function findScrollableList(root) {
     if (overflowY && !explicitScrollable && overflowY !== 'visible') continue;
 
     const room = (Number(node.scrollHeight ?? 0)) - (Number(node.clientHeight ?? 0));
-    if (room > 0) {
-      if (explicitScrollable && room > bestExplicitRoom) {
-        bestExplicit = node;
-        bestExplicitRoom = room;
-      } else if (!overflowY && room > bestFallbackRoom) {
-        bestFallback = node;
-        bestFallbackRoom = room;
-      }
-    } else if (explicitScrollable && !firstOverflowWithUsers) {
-      if (qsa(node, 'a[href]').some((a) => Boolean(profileLinkUsername(a.getAttribute?.('href') ?? a.href ?? '')))) {
+    const hasUsers = qsa(node, 'a[href]').some((a) => {
+      if (boundary && isAfterInRoot(a, boundary, orderMap)) return false;
+      return Boolean(profileLinkUsername(a.getAttribute?.('href') ?? a.href ?? ''));
+    });
+
+    if (hasUsers) {
+      if (room > 4 && explicitScrollable) {
+        const depth = domDepth(node, root);
+        if (depth > bestUsersExplicitDepth || (depth === bestUsersExplicitDepth && room > bestUsersExplicitRoom)) {
+          bestUsersExplicit = node;
+          bestUsersExplicitDepth = depth;
+          bestUsersExplicitRoom = room;
+        }
+      } else if (room > 4 && room > bestUsersAnyRoom) {
+        bestUsersAny = node;
+        bestUsersAnyRoom = room;
+      } else if (explicitScrollable && !firstOverflowWithUsers) {
         firstOverflowWithUsers = node;
+      }
+    } else if (room > 0) {
+      if (explicitScrollable && room > bestGenericExplicitRoom) {
+        bestGenericExplicit = node;
+        bestGenericExplicitRoom = room;
+      } else if (!overflowY && room > bestGenericFallbackRoom) {
+        bestGenericFallback = node;
+        bestGenericFallbackRoom = room;
       }
     }
   }
-  return bestExplicit ?? bestFallback ?? firstOverflowWithUsers;
+
+  return bestUsersExplicit
+    ?? bestUsersAny
+    ?? firstOverflowWithUsers
+    ?? bestGenericExplicit
+    ?? bestGenericFallback;
 }
 
 /* ------------------------------------------- 2026 browser-DOM collection finders */
@@ -361,7 +399,8 @@ export function findProfileListTrigger(root, kind = 'followers') {
 /**
  * Find the active visible Instagram dialog. When stacked (e.g. a Likes dialog
  * opened on top of a Post modal), `preferTopmost: true` returns the topmost one.
- * Optionally filters by dialog `aria-label` (e.g. 'Likes', 'Followers', 'Following').
+ * Optionally filters by dialog `aria-label` or internal heading (`h1`/`h2`/`h3`),
+ * e.g. 'Likes', 'Followers', 'Following'.
  */
 export function findVisibleDialog(root, { preferTopmost = true, ariaLabel = null } = {}) {
   if (!root) return null;
@@ -369,7 +408,10 @@ export function findVisibleDialog(root, { preferTopmost = true, ariaLabel = null
   if (!dialogs.length) return null;
   if (ariaLabel) {
     const wanted = ariaLabel instanceof RegExp ? ariaLabel : new RegExp(`^${String(ariaLabel)}$`, 'i');
-    const matched = dialogs.filter((d) => wanted.test(collapse(d.getAttribute?.('aria-label') ?? '')));
+    const matched = dialogs.filter((d) => {
+      if (wanted.test(collapse(d.getAttribute?.('aria-label') ?? ''))) return true;
+      return qsa(d, 'h1, h2, h3, [role="heading"]').some((h) => wanted.test(collapse(h.textContent)));
+    });
     if (matched.length) return preferTopmost ? matched[matched.length - 1] : matched[0];
   }
   return preferTopmost ? dialogs[dialogs.length - 1] : dialogs[0];
@@ -495,7 +537,9 @@ export function extractDialogUsers(dialog, { excludeUsername = null, respectSugg
   const boundary = respectSuggestedBoundary ? findSuggestedBoundary(dialog) : null;
   const orderMap = boundary ? buildOrderMap(dialog) : null;
   const excludeLower = excludeUsername ? String(excludeUsername).replace(/^@/, '').toLowerCase() : null;
-  const scope = findScrollableList(dialog) ?? dialog;
+  // Always scan the entire dialog (never restricted to findScrollableList) so
+  // visible followers are NEVER missed even if Instagram changes wrapper nesting.
+  const scope = dialog;
 
   const byKey = new Map();
   const links = qsa(scope, 'a[href]');
@@ -570,6 +614,29 @@ export function extractDialogUsers(dialog, { excludeUsername = null, respectSugg
   }
 
   return { users: [...byKey.values()], hitSuggested };
+}
+
+/**
+ * Return the last visible user profile `<a>` element inside a dialog before
+ * any `"Suggested for you"` boundary — used as a reliable `scrollIntoView`
+ * fallback whenever Instagram wraps scrolling in an unexpected container.
+ */
+export function findLastVisibleUserLink(dialog, { excludeUsername = null, respectSuggestedBoundary = true } = {}) {
+  if (!dialog) return null;
+  const boundary = respectSuggestedBoundary ? findSuggestedBoundary(dialog) : null;
+  const orderMap = boundary ? buildOrderMap(dialog) : null;
+  const excludeLower = excludeUsername ? String(excludeUsername).replace(/^@/, '').toLowerCase() : null;
+  let last = null;
+  for (const link of qsa(dialog, 'a[href]')) {
+    if (boundary && isAfterInRoot(link, boundary, orderMap)) break;
+    if (!isNodeVisible(link)) continue;
+    const href = link.getAttribute?.('href') ?? link.href ?? '';
+    const username = profileLinkUsername(href);
+    if (!username) continue;
+    if (excludeLower && username.toLowerCase() === excludeLower) continue;
+    last = link;
+  }
+  return last;
 }
 
 /**

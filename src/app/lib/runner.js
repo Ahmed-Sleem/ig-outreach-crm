@@ -371,7 +371,12 @@ export function createRunController(deps = {}) {
       return { ok: true, tabId: tab.id, label: tab.url ?? 'the chosen tab', tab };
     }
     const tabs = await api.tabs.listTabs();
-    const picked = pickTabFrom(tabs, { tabId: null, username: options.username ?? null });
+    const picked = pickTabFrom(tabs, {
+      tabId: null,
+      username: options.username ?? null,
+      shortcode: options.shortcode ?? null,
+      tag: options.tag ?? null,
+    });
     if (picked?.tab) return { ok: true, tabId: picked.tab.id, label: picked.tab.url ?? 'the Instagram tab', tab: picked.tab };
     if (typeof api.tabs.openInstagram === 'function') {
       const startUrl = options.username

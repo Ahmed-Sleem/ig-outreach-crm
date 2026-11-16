@@ -54,24 +54,100 @@ export const ALWAYS_ACCEPTED = Object.freeze([CommandType.PING, CommandType.STOP
 
 export const keyFor = (workspaceId, kind) => `${BRIDGE_PREFIX}:${workspaceId ?? 'default'}:${kind}`;
 
+/** True when Chrome tore down this content script after an extension reload/update. */
+export function isContextInvalidatedError(error) {
+  const msg = String(error?.message ?? error ?? '');
+  return /extension context invalidated|context invalidated|receiving end does not exist/i.test(msg);
+}
+
 /**
  * A storage adapter over `chrome.storage.local`.
- * Reads and writes are the whole API the bridge needs, which keeps the fake in
- * tests to a Map.
+ *
+ * Handles extension reloads cleanly: once Chrome invalidates the context,
+ * reads/writes stop silently instead of throwing uncaught promise errors in
+ * `chrome://extensions`. Also provides an optional `waitForChange` hook backed
+ * by `storage.onChanged` so commands and replies wake up immediately instead of
+ * waiting a full poll interval.
  */
 export function chromeStorageAdapter(chromeApi) {
   const area = chromeApi?.storage?.local;
   if (!area) throw new Error('chrome.storage.local is unavailable in this context');
+  const onChanged = chromeApi?.storage?.onChanged;
+  let dead = false;
+
+  const checkRuntimeAlive = () => {
+    if (dead) return false;
+    try {
+      if (chromeApi?.runtime && ('id' in chromeApi.runtime) && !chromeApi.runtime.id) {
+        dead = true;
+        return false;
+      }
+    } catch {
+      dead = true;
+      return false;
+    }
+    return true;
+  };
+
   return {
+    isDead() { return !checkRuntimeAlive(); },
     async get(key) {
-      const out = await area.get(key);
-      return out?.[key] ?? null;
+      if (!checkRuntimeAlive()) return null;
+      try {
+        const out = await area.get(key);
+        return out?.[key] ?? null;
+      } catch (error) {
+        if (isContextInvalidatedError(error)) { dead = true; return null; }
+        throw error;
+      }
     },
     async set(key, value) {
-      await area.set({ [key]: value });
+      if (!checkRuntimeAlive()) return;
+      try {
+        await area.set({ [key]: value });
+      } catch (error) {
+        if (isContextInvalidatedError(error)) { dead = true; return; }
+        throw error;
+      }
     },
     async remove(key) {
-      await area.remove(key);
+      if (!checkRuntimeAlive()) return;
+      try {
+        await area.remove(key);
+      } catch (error) {
+        if (isContextInvalidatedError(error)) { dead = true; return; }
+        throw error;
+      }
+    },
+    waitForChange(key, maxMs, sleepFn) {
+      if (!checkRuntimeAlive()) return Promise.resolve();
+      if (typeof onChanged?.addListener !== 'function' || typeof onChanged?.removeListener !== 'function') {
+        return sleepFn(maxMs);
+      }
+      return new Promise((resolve) => {
+        let settled = false;
+        let timer = null;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (timer !== null) clearTimeout(timer);
+          try { onChanged.removeListener(listener); } catch { /* context gone */ }
+          resolve();
+        };
+        const listener = (changes, areaName) => {
+          if (areaName && areaName !== 'local') return;
+          if (changes && Object.prototype.hasOwnProperty.call(changes, key)) finish();
+        };
+        try {
+          onChanged.addListener(listener);
+        } catch (error) {
+          if (isContextInvalidatedError(error)) dead = true;
+          resolve();
+          return;
+        }
+        timer = setTimeout(finish, Math.max(20, Number(maxMs) || 200));
+        if (typeof timer?.unref === 'function') timer.unref();
+      });
     },
   };
 }
@@ -125,23 +201,28 @@ export function createBridge(options = {}) {
   const statusKey = keyFor(workspaceId, 'status');
 
   /** Publish a command and wait for the matching result. */
-  async function postCommand(type, payload = {}, { timeoutMs = commandTimeoutMs, signal = null } = {}) {
+  async function postCommand(type, payload = {}, { timeoutMs = commandTimeoutMs, signal = null, targetTabId = null } = {}) {
     if (!Object.values(CommandType).includes(type)) {
       return { ok: false, reason: `unknown command type: ${type}`, severity: null, result: null, commandId: null, elapsedMs: 0 };
     }
     const commandId = newCommandId(random, now);
-    const command = { commandId, type, payload, postedAt: now(), workspaceId };
+    const command = {
+      commandId,
+      type,
+      payload,
+      postedAt: now(),
+      workspaceId,
+      ...(targetTabId !== null && targetTabId !== undefined ? { targetTabId: Number(targetTabId) } : {}),
+    };
     await storage.set(commandKey, command);
 
     const deadline = now() + Math.max(500, timeoutMs);
     while (now() < deadline) {
       if (signal?.aborted) return { ok: false, reason: 'aborted while waiting for a reply', result: null, commandId };
+      if (storage.isDead?.()) return { ok: false, reason: 'extension context was reloaded; refresh the page and try again', result: null, commandId, severity: 'tab' };
       const result = await storage.get(resultKey);
       if (result && result.commandId === commandId) {
         await storage.remove(resultKey);
-        // `result` here is the answer's VALUE; `ok`, `reason` and `severity` are
-        // lifted out of the row. A caller that has to dig them back out of the
-        // value is a caller that will guess wrong about a refusal.
         return {
           ok: Boolean(result.ok),
           reason: result.reason ?? null,
@@ -151,7 +232,11 @@ export function createBridge(options = {}) {
           elapsedMs: now() - command.postedAt,
         };
       }
-      await sleepFn(pollMs);
+      if (typeof storage.waitForChange === 'function') {
+        await storage.waitForChange(resultKey, pollMs, sleepFn);
+      } else {
+        await sleepFn(pollMs);
+      }
     }
     // Leave no stale command behind: a tab that wakes later must not execute it.
     await withdrawIfOurs(commandId);
@@ -179,18 +264,48 @@ export function createBridge(options = {}) {
    * content script refuse a second collection run while one is in flight, except
    * for STOP and PING, which must always be answered.
    */
-  async function runCommandLoop({ handlers, isBusy = () => false, signal = null, onCommand = null, idleMs = pollMs } = {}) {
+  async function runCommandLoop({ handlers, isBusy = () => false, signal = null, onCommand = null, idleMs = pollMs, getTabId = null } = {}) {
     let handled = 0;
     while (!signal?.aborted) {
-      const command = await storage.get(commandKey);
+      if (storage.isDead?.()) return { handled, invalidated: true };
+      let command = null;
+      try {
+        command = await storage.get(commandKey);
+      } catch (error) {
+        if (isContextInvalidatedError(error)) return { handled, invalidated: true };
+        throw error;
+      }
+      if (storage.isDead?.()) return { handled, invalidated: true };
+      if (command && command.targetTabId !== undefined && command.targetTabId !== null) {
+        const myTabId = typeof getTabId === 'function' ? getTabId() : null;
+        if (myTabId === null || myTabId === undefined || Number(command.targetTabId) !== Number(myTabId)) {
+          // Addressed to a different Instagram tab — leave it in the mailbox
+          // untouched so the right tab claims it.
+          if (typeof storage.waitForChange === 'function') {
+            await storage.waitForChange(commandKey, idleMs, sleepFn);
+          } else {
+            await sleepFn(idleMs);
+          }
+          continue;
+        }
+      }
       if (!command) {
-        await sleepFn(idleMs);
+        if (typeof storage.waitForChange === 'function') {
+          await storage.waitForChange(commandKey, idleMs, sleepFn);
+        } else {
+          await sleepFn(idleMs);
+        }
         continue;
       }
       const commandId = command.commandId;
       // Consume it before doing anything: a crash mid-command must not leave it
       // on the mailbox to be executed twice when the tab wakes up.
-      await storage.remove(commandKey);
+      try {
+        await storage.remove(commandKey);
+      } catch (error) {
+        if (isContextInvalidatedError(error)) return { handled, invalidated: true };
+        throw error;
+      }
       handled += 1;
       onCommand?.(command);
 

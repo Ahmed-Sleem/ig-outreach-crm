@@ -138,21 +138,39 @@ export function describeTab(tab) {
  * Which open tab should do the work.
  *
  * Preference order: the tab the owner asked for, then an Instagram tab showing
- * the right profile, then the active Instagram tab, then any open Instagram tab.
+ * the exact target profile / post / hashtag (case-insensitive), then an active
+ * non-discarded Instagram tab, then any non-discarded Instagram tab, then any
+ * Instagram tab.
  */
-export function pickTab(tabs, { tabId = null, username = null } = {}) {
+export function pickTab(tabs, { tabId = null, username = null, shortcode = null, tag = null } = {}) {
   const described = (tabs ?? []).map(describeTab).filter((tab) => tab.instagram);
   if (tabId !== null && tabId !== undefined) {
     const wanted = described.find((tab) => tab.id === Number(tabId));
     if (wanted) return { tab: wanted, reason: 'requested' };
   }
+  const liveFirst = [...described].sort((a, b) => Number(a.discarded) - Number(b.discarded));
   if (username) {
-    const exact = described.find((tab) => tab.username === username);
+    const wantedUser = String(username).replace(/^@+/, '').toLowerCase();
+    const exact = liveFirst.find((tab) => tab.username && tab.username.toLowerCase() === wantedUser);
     if (exact) return { tab: exact, reason: 'profile' };
   }
-  const active = described.find((tab) => tab.active);
+  if (shortcode) {
+    const code = String(shortcode).trim();
+    if (code) {
+      const exactPost = liveFirst.find((tab) => tab.url.includes(`/p/${code}`) || tab.url.includes(`/reel/${code}`) || tab.url.includes(`/tv/${code}`));
+      if (exactPost) return { tab: exactPost, reason: 'post' };
+    }
+  }
+  if (tag) {
+    const wantedTag = String(tag).replace(/^#+/, '').toLowerCase();
+    if (wantedTag) {
+      const exactTag = liveFirst.find((tab) => tab.url.toLowerCase().includes(`/explore/tags/${wantedTag}`));
+      if (exactTag) return { tab: exactTag, reason: 'tag' };
+    }
+  }
+  const active = liveFirst.find((tab) => tab.active);
   if (active) return { tab: active, reason: 'active' };
-  if (described.length) return { tab: described[0], reason: 'any' };
+  if (liveFirst.length) return { tab: liveFirst[0], reason: 'any' };
   return { tab: null, reason: 'none' };
 }
 
@@ -232,7 +250,13 @@ export function createTabController({
         const created = await chrome.tabs.create({ url, active: options.active !== false });
         const tab = describeTab(created);
         if (options.waitForLoad !== false && tab.id !== null) {
-          const loaded = await this.waitForLoad(tab.id, options);
+          const loaded = await this.waitForLoad(tab.id, { timeoutMs: options.timeoutMs ?? 12_000, ...options });
+          // Instagram frequently keeps tab.status === 'loading' for background
+          // video/GraphQL streams even after the page is fully usable. Only fail
+          // if the tab was closed; otherwise let prepare() confirm via live PING.
+          if (!loaded.ok && loaded.tab) {
+            return { ok: true, tab: loaded.tab, created: true, stillLoading: true, reason: null };
+          }
           return { ok: loaded.ok, tab: loaded.tab ?? tab, created: true, reason: loaded.reason ?? null };
         }
         return { ok: true, tab, created: true };
@@ -277,6 +301,24 @@ export function createTabController({
         return { ok: true };
       } catch (error) {
         return { ok: false, reason: String(error?.message ?? error) };
+      }
+    },
+
+    /** Stamp this tab's Chrome tabId into its isolated world so multi-tab commands route cleanly. */
+    async stampTabId(tabId) {
+      const id = Number(tabId);
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: id },
+          func: (assignedId) => {
+            globalThis[Symbol.for('content_tab_id')] = assignedId;
+            return assignedId;
+          },
+          args: [id],
+        });
+        return { ok: true, stamped: Array.isArray(res) && res.some((frame) => frame?.result === id) };
+      } catch {
+        return { ok: false, stamped: false };
       }
     },
 
@@ -493,37 +535,75 @@ export function createCommandChannel({
       return row?.workspaceId ? String(row.workspaceId) : null;
     },
 
-    /** Make sure a tab can answer: loaded, content script present, bridge alive. */
+    /** Make sure a tab can answer: loaded (or interactive), content script present, bridge alive. */
     async prepare(tabId, { timeoutMs = 8_000 } = {}) {
       if (tabId === null || tabId === undefined) return { ok: false, reason: 'no Instagram tab was chosen' };
-      const tab = await tabs.tabById(tabId);
+      let tab = await tabs.tabById(tabId);
       if (!tab) return { ok: false, reason: 'the Instagram tab was closed' };
-      if (tab.status !== 'complete') {
-        const loaded = await tabs.waitForLoad(tabId, { timeoutMs });
-        if (!loaded.ok) return loaded;
+      if (tab.discarded && typeof tabs.focus === 'function') {
+        try { await tabs.focus(tabId); } catch { /* best effort wake */ }
+        tab = (await tabs.tabById(tabId)) ?? tab;
       }
+      let loadWarning = null;
+      if (tab.status !== 'complete') {
+        const loaded = await tabs.waitForLoad(tabId, { timeoutMs: Math.min(timeoutMs, 3_500) });
+        if (!loaded.ok) {
+          // If the tab was actually closed while loading, abort right away.
+          if (!loaded.tab) return loaded;
+          // Otherwise Chrome may still report status==='loading' on Instagram
+          // due to background video/GraphQL streams while the page is already
+          // usable. Try injecting + live PING before concluding it is not loaded!
+          loadWarning = loaded.reason;
+          tab = loaded.tab;
+        } else if (loaded.tab) {
+          tab = loaded.tab;
+        }
+      }
+      // Ensure the tab's mailbox watches the same workspaceId as the dashboard
+      // before we send PING (prevents workspace mismatch on newly opened tabs).
+      try {
+        const currentActive = await storage.get(ACTIVE_WORKSPACE_KEY);
+        if (String(currentActive?.workspaceId ?? '') !== String(state.workspaceId)) {
+          await storage.set(ACTIVE_WORKSPACE_KEY, { workspaceId: state.workspaceId, at: now() });
+        }
+      } catch { /* best effort sync */ }
+
+      const stampedRes = typeof tabs.stampTabId === 'function' ? await tabs.stampTabId(tabId) : null;
       await tabs.inject(tabId);
+      const targetTabId = stampedRes?.stamped ? Number(tabId) : null;
+
       // The loader is asynchronous: the script is injected before the module has
       // finished importing, so the first ping can legitimately find nobody home.
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        const ping = await bridge().postCommand(CommandType.PING, {}, { timeoutMs: Math.min(timeoutMs, 6_000) });
+        const ping = await bridge().postCommand(CommandType.PING, {}, {
+          timeoutMs: Math.min(timeoutMs, 2_500),
+          targetTabId,
+        });
         // postCommand's `result` IS the answer's value: the ok/reason/severity
         // fields are lifted out of the row, so digging for `.value` again reads
         // a healthy tab as a dead one.
-        if (ping?.ok) return { ok: true, tab, context: ping.result ?? null };
-        await sleep(400);
+        if (ping?.ok) return { ok: true, tab, context: ping.result ?? null, targetTabId };
+        await sleep(300);
       }
-      return { ok: false, reason: 'the content script is in the tab but nothing answered; reload the Instagram tab and try again', tab };
+      return {
+        ok: false,
+        reason: loadWarning
+          ? `${loadWarning}, and the page did not answer — wait a moment or reload the Instagram tab and try again`
+          : 'the content script is in the tab but nothing answered; reload the Instagram tab and try again',
+        tab,
+      };
     },
 
     /** One command, one answer, one honest failure. */
     async send(type, payload = {}, options = {}) {
       const timeoutMs = options.timeoutMs ?? timeoutFor(type);
+      let targetTabId = null;
       if (options.tabId !== undefined && options.tabId !== null) {
         const ready = await this.prepare(options.tabId, { timeoutMs: options.prepareTimeoutMs ?? 8_000 });
         if (!ready.ok && !options.allowUnprepared) return { ok: false, reason: ready.reason, value: null, severity: 'tab' };
+        targetTabId = ready.targetTabId ?? null;
       }
-      const posted = await bridge().postCommand(type, payload, { timeoutMs, signal: options.signal ?? null });
+      const posted = await bridge().postCommand(type, payload, { timeoutMs, signal: options.signal ?? null, targetTabId });
       if (!posted) return { ok: false, reason: 'the mailbox returned nothing', value: null, severity: 'tab', elapsedMs: 0, commandId: null };
       return {
         ok: Boolean(posted.ok),
@@ -550,8 +630,11 @@ export function createCommandChannel({
       const first = await this.send(type, payload, options);
       const wanted = first?.value?.url ?? null;
       if (first?.ok || !first?.value?.needsNavigation || !wanted || tabId === null || tabId === undefined) return first;
-      const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus) });
-      if (!moved.ok) return { ...first, reason: `${first.reason} — and the tab could not be moved there (${moved.reason})` };
+      const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus), timeoutMs: 12_000 });
+      // Only abort navigation if the tab actually failed to move or was closed;
+      // if Chrome still reports status==='loading' while the page is interactive,
+      // let prepare() confirm via live PING on the second send.
+      if (!moved.ok && !moved.tab) return { ...first, reason: `${first.reason} — and the tab could not be moved there (${moved.reason})` };
       await sleep(options.settleMs ?? 2000);
       const second = await this.send(type, payload, { ...options, tabId });
       return { ...second, navigated: true, firstReason: first.reason };

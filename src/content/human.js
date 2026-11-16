@@ -192,14 +192,28 @@ export function targetPointFor(element, random = Math.random) {
  * on instagram.com so the owner can literally watch every mouse move and click
  * happen in front of them.
  *
- * Safe in headless/Node DOM shims (gracefully degrades to a no-op tracker when
- * `attachShadow` or `createElementNS` isn't available).
+/**
+ * Mount a subtle, closed-Shadow-DOM live visualization overlay on instagram.com
+ * ONLY while a task is actively running so the user can watch every move,
+ * target highlight, click, scroll, and count live in front of them — and remove
+ * it completely as soon as the task ends.
+ *
+ * Uses `attachShadow({ mode: 'closed' })` and CSSOM-only styling (no innerHTML,
+ * no inline style attributes, no exposed bot identifiers) so it is invisible to
+ * host page scripts and strictly CSP-safe.
  */
-export function createVirtualCursor(document) {
+export function createVirtualCursor(document, { onStop = null } = {}) {
   let host = null;
   let pointerEl = null;
   let rippleEl = null;
   let tagEl = null;
+  let highlightEl = null;
+  let hudEl = null;
+  let hudDotEl = null;
+  let hudTextEl = null;
+  let hudCountEl = null;
+  let hudBarFillEl = null;
+  let hudBarTrackEl = null;
   let x = 240;
   let y = 180;
   let visible = false;
@@ -223,6 +237,22 @@ export function createVirtualCursor(document) {
     });
 
     const mountRoot = typeof host.attachShadow === 'function' ? host.attachShadow({ mode: 'closed' }) : host;
+
+    highlightEl = document.createElement('div');
+    Object.assign(highlightEl.style, {
+      position: 'fixed',
+      left: '0px',
+      top: '0px',
+      width: '0px',
+      height: '0px',
+      borderRadius: '8px',
+      border: '2px solid #2563eb',
+      background: 'rgba(37, 99, 235, 0.12)',
+      boxShadow: '0 0 0 3px rgba(37, 99, 235, 0.16)',
+      pointerEvents: 'none',
+      opacity: '0',
+      transition: 'opacity 140ms ease, transform 120ms ease',
+    });
 
     pointerEl = document.createElement('div');
     Object.assign(pointerEl.style, {
@@ -278,7 +308,7 @@ export function createVirtualCursor(document) {
       top: '0px',
       padding: '3px 8px',
       borderRadius: '999px',
-      background: 'rgba(17, 24, 39, 0.86)',
+      background: 'rgba(17, 24, 39, 0.88)',
       color: '#ffffff',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       fontSize: '11px',
@@ -291,7 +321,104 @@ export function createVirtualCursor(document) {
       transition: 'transform 40ms linear, opacity 140ms ease',
     });
 
-    mountRoot.append(rippleEl, pointerEl, tagEl);
+    // Top-center floating live action HUD so the user sees exact step + count + Stop
+    hudEl = document.createElement('div');
+    Object.assign(hudEl.style, {
+      position: 'fixed',
+      top: '14px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      padding: '8px 14px',
+      borderRadius: '999px',
+      background: 'rgba(17, 24, 39, 0.92)',
+      color: '#ffffff',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontSize: '12.5px',
+      fontWeight: '600',
+      boxShadow: '0 8px 24px rgba(15, 23, 42, 0.28)',
+      border: '1px solid rgba(255, 255, 255, 0.14)',
+      pointerEvents: 'auto',
+      maxWidth: '90vw',
+    });
+
+    hudDotEl = document.createElement('span');
+    Object.assign(hudDotEl.style, {
+      width: '9px',
+      height: '9px',
+      borderRadius: '999px',
+      background: '#3b82f6',
+      boxShadow: '0 0 0 3px rgba(59, 130, 246, 0.35)',
+      flexShrink: '0',
+    });
+
+    hudTextEl = document.createElement('span');
+    Object.assign(hudTextEl.style, {
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      maxWidth: '380px',
+    });
+    hudTextEl.textContent = 'Working…';
+
+    hudCountEl = document.createElement('span');
+    Object.assign(hudCountEl.style, {
+      fontVariantNumeric: 'tabular-nums',
+      color: '#93c5fd',
+      fontSize: '12px',
+      display: 'none',
+    });
+
+    hudBarTrackEl = document.createElement('div');
+    Object.assign(hudBarTrackEl.style, {
+      width: '72px',
+      height: '5px',
+      borderRadius: '999px',
+      background: 'rgba(255, 255, 255, 0.18)',
+      overflow: 'hidden',
+      display: 'none',
+      flexShrink: '0',
+    });
+    hudBarFillEl = document.createElement('div');
+    Object.assign(hudBarFillEl.style, {
+      width: '0%',
+      height: '100%',
+      borderRadius: '999px',
+      background: '#3b82f6',
+      transition: 'width 180ms ease',
+    });
+    hudBarTrackEl.append(hudBarFillEl);
+
+    hudEl.append(hudDotEl, hudTextEl, hudCountEl, hudBarTrackEl);
+
+    if (typeof onStop === 'function') {
+      const stopBtn = document.createElement('button');
+      stopBtn.setAttribute('type', 'button');
+      stopBtn.textContent = 'Stop';
+      Object.assign(stopBtn.style, {
+        border: 'none',
+        borderRadius: '999px',
+        padding: '4px 10px',
+        background: '#ef4444',
+        color: '#ffffff',
+        fontFamily: 'inherit',
+        fontSize: '11.5px',
+        fontWeight: '700',
+        cursor: 'pointer',
+        marginLeft: '2px',
+        flexShrink: '0',
+      });
+      stopBtn.addEventListener?.('click', (event) => {
+        event?.stopPropagation?.();
+        event?.preventDefault?.();
+        onStop();
+      });
+      hudEl.append(stopBtn);
+    }
+
+    mountRoot.append(highlightEl, rippleEl, pointerEl, tagEl, hudEl);
     document.body.append(host);
     return true;
   }
@@ -310,6 +437,7 @@ export function createVirtualCursor(document) {
       visible = false;
       if (host) host.style.display = 'none';
       if (tagEl) tagEl.style.opacity = '0';
+      if (highlightEl) highlightEl.style.opacity = '0';
     },
     move(nx, ny) {
       x = Math.round(Number(nx) || 0);
@@ -319,17 +447,54 @@ export function createVirtualCursor(document) {
       if (tagEl) tagEl.style.transform = `translate3d(${x + 18}px, ${y + 20}px, 0)`;
     },
     label(text) {
-      if (!tagEl) return;
       const clean = String(text ?? '').trim();
-      tagEl.textContent = clean;
-      tagEl.style.opacity = clean ? '1' : '0';
+      if (tagEl) {
+        tagEl.textContent = clean;
+        tagEl.style.opacity = clean ? '1' : '0';
+      }
+      if (hudTextEl && clean) {
+        hudTextEl.textContent = clean;
+      }
+    },
+    progress(count, limit) {
+      if (!ensureMounted()) return;
+      const c = Math.max(0, Number(count) || 0);
+      const l = Math.max(0, Number(limit) || 0);
+      if (hudCountEl) {
+        hudCountEl.style.display = l > 0 ? 'inline' : 'none';
+        hudCountEl.textContent = l > 0 ? `${c}/${l}` : '';
+      }
+      if (hudBarTrackEl && hudBarFillEl) {
+        hudBarTrackEl.style.display = l > 0 ? 'block' : 'none';
+        const pct = l > 0 ? Math.min(100, Math.round((c / l) * 100)) : 0;
+        hudBarFillEl.style.width = `${pct}%`;
+      }
+      if (hudDotEl) {
+        hudDotEl.style.background = c > 0 ? '#22c55e' : '#3b82f6';
+      }
+    },
+    highlight(element) {
+      if (!highlightEl || !element?.getBoundingClientRect) return;
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        highlightEl.style.opacity = '0';
+        return;
+      }
+      const pad = 4;
+      highlightEl.style.left = `${Math.max(0, Math.round(rect.left - pad))}px`;
+      highlightEl.style.top = `${Math.max(0, Math.round(rect.top - pad))}px`;
+      highlightEl.style.width = `${Math.round(rect.width + pad * 2)}px`;
+      highlightEl.style.height = `${Math.round(rect.height + pad * 2)}px`;
+      highlightEl.style.opacity = '1';
+    },
+    clearHighlight() {
+      if (highlightEl) highlightEl.style.opacity = '0';
     },
     pulseClick(cx = x, cy = y) {
       if (!rippleEl) return;
       rippleEl.style.transition = 'none';
       rippleEl.style.opacity = '0.95';
       rippleEl.style.transform = `translate3d(${Math.round(cx)}px, ${Math.round(cy)}px, 0) scale(0.35)`;
-      // Force layout / next microtask animation cleanly without throwing in shims
       const raf = typeof globalThis.requestAnimationFrame === 'function'
         ? globalThis.requestAnimationFrame
         : (fn) => setTimeout(fn, 16);
@@ -350,6 +515,13 @@ export function createVirtualCursor(document) {
       pointerEl = null;
       rippleEl = null;
       tagEl = null;
+      highlightEl = null;
+      hudEl = null;
+      hudDotEl = null;
+      hudTextEl = null;
+      hudCountEl = null;
+      hudBarFillEl = null;
+      hudBarTrackEl = null;
     },
   };
 }
@@ -460,19 +632,26 @@ export async function humanClickTarget(ctx, element, {
   const moved = await humanMoveTo(ctx, element, { signal, label });
   if (!moved.ok || signal?.aborted) return false;
 
+  visual?.highlight?.(element);
   const point = { clientX: moved.clientX, clientY: moved.clientY };
   firePointer(element, 'pointerover', point);
   firePointer(element, 'pointerenter', point);
   firePointer(element, 'mouseover', point);
   await wait(humanDelayMs(hoverMinMs, hoverMaxMs, random), { signal });
-  if (signal?.aborted) return false;
+  if (signal?.aborted) {
+    visual?.clearHighlight?.();
+    return false;
+  }
 
   visual?.pulseClick(point.clientX, point.clientY);
   firePointer(element, 'pointerdown', { ...point, button: 0, buttons: 1 });
   firePointer(element, 'mousedown', { ...point, button: 0, buttons: 1 });
   element.focus?.();
   await wait(humanDelayMs(45, 125, random), { signal });
-  if (signal?.aborted) return false;
+  if (signal?.aborted) {
+    visual?.clearHighlight?.();
+    return false;
+  }
 
   firePointer(element, 'pointerup', { ...point, button: 0, buttons: 0 });
   firePointer(element, 'mouseup', { ...point, button: 0, buttons: 0 });
@@ -481,6 +660,7 @@ export async function humanClickTarget(ctx, element, {
   } else {
     firePointer(element, 'click', { ...point, button: 0, buttons: 0 });
   }
+  visual?.clearHighlight?.();
   return true;
 }
 
