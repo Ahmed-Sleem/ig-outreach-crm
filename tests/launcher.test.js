@@ -110,7 +110,7 @@ describe('quick actions', () => {
     assert.equal(add.params.auto, undefined, 'an outreach action does not auto-start a collection');
   });
 
-  test('a post offers likers and commenters, a tag offers the grid', () => {
+  test('a post offers likers and commenters; a hashtag page only offers the dashboard (hashtag/open-tab collection removed)', () => {
     const post = quickActionsFor(pageContextFrom('/p/Cx9abc/'));
     assert.deepEqual(post.map((action) => action.id), ['collect-post-likers', 'collect-post-commenters', 'open-dashboard']);
     assert.equal(post[0].params.source, 'post_likers');
@@ -119,10 +119,9 @@ describe('quick actions', () => {
     assert.equal(post[1].params.source, 'post_comments');
     assert.equal(post[1].params.ref, 'Cx9abc');
     const tag = quickActionsFor(pageContextFrom('/explore/tags/linen/'));
-    assert.equal(tag[0].id, 'collect-grid');
-    assert.equal(tag[0].params.source, 'hashtag_grid');
-    assert.equal(tag[0].params.tag, 'linen');
-    assert.equal(tag[0].params.auto, '1');
+    assert.deepEqual(tag.map((action) => action.id), ['open-dashboard']);
+    const explore = quickActionsFor(pageContextFrom('/explore/'));
+    assert.deepEqual(explore.map((action) => action.id), ['open-dashboard']);
   });
 
   test('a thread offers the thread, and every route still offers the dashboard', () => {

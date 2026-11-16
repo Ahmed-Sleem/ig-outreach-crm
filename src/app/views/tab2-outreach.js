@@ -459,7 +459,14 @@ export function createOutreachView(ctx = {}) {
       case 'delay': pushLog({ time, text: `Waiting ${humanDurationMs(event.ms)} before ${event.actionType} @${event.username}.` }); break;
       case 'waiting': pushLog({ time, text: `${event.label ?? 'Waiting'} — ${event.human} left.` }); break;
       case 'action': pushLog({ time, text: `${event.actionType} @${event.username}${event.messagePreview ? ` — "${event.messagePreview}"` : ''}` }); break;
-      case 'outcome': pushLog({ time, tone: event.ok ? 'ok' : event.outcome === 'refused' ? 'refused' : 'failed', text: `@${event.username}: ${event.outcome}${event.reason ? ` (${event.reason})` : ''} · ${event.combinedRemainingToday} left today.` }); break;
+      case 'outcome': {
+        const tone = event.ok ? 'ok' : (event.outcome === 'skipped' ? '' : event.outcome === 'refused' ? 'refused' : 'failed');
+        const label = event.outcome === 'skipped'
+          ? `Skipped @${event.username}${event.reason ? ` (${event.reason})` : ''} — continuing`
+          : `@${event.username}: ${event.outcome}${event.reason ? ` (${event.reason})` : ''}`;
+        pushLog({ time, tone, text: `${label} · ${event.combinedRemainingToday} left today.` });
+        break;
+      }
       case 'skip': pushLog({ time, text: `Skipped @${event.username ?? event.leadKey}: ${event.reason}` }); break;
       case 'refusal': pushLog({ time, tone: 'refused', text: `Refused @${event.username}: ${event.reason}` }); break;
       case 'summary': pushLog({ time, tone: event.ok ? 'ok' : 'failed', text: `Run ${event.ok ? 'finished' : 'ended'}: ${event.counts.done} done, ${event.counts.refused} refused, ${event.counts.failed} failed, ${event.counts.skipped} skipped.${event.reason ? ` ${event.reason}` : ''}` }); break;

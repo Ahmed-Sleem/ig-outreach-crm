@@ -216,7 +216,7 @@ describe('the views', () => {
 
   /* ------------------------------------------------------------- collect */
 
-  test('collect renders 4 separated sub-tabs and switches source cleanly', async () => {
+  test('collect renders 2 separated sub-tabs (From an account, From a post) and switches source cleanly', async () => {
     await seedWorkspace();
     const { ctx, container } = makeCtx();
     const view = createCollectorView(ctx);
@@ -227,7 +227,7 @@ describe('the views', () => {
     const subtabs = [...container.querySelectorAll('.subtab')];
     assert.deepEqual(
       subtabs.map((b) => b.textContent.trim()),
-      ['From an account', 'From a post', 'From a hashtag', 'From open tab'],
+      ['From an account', 'From a post'],
     );
     subtabs[1]._listeners.click[0]({ target: subtabs[1] });
     await settle();

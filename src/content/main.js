@@ -42,7 +42,15 @@ import {
   scrapeOpenProfile,
   scrapeProfileFromDom,
 } from './adapters.js';
-import { composerScope, directThreadMatchesUser, extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
+import {
+  composerScope,
+  directThreadMatchesUser,
+  dmContainerUserMatch,
+  extractDialogUsers,
+  findDmSurface,
+  findVisibleDialog,
+  usernameFromPath,
+} from './selectors.js';
 import {
   executeDm,
   executeFollow,
@@ -970,7 +978,13 @@ export function createHandlers(runtime, deps = {}) {
 
     [CommandType.OPEN_THREAD]: async (payload, ctx) => actOnProfile(payload, async () => {
       const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
-      const result = await openDm(ctxOf(runtime, { status: ctx?.postStatus }), { document: runtime.document, signal: runtime.signal, readyTimeoutMs });
+      const result = await openDm(ctxOf(runtime, { status: ctx?.postStatus }), {
+        document: runtime.document,
+        location: runtime.location,
+        username: payload?.username ?? runtime.pageUsername,
+        signal: runtime.signal,
+        readyTimeoutMs,
+      });
       if (!result.ok && result.needsNavigation && navigate) {
         const username = payload?.username ?? runtime.pageUsername;
         await navigate(directUrl(username));
@@ -994,45 +1008,75 @@ export function createHandlers(runtime, deps = {}) {
     [CommandType.EXECUTE_DM]: async (payload, ctx = {}) => {
       const message = String(payload?.message ?? '');
       if (!message.trim()) return { ok: false, outcome: 'refused', reason: 'the message is empty' };
+      const targetUsername = payload?.username ?? runtime.pageUsername ?? null;
+      const targetKey = nameKey(payload?.username ?? '');
+
       const runDmFlow = async () => {
         const started = await beginRun(runtime, 'dm', { pacing: payload?.pacing, status: ctx?.postStatus });
         if (!started.ok) return started;
         try {
           const dmCtx = ctxOf(runtime, { status: ctx?.postStatus });
-          const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
-          let openedDirect = Boolean(composerScope(runtime.document, runtime.pathname));
-          if (!openedDirect) {
-            const opened = await openDm(dmCtx, { document: runtime.document, signal: runtime.signal, readyTimeoutMs });
+          const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 5000);
+          const curPath = String(runtime.location?.pathname ?? runtime.pathname ?? '');
+          const curSurface = findDmSurface(runtime.document, curPath);
+          // An already-open composer only counts if either no specific target was
+          // requested, we are on /direct/new/<target>, or its container visibly
+          // matches the requested target user (prevents sending into a stale dock
+          // left open from the previous lead!).
+          let openedForTarget = Boolean(curSurface?.editor) && (
+            !targetKey
+            || curPath.toLowerCase().startsWith(`/direct/new/${targetKey}`)
+            || dmContainerUserMatch(curSurface.container, targetKey).matched
+          );
+
+          if (!openedForTarget) {
+            const opened = await openDm(dmCtx, {
+              document: runtime.document,
+              location: runtime.location,
+              username: targetUsername,
+              signal: runtime.signal,
+              readyTimeoutMs,
+            });
             if (!opened.ok) {
+              // Never force navigation to the deprecated /direct/new/<user>/ URL
+              // during an outreach run: if the profile offers no Message button
+              // or Send message option, mark it skipped/unavailable so the
+              // outreach runner moves smoothly to the next lead.
+              const noMessagingOption = opened.outcome === 'refused' && Boolean(opened.needsNavigation);
               return {
                 ...opened,
-                username: payload?.username ?? null,
-                url: opened.needsNavigation ? directUrl(payload?.username ?? runtime.pageUsername) : null,
+                ...(noMessagingOption ? { outcome: 'skipped', dmUnavailable: true } : {}),
+                needsNavigation: false,
+                username: targetUsername,
               };
             }
-            openedDirect = true;
+            openedForTarget = true;
           }
+
+          const finalPath = String(runtime.location?.pathname ?? runtime.pathname ?? '');
           const result = await executeDm(dmCtx, {
             document: runtime.document,
             message,
+            username: targetUsername,
             signal: runtime.signal,
-            pathname: runtime.pathname || (openedDirect ? '/direct/' : ''),
+            pathname: finalPath || (openedForTarget ? '/direct/' : ''),
             allowExisting: Boolean(payload?.allowExisting),
           });
-          return { ...result, username: payload?.username ?? runtime.pageUsername, bytes: new TextEncoder().encode(message).length };
+          return { ...result, username: targetUsername, bytes: new TextEncoder().encode(message).length };
         } finally {
           runtime.endRun();
         }
       };
 
-      // Only act directly inside /direct/ when the open thread actually matches
-      // the requested target user (or no specific username was asked for). That
-      // prevents a multi-person DM run from ever sending Person B's message
-      // into Person A's still-open /direct/t/... thread!
+      // Act directly without navigating back to /<user>/ when:
+      //  - no specific username was asked for and a DM composer is already open, OR
+      //  - we are on /direct/new/<target>, OR
+      //  - we are on /direct/t/... with a composer visibly matching <target>, OR
+      //  - we are already on /<target>/ with an open dock matching <target>.
       const pathLower = String(runtime.pathname ?? '').toLowerCase();
-      const targetKey = nameKey(payload?.username ?? '');
-      const hasComposer = Boolean(composerScope(runtime.document, runtime.pathname));
-      const onDirectForTarget = (!targetKey && pathLower.startsWith('/direct/') && hasComposer)
+      const surface = findDmSurface(runtime.document, runtime.pathname);
+      const hasComposer = Boolean(surface?.editor);
+      const onDirectForTarget = (!targetKey && hasComposer)
         || (Boolean(targetKey) && pathLower.startsWith(`/direct/new/${targetKey}`))
         || (Boolean(targetKey) && pathLower.startsWith('/direct/t/') && hasComposer && directThreadMatchesUser(runtime.document, targetKey));
       if (onDirectForTarget) return runDmFlow();
@@ -1051,7 +1095,13 @@ export async function beginRun(runtime, kind, { pacing = {}, status = null, refu
   if (runtime.isBusy()) return { ok: false, reason: `a ${runtime.current} run is already in progress in this tab` };
   runtime.refreshSession?.();
   if (refuseWhenLoggedOut && !runtime.session.loggedIn) {
-    return { ok: false, reason: 'this tab is not logged in to Instagram; log in normally, then run the collection again' };
+    return {
+      ok: false,
+      outcome: 'stopped',
+      severity: 'session',
+      loggedOut: true,
+      reason: 'this tab is not logged in to Instagram; log in normally, then run again',
+    };
   }
   runtime.beginRun(kind, { pacing, status });
   return { ok: true };

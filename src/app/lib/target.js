@@ -48,7 +48,7 @@ export const SOURCE_FIELDS = Object.freeze({
   current_page: { needsField: false, kind: 'none', label: '', placeholder: '', helper: 'Collects the people visible on the Instagram tab you are on.' },
 });
 
-/** The four plain "what do you want to collect from" groups. */
+/** The two plain "what do you want to collect from" groups. */
 export const SOURCE_GROUPS = Object.freeze([
   { id: 'account', label: 'From an account', options: [
     { value: 'followers', label: 'Followers' },
@@ -58,14 +58,6 @@ export const SOURCE_GROUPS = Object.freeze([
   { id: 'post', label: 'From a post', options: [
     { value: 'post_likers', label: 'Likers' },
     { value: 'post_comments', label: 'Commenters' },
-  ] },
-  { id: 'hashtag', label: 'From a hashtag', options: [
-    { value: 'hashtag_grid', label: 'Hashtag' },
-  ] },
-  { id: 'open', label: 'From open tab', options: [
-    { value: 'open_list_dialog', label: 'Open followers list' },
-    { value: 'saved_grid', label: 'Saved posts' },
-    { value: 'current_page', label: 'This page' },
   ] },
 ]);
 

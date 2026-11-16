@@ -423,6 +423,9 @@ export function eventsForOutcome({ actionType, result, lead, now = Date.now() })
       if (requested) patch.requestedAt = now;
       else patch.followedAt = now;
       patch.lastError = null;
+    } else if (outcome === 'skipped' && result?.profileUnavailable) {
+      observed = 'profile-unavailable';
+      patch.lastError = String(result?.reason ?? 'this profile is unavailable or was deleted');
     } else if (outcome === 'skipped') {
       // "Already following" / "a request is pending": true on the page, absent
       // from our records. Adopt the page's truth without claiming the action.
@@ -442,6 +445,9 @@ export function eventsForOutcome({ actionType, result, lead, now = Date.now() })
       relEvents.push(RelEvent.QUEUE_UNFOLLOW, RelEvent.UNFOLLOW_EXECUTED);
       patch.unfollowedAt = now;
       patch.lastError = null;
+    } else if (outcome === 'skipped' && result?.profileUnavailable) {
+      observed = 'profile-unavailable';
+      patch.lastError = String(result?.reason ?? 'this profile is unavailable or was deleted');
     } else if (outcome === 'skipped') {
       observed = 'not-following';
       patch.lastError = null;
@@ -466,6 +472,19 @@ export function eventsForOutcome({ actionType, result, lead, now = Date.now() })
       armDm();
       dmEvents.push(DmEvent.DM_EXISTING_THREAD);
       observed = 'existing-thread';
+    } else if (outcome === 'skipped' && result?.inviteAlreadySent) {
+      armDm();
+      dmEvents.push(DmEvent.DM_SENT_REQUEST);
+      observed = 'invite-already-sent';
+      patch.lastError = null;
+    } else if (outcome === 'skipped' && (result?.dmUnavailable || result?.profileUnavailable)) {
+      armDm();
+      dmEvents.push(DmEvent.DM_UNAVAILABLE);
+      observed = result?.profileUnavailable ? 'profile-unavailable' : 'dm-unavailable';
+      patch.lastError = String(result?.reason ?? 'messaging is unavailable for this account');
+    } else if (outcome === 'skipped') {
+      observed = 'skipped';
+      patch.lastError = String(result?.reason ?? 'message skipped');
     } else if (outcome === 'stopped') {
       stopRun = true;
       patch.lastError = String(result?.reason ?? 'the run was stopped');
@@ -645,28 +664,57 @@ export function createCommandChannel({
       const visited = new Set();
       let hops = 0;
       const maxHops = Number(options.maxHops ?? 2);
+      let resumedHardDirectNav = false;
 
       while (
         !current?.ok
-        && current?.value?.needsNavigation
-        && current?.value?.url
         && tabId !== null
         && tabId !== undefined
         && hops < maxHops
       ) {
-        const wanted = String(current.value.url);
-        if (visited.has(wanted)) break;
-        visited.add(wanted);
-        hops += 1;
-        const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus), timeoutMs: 12_000 });
-        // Only abort navigation if the tab actually failed to move or was closed;
-        // if Chrome still reports status==='loading' while the page is interactive,
-        // let prepare() confirm via live PING on the next send.
-        if (!moved.ok && !moved.tab) {
-          return { ...current, reason: `${current.reason} — and the tab could not be moved there (${moved.reason})` };
+        if (current?.value?.needsNavigation && current?.value?.url) {
+          const wanted = String(current.value.url);
+          if (visited.has(wanted)) break;
+          visited.add(wanted);
+          hops += 1;
+          const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus), timeoutMs: 12_000 });
+          // Only abort navigation if the tab actually failed to move or was closed;
+          // if Chrome still reports status==='loading' while the page is interactive,
+          // let prepare() confirm via live PING on the next send.
+          if (!moved.ok && !moved.tab) {
+            return { ...current, reason: `${current.reason} — and the tab could not be moved there (${moved.reason})` };
+          }
+          await sleep(options.settleMs ?? 2000);
+          current = await this.send(type, payload, { ...options, tabId });
+          continue;
         }
-        await sleep(options.settleMs ?? 2000);
-        current = await this.send(type, payload, { ...options, tabId });
+
+        // Desktop Instagram sometimes triggers a full page navigation to
+        // /direct/t/<threadId>/ right after clicking Message / Send message,
+        // tearing down the profile's content script mid-command. If the tab is
+        // now sitting on /direct/t/, wait for it to finish loading and resume
+        // EXECUTE_DM once directly inside the open conversation.
+        const outcome = current?.value?.outcome;
+        if (
+          !resumedHardDirectNav
+          && type === CommandType.EXECUTE_DM
+          && outcome !== 'stopped'
+          && outcome !== 'skipped'
+          && outcome !== 'refused'
+          && typeof tabs.tabById === 'function'
+        ) {
+          const liveTab = await tabs.tabById(tabId);
+          if (liveTab?.url && /instagram\.com\/direct\/t\//i.test(liveTab.url)) {
+            resumedHardDirectNav = true;
+            hops += 1;
+            await tabs.waitForLoad(tabId, { timeoutMs: 12_000 });
+            await sleep(options.settleMs ?? 1500);
+            current = await this.send(type, payload, { ...options, tabId });
+            continue;
+          }
+        }
+
+        break;
       }
       return hops > 0 ? { ...current, navigated: true, firstReason } : current;
     },
@@ -1126,11 +1174,16 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
       // IMPORTANT: an owner-initiated Stop (dashboard or in-page HUD Stop button)
       // must end the run cleanly WITHOUT tripping the 24-hour circuit breaker!
       const isPlatformFlag = severity === 'account' || result?.severity === 'account' || severity === 'challenge' || result?.severity === 'challenge';
-      const ownerStopped = !isPlatformFlag && (
+      const sessionLost = !isPlatformFlag && (
+        Boolean(result?.loggedOut)
+        || severity === 'session'
+        || result?.severity === 'session'
+      );
+      const ownerStopped = !isPlatformFlag && !sessionLost && (
         Boolean(result?.stoppedByOwner)
         || /^stopped\s+(by|from|while)\b/i.test(String(result?.reason ?? '').trim())
       );
-      const flagged = isPlatformFlag || (outcome.stopRun && !ownerStopped);
+      const flagged = isPlatformFlag || (outcome.stopRun && !ownerStopped && !sessionLost);
       if (flagged) {
         governorState = tripCircuitBreaker(
           governorState,
@@ -1141,7 +1194,7 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
       }
       await updateWorkspace(workspaceId, { governorState });
 
-      return { ok: outcome.ok, outcome, lead: { ...lead, ...outcome.patch }, governorState, flagged, ownerStopped };
+      return { ok: outcome.ok, outcome, lead: { ...lead, ...outcome.patch }, governorState, flagged, ownerStopped, sessionLost };
     },
 
     /* --------------------------------------------------------------- settings */

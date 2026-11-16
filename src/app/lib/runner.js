@@ -840,29 +840,53 @@ async function runOutreach(ctx) {
       messageBytes: message ? byteLength(message) : null,
     });
 
-    const answer = await api.sendWithNavigation(command, {
-      username: fresh.username,
-      message,
-      allowExisting: Boolean(policy.allowExistingThread),
-      pacing: ctx.pacing ?? null,
-      cleanupAction: verdict.cleanupAction ?? null,
-    }, { tabId: state.tabId });
+    let answer = null;
+    let result = null;
+    let applied = null;
+    try {
+      answer = await api.sendWithNavigation(command, {
+        username: fresh.username,
+        message,
+        allowExisting: Boolean(policy.allowExistingThread),
+        pacing: ctx.pacing ?? null,
+        cleanupAction: verdict.cleanupAction ?? null,
+      }, { tabId: state.tabId });
 
-    const result = resultFromAnswer(answer);
-    const applied = await api.applyOutcome({
-      leadKey,
-      actionType: verdict.actionType,
-      result,
-      sessionId: session.sessionId,
-      at: now(),
-      severity: result.severity ?? null,
-    });
+      result = resultFromAnswer(answer);
+      applied = await api.applyOutcome({
+        leadKey,
+        actionType: verdict.actionType,
+        result,
+        sessionId: session.sessionId,
+        at: now(),
+        severity: result.severity ?? null,
+      });
+    } catch (leadError) {
+      const msg = `${leadError?.name ?? 'Error'}: ${leadError?.message ?? leadError}`;
+      result = { ok: false, outcome: 'not_done', reason: msg, severity: 'unknown' };
+      try {
+        applied = await api.applyOutcome({
+          leadKey,
+          actionType: verdict.actionType,
+          result,
+          sessionId: session.sessionId,
+          at: now(),
+          severity: 'unknown',
+        });
+      } catch {
+        applied = { ok: false, outcome: { observed: null, warnings: [] }, governorState };
+      }
+    }
 
     const bucket = countBucketFor(result.outcome);
     state.counts[bucket] += 1;
     state.lastAction = { username: fresh.username, actionType: verdict.actionType, outcome: result.outcome, at: now() };
+    // Per-account skips (unavailable profile, messaging restricted, existing
+    // thread, already following) never count toward the systemic failure limit;
+    // only consecutive hard failures with no verified success between them can
+    // trip MAX_CONSECUTIVE_FAILURES.
     if (bucket === 'failed') state.consecutiveFailures += 1;
-    else state.consecutiveFailures = 0;
+    else if (bucket === 'done') state.consecutiveFailures = 0;
 
     const budget = budgetFor(applied?.governorState ?? governorState, { settings: plan.settings, now: now(), workspaceKey: plan.workspaceKey });
     emit({
@@ -881,12 +905,34 @@ async function runOutreach(ctx) {
       counts: { ...state.counts },
       remainingToday: budgetLineFor(verdict.actionType, budget)?.remainingToday ?? null,
       combinedRemainingToday: budget.combinedRemainingToday,
-      elapsedMs: answer.elapsedMs ?? null,
+      elapsedMs: answer?.elapsedMs ?? null,
     });
     await api.bumpSession(session.sessionId, { counts: { ...state.counts }, lastActionAt: now() });
 
     if (applied?.ownerStopped || (state.stopRequested && !applied?.flagged)) {
       return endOutreach(ctx, { ok: true, phase: RunPhase.STOPPED, reason: state.stopReason ?? result.reason ?? 'stopped by the owner', plan, session });
+    }
+    if (applied?.sessionLost || result.loggedOut || result.severity === 'session') {
+      state.lastError = result.reason ?? 'Instagram session is no longer logged in; log back in and resume';
+      return endOutreach(ctx, {
+        ok: false,
+        phase: RunPhase.FAILED,
+        reason: state.lastError,
+        plan,
+        session,
+        severity: 'session',
+      });
+    }
+    if (result.severity === 'tab' && /tab was closed|no tab with id/i.test(String(result.reason ?? ''))) {
+      state.lastError = result.reason ?? 'The Instagram tab was closed.';
+      return endOutreach(ctx, {
+        ok: false,
+        phase: RunPhase.FAILED,
+        reason: state.lastError,
+        plan,
+        session,
+        severity: 'tab',
+      });
     }
     if (applied?.flagged || result.stopRun || result.outcome === 'stopped') {
       state.lastError = result.reason ?? 'Instagram refused the action';

@@ -18,6 +18,9 @@ export const Label = Object.freeze({
   REQUESTED: 'requested',
   FOLLOW_BACK: 'followBack',
   MESSAGE: 'message',
+  SEND_MESSAGE: 'sendMessage',
+  OPTIONS: 'options',
+  CLOSE: 'close',
   SEND: 'send',
   UNFOLLOW: 'unfollow',
   CANCEL: 'cancel',
@@ -32,6 +35,9 @@ export const LABEL_TEXT = Object.freeze({
   [Label.REQUESTED]: ['Requested', 'تم الطلب'],
   [Label.FOLLOW_BACK]: ['Follow Back', 'رد المتابعة'],
   [Label.MESSAGE]: ['Message', 'مراسلة'],
+  [Label.SEND_MESSAGE]: ['Send message', 'Send Message', 'إرسال رسالة'],
+  [Label.OPTIONS]: ['Options', 'More options', 'خيارات', 'المزيد من الخيارات'],
+  [Label.CLOSE]: ['Close', 'إغلاق'],
   [Label.SEND]: ['Send', 'إرسال'],
   [Label.UNFOLLOW]: ['Unfollow', 'إلغاء المتابعة'],
   [Label.CANCEL]: ['Cancel', 'إلغاء'],
@@ -42,7 +48,11 @@ export const LABEL_TEXT = Object.freeze({
 const LABEL_LOOKUP = (() => {
   const map = new Map();
   for (const [kind, texts] of Object.entries(LABEL_TEXT)) {
-    for (const text of texts) map.set(collapse(text), kind);
+    for (const text of texts) {
+      const norm = collapse(text);
+      map.set(norm, kind);
+      map.set(norm.toLowerCase(), kind);
+    }
   }
   return map;
 })();
@@ -53,7 +63,9 @@ export function collapse(text) {
 
 /** Which label kind this visible text is, or null. Exact match, never substring. */
 export function labelKind(text) {
-  return LABEL_LOOKUP.get(collapse(text)) ?? null;
+  const norm = collapse(text);
+  if (!norm) return null;
+  return LABEL_LOOKUP.get(norm) ?? LABEL_LOOKUP.get(norm.toLowerCase()) ?? null;
 }
 
 /**
@@ -171,6 +183,21 @@ export function visibleButtonText(node) {
   return joined || collapse(node.textContent);
 }
 
+/** Extract embedded `<svg><title>` and `svg[aria-label]` strings from a node. */
+function svgLabelsOf(node) {
+  const labels = [];
+  if (!node) return labels;
+  for (const svg of qsa(node, 'svg')) {
+    const al = collapse(svg.getAttribute?.('aria-label') ?? '');
+    if (al) labels.push(al);
+    for (const title of qsa(svg, 'title')) {
+      const t = collapse(title.textContent ?? '');
+      if (t) labels.push(t);
+    }
+  }
+  return labels;
+}
+
 /** Buttons whose exact label is one of the requested kinds. */
 export function findButtonsByLabel(root, kinds) {
   const wanted = new Set(kinds);
@@ -182,8 +209,8 @@ export function findButtonsByLabel(root, kinds) {
       kind = labelKind(button.getAttribute?.('aria-label'));
     }
     if (!kind && !visible) {
-      for (const svg of qsa(button, 'svg[aria-label]')) {
-        kind = labelKind(svg.getAttribute?.('aria-label'));
+      for (const lbl of svgLabelsOf(button)) {
+        kind = labelKind(lbl);
         if (kind) break;
       }
     }
@@ -208,23 +235,352 @@ export function findDialogs(root) {
 }
 
 /**
+ * Find the profile `<header>` Message button (never matching the sidebar or
+ * bottom-right "Messages" dock launcher).
+ */
+export function findProfileMessageButton(root) {
+  if (!root) return null;
+  const headers = qsa(root, 'header').filter((h) => !h.closest?.('[role="dialog"]'));
+  for (const hdr of headers) {
+    const hit = findButtonByLabel(hdr, [Label.MESSAGE, Label.SEND_MESSAGE]);
+    if (hit) return hit;
+  }
+  // Minimal DOM fallback (only when no profile <header> exists at all).
+  if (headers.length === 0) {
+    for (const hit of findButtonsByLabel(root, [Label.MESSAGE, Label.SEND_MESSAGE])) {
+      if (hit.button.closest?.('nav, [role="dialog"]')) continue;
+      return hit;
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the profile `<header>` three-dots "Options" button (`svg title="Options"`
+ * or `aria-label="Options"`). Some Instagram profiles hide "Send message" inside
+ * this menu instead of rendering a header Message button.
+ */
+export function findProfileOptionsButton(root) {
+  if (!root) return null;
+  const headers = qsa(root, 'header').filter((h) => !h.closest?.('[role="dialog"]'));
+  for (const hdr of headers) {
+    const hit = findButtonByLabel(hdr, [Label.OPTIONS]);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+const OPTIONS_MENU_MARKERS = [
+  /^block$/i,
+  /^restrict$/i,
+  /^report$/i,
+  /^about this account$/i,
+  /^share to/i,
+  /^send message$/i,
+  /^حظر$/,
+  /^تقييد$/,
+  /^إبلاغ$/,
+  /^حول هذا الحساب$/,
+  /^إرسال رسالة$/,
+];
+
+/**
+ * Inspect open `[role="dialog"]` overlays for the profile Options menu.
+ * Returns `{ dialog, isOptionsMenu, sendMessageButton, cancelButton }` when an
+ * Options menu dialog is open, or null otherwise.
+ */
+export function findOptionsDialogSendMessage(root) {
+  const dialogs = findDialogs(root);
+  for (let i = dialogs.length - 1; i >= 0; i -= 1) {
+    const dialog = dialogs[i];
+    const buttons = qsa(dialog, 'button, [role="button"]');
+    if (buttons.length === 0) continue;
+    let sendMessageButton = null;
+    let cancelButton = null;
+    let markerHits = 0;
+    for (const b of buttons) {
+      const txt = visibleButtonText(b) || collapse(b.getAttribute?.('aria-label') ?? '');
+      const kind = labelKind(txt) ?? labelKind(b.textContent);
+      if (kind === Label.SEND_MESSAGE || kind === Label.MESSAGE) sendMessageButton = b;
+      if (kind === Label.CANCEL || kind === Label.CLOSE) cancelButton = b;
+      if (OPTIONS_MENU_MARKERS.some((re) => re.test(txt))) markerHits += 1;
+    }
+    if (sendMessageButton || markerHits >= 2) {
+      return { dialog, isOptionsMenu: true, sendMessageButton, cancelButton };
+    }
+  }
+  return null;
+}
+
+function isCommentEditor(editor) {
+  if (!editor) return true;
+  const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
+  const placeholder = collapse(
+    editor.getAttribute?.('aria-placeholder')
+    ?? editor.getAttribute?.('placeholder')
+    ?? '',
+  ).toLowerCase();
+  const combined = `${aria} ${placeholder}`;
+  if (/comment|تعليق|reply to\b|رد على/.test(combined)) return true;
+  // A contenteditable nested inside a feed/post <article> is a comment box,
+  // never a Direct composer (DM docks render [role="article"] as sibling message
+  // bubbles above the composer, never wrapping the composer itself).
+  if (editor.closest?.('article')) return true;
+  return false;
+}
+
+function hasDockChrome(node) {
+  if (!node) return false;
+  let hasClose = false;
+  let hasExpandOrBack = false;
+  for (const btn of qsa(node, 'button, [role="button"]')) {
+    const al = collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase();
+    const labels = [al, ...svgLabelsOf(btn).map((s) => s.toLowerCase())];
+    for (const l of labels) {
+      if (l === 'close' || l === 'إغلاق') hasClose = true;
+      if (l === 'expand' || l === 'go back' || l === 'open in direct' || l === 'توسيع' || l === 'رجوع') hasExpandOrBack = true;
+    }
+    if (hasClose && hasExpandOrBack) return true;
+  }
+  return false;
+}
+
+function hasComposerTrayIcons(node) {
+  if (!node) return false;
+  let hits = 0;
+  for (const btn of qsa(node, 'button, [role="button"]')) {
+    const labels = [
+      collapse(btn.getAttribute?.('aria-label') ?? ''),
+      ...svgLabelsOf(btn),
+    ];
+    for (const l of labels) {
+      if (/^(choose an emoji|voice clip|add photo or video|choose a gif|like|send|إرسال|مقطع صوتي|إضافة صورة)/i.test(l)) {
+        hits += 1;
+        break;
+      }
+    }
+    if (hits >= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * Walk up from a Lexical composer to locate the floating bottom-right Direct
+ * chat dock container on a profile/feed page (where there is NO [role="dialog"]
+ * and the URL stays on /<username>/).
+ */
+function findDmDockContainerForEditor(editor, root) {
+  let cur = editor?.parentNode ?? null;
+  let fallback = null;
+  for (let depth = 0; depth < 30 && cur; depth += 1) {
+    const tag = String(cur.tagName ?? '').toUpperCase();
+    if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN') break;
+    if (cur.getAttribute?.('role') === 'main') break;
+    if (hasDockChrome(cur)) return cur;
+    if (!fallback && hasComposerTrayIcons(cur)) fallback = cur;
+    cur = cur.parentNode;
+  }
+  // If we found the composer tray outside <main>, walk up a few more levels so
+  // the container includes the dock's message list above the composer.
+  if (fallback && !editor.closest?.('main, [role="main"]')) {
+    let up = fallback;
+    for (let i = 0; i < 6 && up?.parentNode; i += 1) {
+      const pTag = String(up.parentNode.tagName ?? '').toUpperCase();
+      if (pTag === 'BODY' || pTag === 'HTML') break;
+      up = up.parentNode;
+    }
+    return up;
+  }
+  return null;
+}
+
+/**
+ * Find an open floating Direct chat dock on the page, EVEN IF it renders no
+ * composer (for example, when Instagram displays "You can't message this
+ * account unless they follow you" or "Invite sent" inside the dock).
+ */
+export function findOpenDmDock(root) {
+  if (!root) return null;
+  for (const btn of qsa(root, 'button, [role="button"]')) {
+    if (btn.closest?.('main, [role="main"], nav, [role="dialog"]')) continue;
+    const labels = [
+      collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase(),
+      ...svgLabelsOf(btn).map((s) => s.toLowerCase()),
+    ];
+    if (!labels.some((l) => l === 'close' || l === 'إغلاق')) continue;
+    let cur = btn.parentNode;
+    for (let depth = 0; depth < 10 && cur; depth += 1) {
+      const tag = String(cur.tagName ?? '').toUpperCase();
+      if (tag === 'BODY' || tag === 'HTML') break;
+      if (hasDockChrome(cur)) {
+        // Walk up slightly while staying outside body if needed so the message
+        // area + composer/restriction notice are inside the dock container.
+        let container = cur;
+        for (let up = 0; up < 6 && container?.parentNode; up += 1) {
+          const p = container.parentNode;
+          const pTag = String(p.tagName ?? '').toUpperCase();
+          if (pTag === 'BODY' || pTag === 'HTML') break;
+          // Stop before engulfing <main> or <header>
+          if (p.querySelector?.('main, header')) break;
+          container = p;
+        }
+        return container;
+      }
+      cur = cur.parentNode;
+    }
+  }
+  return null;
+}
+
+/** Locate the Close button inside an open floating Direct chat dock. */
+export function findDmDockCloseButton(container) {
+  if (!container) return null;
+  const hit = findButtonByLabel(container, [Label.CLOSE]);
+  return hit?.button ?? null;
+}
+
+/**
+ * Find the active DM surface (`dialog`, `direct_page`, or floating `dock`) and
+ * its composer node. Never picks a post comment box.
+ */
+export function findDmSurface(root, pathname = '') {
+  if (!root) return null;
+  const onDirect = String(pathname || root?.location?.pathname || '').startsWith('/direct');
+  const candidates = [
+    ...qsa(root, '[contenteditable="true"]'),
+    ...qsa(root, 'textarea'),
+  ];
+
+  for (const editor of candidates) {
+    if (!isNodeVisible(editor)) continue;
+    if (isCommentEditor(editor)) continue;
+    const tag = String(editor.tagName ?? '').toUpperCase();
+    const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
+    const ariaPh = collapse(editor.getAttribute?.('aria-placeholder') ?? '').toLowerCase();
+    const ph = collapse(editor.getAttribute?.('placeholder') ?? '').toLowerCase();
+    const isLexical = editor.getAttribute?.('data-lexical-editor') === 'true';
+    const hasMessageCue = /^(message|رسالة|مراسلة)\b/.test(aria)
+      || /^(message|رسالة|مراسلة)\b/.test(ariaPh)
+      || /^(message|رسالة|مراسلة)\b/.test(ph);
+
+    // For <textarea>, require an explicit Message placeholder/aria-label so we
+    // never confuse a bio/comment textarea with a DM box.
+    if (tag === 'TEXTAREA' && !hasMessageCue) continue;
+
+    const dialog = editor.closest?.('[role="dialog"]');
+    if (dialog) return { kind: 'dialog', container: dialog, editor };
+
+    if (onDirect) {
+      const mainScope = editor.closest?.('main, [role="main"], section');
+      if (mainScope) return { kind: 'direct_page', container: mainScope, editor };
+    }
+
+    const dock = findDmDockContainerForEditor(editor, root);
+    if (dock && (hasMessageCue || isLexical)) {
+      return { kind: 'dock', container: dock, editor };
+    }
+
+    if (hasMessageCue) {
+      const container = dock
+        ?? editor.closest?.('main, [role="main"], section')
+        ?? editor.parentNode
+        ?? root;
+      return { kind: onDirect ? 'direct_page' : 'dock', container, editor };
+    }
+  }
+  return null;
+}
+
+/**
  * The Lexical DM composer, or null.
  *
  * Scoped on purpose: instagram.com carries other contenteditable boxes (post
  * comments, reply fields), and typing a campaign message into one of those is
- * a public post, not a DM. The composer must sit inside a direct thread: a
- * dialog on /direct/, or the thread column of the direct page itself.
+ * a public post, not a DM. Supports the 2026 floating bottom-right Direct chat
+ * dock, Direct dialogs, and the full `/direct/t/...` page.
  */
 export function composerScope(root, pathname = '') {
-  const editors = qsa(root, '[contenteditable="true"]');
-  const onDirect = String(pathname || root?.location?.pathname || '').startsWith('/direct');
-  for (const editor of editors) {
-    if (editor.closest('[role="dialog"]')) return editor;
-    if (onDirect && editor.closest('main, [role="main"], section')) return editor;
-    const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
-    if (aria && /^(message|رسالة|مراسلة)\b/.test(aria) && !/comment|تعليق/.test(aria)) {
-      return editor;
+  return findDmSurface(root, pathname)?.editor ?? null;
+}
+
+const DM_UNAVAILABLE_PATTERNS = [
+  /you\s+can['’]?t\s+message\s+this\s+account/i,
+  /not\s+everyone\s+can\s+message\s+this\s+account/i,
+  /this\s+account\s+can['’]?t\s+receive\s+your\s+message/i,
+  /doesn['’]?t\s+allow\s+new\s+message\s+requests/i,
+  /you\s+can['’]?t\s+send\s+messages?\s+to\s+this\s+account/i,
+  /only\s+people\s+.*\s+follows\s+can\s+message/i,
+  /can['’]?t\s+message\s+this\s+account\s+unless/i,
+  /لا\s+يمكنك\s+مراسلة\s+هذا\s+الحساب/,
+  /لا\s+يمكن\s+للجميع\s+مراسلة\s+هذا\s+الحساب/,
+  /لا\s+يسمح\s+هذا\s+الحساب\s+بتلقي\s+طلبات\s+المراسلة/,
+  /لا\s+يمكنك\s+إرسال\s+رسائل\s+إلى\s+هذا\s+الحساب/,
+];
+
+const DM_INVITE_SENT_PATTERNS = [
+  /\binvite\s+sent\b/i,
+  /you\s+can\s+send\s+more\s+messages\s+after\s+your\s+invite\s+is\s+accepted/i,
+  /you(?:'ve|\s+have)?\s+already\s+sent\s+(?:an?|a\s+message)\s+invite/i,
+  /once\s+they\s+accept\s+your\s+(?:invite|request)/i,
+  /تم\s+إرسال\s+الدعوة/,
+  /يمكنك\s+إرسال\s+المزيد\s+من\s+الرسائل\s+بعد\s+قبول\s+دعوتك/,
+];
+
+const DM_SEND_FAILED_PATTERNS = [
+  /\b(?:message\s+)?failed\s+to\s+send\b/i,
+  /\bcouldn['’]?t\s+send\s+(?:this\s+)?message\b/i,
+  /تعذر\s+إرسال\s+الرسالة/,
+];
+
+/**
+ * Inspect an active DM container (dock, Direct thread panel, or dialog) for
+ * Instagram messaging restriction notices, invite-sent locks, or send errors.
+ */
+export function detectDmRestriction(scope) {
+  if (!scope) return null;
+  const text = collapse(scope.textContent ?? '');
+  if (!text) return null;
+  for (const re of DM_UNAVAILABLE_PATTERNS) {
+    if (re.test(text)) {
+      return {
+        kind: 'unavailable',
+        reason: 'Instagram says you cannot message this account (message requests restricted or followers-only).',
+      };
     }
+  }
+  for (const re of DM_INVITE_SENT_PATTERNS) {
+    if (re.test(text)) {
+      return {
+        kind: 'invite_sent',
+        reason: 'A message invite was already sent to this account and has not been accepted yet.',
+      };
+    }
+  }
+  for (const re of DM_SEND_FAILED_PATTERNS) {
+    if (re.test(text)) {
+      return {
+        kind: 'send_failed',
+        reason: 'Instagram reported that the message failed to send.',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the Send button inside the active DM container first, falling back to
+ * the document (excluding profile `<header>` and `<nav>`). Supports text labels,
+ * `aria-label`, `svg[aria-label]`, and `<svg><title>Send</title></svg>`.
+ */
+export function findSendButton(root, dmContainer = null) {
+  if (dmContainer) {
+    const inside = findButtonByLabel(dmContainer, [Label.SEND, Label.SEND_MESSAGE]);
+    if (inside) return inside;
+  }
+  if (!root) return null;
+  for (const hit of findButtonsByLabel(root, [Label.SEND])) {
+    if (hit.button.closest?.('header, nav')) continue;
+    return hit;
   }
   return null;
 }
@@ -259,10 +615,19 @@ function isNonMessageDirectRow(row) {
   return false;
 }
 
-/** Rendered message bubbles of the open thread, in DOM order. */
-export function threadBubbles(root) {
-  const dialogs = findDialogs(root);
-  const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : root;
+/** Rendered message bubbles of the open thread, strictly scoped to the active DM surface. */
+export function threadBubbles(root, scopeOverride = null) {
+  let scope = scopeOverride;
+  if (!scope) {
+    const surface = findDmSurface(root);
+    if (surface?.container) {
+      scope = surface.container;
+    } else {
+      const dialogs = findDialogs(root);
+      scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : root;
+    }
+  }
+  if (!scope) return [];
   const articles = qsa(scope, '[role="article"]');
   if (articles.length > 0) return articles;
 
@@ -279,6 +644,34 @@ export function threadBubbles(root) {
   return qsa(rowSource, '[role="row"]').filter((row) => !isNonMessageDirectRow(row));
 }
 
+/**
+ * Inspect a DM container (floating dock or `/direct/t/` panel) to determine
+ * which Instagram username(s) its header / "View profile" links identify.
+ */
+export function dmContainerUserMatch(container, username) {
+  const target = String(username ?? '').trim().replace(/^@+/, '').toLowerCase();
+  if (!container || !target) return { matched: false, foundUsers: [] };
+  const foundSet = new Set();
+  for (const link of qsa(container, 'a[href]')) {
+    // Ignore links inside received/shared message bubbles and inbox sidebars.
+    if (link.closest?.('[role="article"], [aria-label*="Thread" i], [aria-label*="Chat" i], nav')) continue;
+    const rawHref = link.getAttribute?.('href') ?? link.href ?? '';
+    let path = rawHref;
+    if (/^https?:\/\//i.test(rawHref)) {
+      try { path = new URL(rawHref).pathname; } catch { /* leave as-is */ }
+    }
+    const u = usernameFromPath(path);
+    if (u) foundSet.add(u.toLowerCase());
+  }
+  if (foundSet.has(target)) return { matched: true, foundUsers: [...foundSet] };
+  for (const heading of qsa(container, 'h1, h2, h3, [role="heading"]')) {
+    if (heading.closest?.('[role="article"]')) continue;
+    const t = collapse(heading.textContent).replace(/^@+/, '').toLowerCase();
+    if (t === target) return { matched: true, foundUsers: [...foundSet, target] };
+  }
+  return { matched: false, foundUsers: [...foundSet] };
+}
+
 /** True when the rendered Instagram page is a 404 / unavailable profile. */
 export function isProfileUnavailable(root) {
   if (!root) return false;
@@ -288,30 +681,22 @@ export function isProfileUnavailable(root) {
 }
 
 /**
- * True when an already-open `/direct/t/...` thread visibly belongs to `username`
- * (matching the thread header link `/<username>/` or heading text). Prevents a
- * multi-person DM run from ever sending Person B's message into Person A's
- * still-open conversation.
+ * True when an already-open `/direct/t/...` thread OR floating chat dock visibly
+ * belongs to `username`. Prevents a multi-person DM run from ever sending
+ * Person B's message into Person A's still-open conversation.
  */
 export function directThreadMatchesUser(root, username) {
   const target = String(username ?? '').trim().replace(/^@+/, '').toLowerCase();
   if (!root || !target) return false;
+  const surface = findDmSurface(root);
+  if (surface?.container) {
+    if (dmContainerUserMatch(surface.container, target).matched) return true;
+  }
+  const openDock = findOpenDmDock(root);
+  if (openDock && dmContainerUserMatch(openDock, target).matched) return true;
   const dialogs = findDialogs(root);
   const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : (root.querySelector?.('main, [role="main"]') ?? root);
-  for (const link of qsa(scope, 'a[href]')) {
-    const u = usernameFromPath(link.getAttribute?.('href') ?? link.href ?? '');
-    if (u && u.toLowerCase() === target) {
-      // Ignore the left-side inbox thread list if it sits inside `nav` or a
-      // "Chats"/"Thread list" container.
-      const inList = link.closest?.('[aria-label*="Thread" i], [aria-label*="Chat" i], nav');
-      if (!inList) return true;
-    }
-  }
-  for (const heading of qsa(scope, 'h1, h2, h3, [role="heading"]')) {
-    const t = collapse(heading.textContent).replace(/^@+/, '').toLowerCase();
-    if (t === target) return true;
-  }
-  return false;
+  return dmContainerUserMatch(scope, target).matched;
 }
 
 /** The unfollow/confirm dialog Instagram opens after an Unfollow click. */

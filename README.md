@@ -66,7 +66,7 @@ Built engine-first: every rule lives in a pure, unit-tested module beneath the U
 
 ### Collect
 
-Choose from four focused sub-tabs (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), paste a handle or link, and collect visibly inside your Instagram tab.
+Choose between two focused sub-tabs (**From an account** or **From a post**), paste a handle or link, and collect visibly inside your Instagram tab.
 
 ![Collect screen with source picker](docs/screenshots/01-collect.png)
 
@@ -121,14 +121,12 @@ Open the dashboard or jump straight into your active Instagram tab from the tool
 
 ## What can I paste?
 
-The **Collect** screen separates every source into four clean sub-tabs and adapts its input to the chosen tab:
+The **Collect** screen separates collection into two clean sub-tabs and adapts its input to the chosen tab:
 
 | Sub-tab | Paste | Example |
 |---|---|---|
 | **From an account** *(Followers, Following, Recent likers)* | Username, `@handle`, or profile link | `nike`, `@nike`, or `https://www.instagram.com/nike/` |
 | **From a post** *(Likers, Commenters)* | Post or reel link, or shortcode | `https://www.instagram.com/p/C1a2b3c4/` or `C1a2b3c4` |
-| **From a hashtag** | Tag with or without `#`, or hashtag link | `#linen`, `linen`, or `https://www.instagram.com/explore/tags/linen/` |
-| **From open tab** *(Open followers list, Saved posts, This page)* | Nothing — it reads the page you have open | — |
 
 The field checks what you type as you type it and confirms it (for example
 `✓ Account: @linen.studio`); **Collect** stays disabled until the input is valid, and
@@ -139,10 +137,10 @@ you.
 ## The everyday flow
 
 1. Keep Instagram logged in in any normal browser tab. The dashboard automatically detects your signed-in session (click the connection pill at any time to sync or open Instagram).
-2. In **Collect**, choose a sub-tab (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), enter a handle or link, and click **Collect** — or launch straight from the floating pill on Instagram. Your Instagram tab comes forward and collects visibly with human cursor movement and scrolling.
+2. In **Collect**, choose a sub-tab (**From an account** or **From a post**), enter a handle or link, and click **Collect** — or launch straight from the floating pill on Instagram. Your Instagram tab comes forward and collects visibly with human cursor movement and scrolling.
 3. Review the people it found — username, name and warmth — then choose a bucket (the ready **Default** bucket is pre-selected, or create a new bucket inline) and press **Save**.
 4. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Use **+ Add people** to paste handles or profile links directly, **Delete all** to clear a bucket or workspace, or click any person to inspect details and toggle buckets.
-5. Open **Outreach** and pick the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab to plan a dry run and run your outreach at a human pace (you can adjust or disable the active-hours window in **Settings** or directly from the Outreach banner).
+5. Open **Outreach** and pick the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab to plan a dry run and run your outreach at a human pace. Every task automatically skips individual unavailable/restricted accounts and continues cleanly to the next lead, stopping immediately on real systemic errors (action block, logged-out session, closed tab, or consecutive page failures). See [`docs/DM_AND_RESILIENCE.md`](docs/DM_AND_RESILIENCE.md) for the full desktop DM & skip-resilience design.
 
 ## Quick start
 

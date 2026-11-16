@@ -1,11 +1,9 @@
 /**
  * Tab 1 — Collect.
  *
- * Four separated sub-tabs keep every collection source clean and self-contained:
+ * Two separated sub-tabs keep every collection source clean and self-contained:
  *   • From an account  (Followers · Following · Recent likers)
  *   • From a post      (Likers · Commenters)
- *   • From a hashtag   (Hashtag posts)
- *   • From open tab    (Open list dialog · Saved posts · This page)
  *
  * Every collection runs visibly in the user's open Instagram tab at a human
  * pace (real mouse paths, clicks, and scrolling — zero Instagram API calls).
@@ -284,9 +282,10 @@ export function createCollectorView(ctx = {}) {
     if (req && !initialApplied) {
       initialApplied = true;
       pendingFrom = req.from ?? null;
-      if (req.source && SOURCE_FIELDS[req.source]) source = req.source;
+      const supportedSource = SOURCE_GROUPS.some((g) => g.options.some((o) => o.value === req.source));
+      if (req.source && supportedSource && SOURCE_FIELDS[req.source]) source = req.source;
       rawInput = req.username
-        ?? (req.shortcode ? `https://www.instagram.com/p/${req.shortcode}/` : (req.tag ? `#${req.tag}` : ''));
+        ?? (req.shortcode ? `https://www.instagram.com/p/${req.shortcode}/` : '');
       renderLauncher();
       if (req.auto === '1') {
         const busy = new Set([RunPhase.PREPARING, RunPhase.RUNNING, RunPhase.WAITING, RunPhase.STOPPING]);

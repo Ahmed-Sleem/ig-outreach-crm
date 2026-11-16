@@ -31,10 +31,19 @@ import {
   Label,
   collapse,
   composerScope,
+  detectDmRestriction,
+  dmContainerUserMatch,
   findActionBlockDialog,
   findButtonByLabel,
   findConfirmDialog,
   findDialogs,
+  findDmDockCloseButton,
+  findDmSurface,
+  findOpenDmDock,
+  findOptionsDialogSendMessage,
+  findProfileMessageButton,
+  findProfileOptionsButton,
+  findSendButton,
   isProfileUnavailable,
   isRtlElement,
   threadBubbles,
@@ -44,9 +53,10 @@ import {
 export const SETTLE_MS = Object.freeze({
   follow: 3500,
   unfollow: 3500,
-  dmSend: 6500,
-  dmOpen: 7000,
-  dialog: 2500,
+  dmSend: 7000,
+  dmSendButton: 1500,
+  dmOpen: 10000,
+  dialog: 3000,
 });
 
 export const ActionOutcome = Object.freeze({
@@ -297,8 +307,8 @@ export function readRelationshipState(document) {
 export async function executeFollow(ctx, options = {}) {
   const { document, signal = null, settleMs = SETTLE_MS.follow, readyTimeoutMs = 0 } = { ...options };
   if (!document) return refusal('no document to act on');
-  if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
-  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+  if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+  if (isProfileUnavailable(document)) return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
 
   let before = readRelationshipState(document);
   if (!before.button && readyTimeoutMs > 0) {
@@ -309,8 +319,8 @@ export async function executeFollow(ctx, options = {}) {
       return cur.button ? cur : null;
     }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile Follow button' });
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
-    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
-    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+    if (isProfileUnavailable(document)) return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
     if (hydrated.found && hydrated.value?.button) before = hydrated.value;
     else before = readRelationshipState(document);
   }
@@ -353,8 +363,8 @@ export async function executeFollow(ctx, options = {}) {
 export async function executeUnfollow(ctx, options = {}) {
   const { document, signal = null, settleMs = SETTLE_MS.unfollow, readyTimeoutMs = 0, allowRequested = false } = { ...options };
   if (!document) return refusal('no document to act on');
-  if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
-  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+  if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+  if (isProfileUnavailable(document)) return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
 
   let before = readRelationshipState(document);
   if (!before.button && readyTimeoutMs > 0) {
@@ -365,8 +375,8 @@ export async function executeUnfollow(ctx, options = {}) {
       return cur.button ? cur : null;
     }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile relationship button' });
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
-    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
-    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+    if (isProfileUnavailable(document)) return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
     if (hydrated.found && hydrated.value?.button) before = hydrated.value;
     else before = readRelationshipState(document);
   }
@@ -405,9 +415,11 @@ export async function executeUnfollow(ctx, options = {}) {
 /** The composer of the currently open thread, or null with a reason. */
 export function findComposer(ctx, options = {}) {
   const { document, pathname = '' } = options;
-  const editor = composerScope(document, pathname);
-  if (!editor) return { editor: null, reason: 'no DM composer is open (a contenteditable outside a direct thread is a comment box, not a DM)' };
-  return { editor, reason: null };
+  const surface = findDmSurface(document, pathname);
+  if (!surface?.editor) {
+    return { editor: null, surface: null, reason: 'no DM composer is open (a contenteditable outside a direct thread is a comment box, not a DM)' };
+  }
+  return { editor: surface.editor, surface, reason: null };
 }
 
 /**
@@ -445,8 +457,11 @@ export function caretToEnd(ctx, editor) {
  */
 export function readComposerText(editor) {
   if (!editor) return '';
+  if (String(editor.tagName ?? '').toUpperCase() === 'TEXTAREA') {
+    return collapse(String(editor.value ?? '').replace(/[\u200B-\u200F\uFEFF]/g, ''));
+  }
   const rendered = typeof editor.innerText === 'string' ? editor.innerText : editor.textContent;
-  return collapse(String(rendered ?? '').replace(/[\u200B-\u200D\uFEFF]/g, ''));
+  return collapse(String(rendered ?? '').replace(/[\u200B-\u200F\uFEFF]/g, ''));
 }
 
 /**
@@ -467,12 +482,64 @@ export function isDoubled(rendered, message) {
   return text === `${once} ${once}` || text === `${once}${once}`;
 }
 
+/** Dispatch a real plain-text paste event (Lexical handles PASTE_COMMAND natively). */
+function dispatchPlainTextPaste(target, text) {
+  try {
+    const view = target?.ownerDocument?.defaultView ?? globalThis.window ?? globalThis;
+    const ClipboardCtor = view?.ClipboardEvent ?? globalThis.ClipboardEvent;
+    const DataTransferCtor = view?.DataTransfer ?? globalThis.DataTransfer;
+    if (typeof ClipboardCtor !== 'function' || typeof DataTransferCtor !== 'function') return false;
+    const dt = new DataTransferCtor();
+    dt.setData('text/plain', text);
+    const ev = new ClipboardCtor('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+    target.dispatchEvent?.(ev);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Dispatch a real Enter key sequence on a Lexical composer. */
+function dispatchEnterKey(ctx, target) {
+  const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window ?? undefined;
+  const KeyCtor = view?.KeyboardEvent ?? globalThis.KeyboardEvent;
+  const init = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, shiftKey: false, bubbles: true, cancelable: true, composed: true, view };
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    try {
+      if (typeof KeyCtor === 'function') {
+        target.dispatchEvent?.(new KeyCtor(type, init));
+      } else {
+        target.dispatchEvent?.({ type, ...init });
+      }
+    } catch {
+      try { target.dispatchEvent?.({ type, ...init }); } catch { /* shim */ }
+    }
+  }
+}
+
+/** Dispatch Escape to dismiss a modal dialog (such as an Options menu without Send message). */
+function dispatchEscapeKey(ctx, document) {
+  const target = document?.activeElement ?? document?.body ?? document;
+  if (!target?.dispatchEvent) return;
+  const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window ?? undefined;
+  const KeyCtor = view?.KeyboardEvent ?? globalThis.KeyboardEvent;
+  const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true, composed: true, view };
+  for (const type of ['keydown', 'keyup']) {
+    try {
+      if (typeof KeyCtor === 'function') target.dispatchEvent(new KeyCtor(type, init));
+      else target.dispatchEvent({ type, ...init });
+    } catch { /* shim */ }
+  }
+}
+
 /**
  * Type a message into the composer and VERIFY it before anything is sent.
  *
- * The sequence is caret-to-end, select-all, delete, insert line by line, then
- * read the composer back. A doubled draft or a partial one is refused here,
- * because after Send it is too late: the person has already received it.
+ * The sequence is click/focus (activates Lexical's internal selection),
+ * caret-to-end, clear any pre-existing draft with a short post-clear beat so
+ * Lexical never swallows the next insertText, insert line by line (with a
+ * Lexical paste/beforeinput fallback if execCommand did not stick), then read
+ * the composer back. A doubled or partial draft is refused here before Send.
  */
 export async function composeMessage(ctx, options = {}) {
   const { document, message, editor = null, signal = null, pathname = '' } = options;
@@ -485,14 +552,40 @@ export async function composeMessage(ctx, options = {}) {
   if (!target) return refusal(found.reason);
 
   ctx.virtualCursor?.label?.('Typing message…');
+  const rect = typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : null;
+  if (rect && rect.width > 0 && rect.height > 0) {
+    await humanClick(ctx, target, { signal, settleMs: 60, label: 'Focusing message box…' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
+  }
   try { target.focus?.(); } catch { /* noop */ }
   caretToEnd(ctx, target);
+
+  if (String(target.tagName ?? '').toUpperCase() === 'TEXTAREA') {
+    const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window;
+    const setter = Object.getOwnPropertyDescriptor(view?.HTMLTextAreaElement?.prototype ?? {}, 'value')?.set;
+    if (setter) setter.call(target, text);
+    else target.value = text;
+    try { target.dispatchEvent?.(new (view?.Event ?? Event)('input', { bubbles: true })); } catch { /* shim */ }
+    await tickOf(ctx)(80, { signal });
+    const rendered = readComposerText(target);
+    const expected = expectedComposerText(text);
+    if (rendered !== expected) {
+      return refusal(`the composer holds "${rendered}" but the message was "${expected}"; nothing was sent`, { rendered, expected });
+    }
+    return success({ rendered, lines: text.split('\n').length, rtl: isRtlElement(target), editor: target, container: found.surface?.container ?? null });
+  }
+
   if (readComposerText(target)) {
     document.execCommand?.('selectAll');
     document.execCommand?.('delete');
+    // Lexical can suppress an immediate insertText on the same tick after
+    // handled selectAll/delete; let one short frame settle first.
+    await tickOf(ctx)(60, { signal });
     if (readComposerText(target)) {
       return refusal('the composer still holds text after clearing it; refusing to type on top of someone else\'s draft');
     }
+    try { target.focus?.(); } catch { /* noop */ }
+    caretToEnd(ctx, target);
   }
 
   const lines = text.split('\n');
@@ -513,6 +606,36 @@ export async function composeMessage(ctx, options = {}) {
     await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
   }
 
+  // Fallback for real-browser Lexical quirks where execCommand returned without
+  // mutating the Lexical state: try plain-text paste (Lexical's native
+  // PASTE_COMMAND), then beforeinput/input. Only runs if composer is still empty
+  // so it can never double an already-landed draft.
+  if (!readComposerText(target)) {
+    try { target.focus?.(); } catch { /* noop */ }
+    caretToEnd(ctx, target);
+    if (dispatchPlainTextPaste(target, text)) {
+      await tickOf(ctx)(100, { signal });
+    }
+  }
+  if (!readComposerText(target) && typeof globalThis.InputEvent === 'function') {
+    try {
+      target.focus?.();
+      caretToEnd(ctx, target);
+      target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
+        inputType: 'insertText',
+        data: text,
+        bubbles: true,
+        cancelable: true,
+      }));
+      target.dispatchEvent?.(new globalThis.InputEvent('input', {
+        inputType: 'insertText',
+        data: text,
+        bubbles: true,
+      }));
+      await tickOf(ctx)(100, { signal });
+    } catch { /* shim */ }
+  }
+
   const rendered = readComposerText(target);
   const expected = expectedComposerText(text);
   if (isDoubled(rendered, text)) {
@@ -523,31 +646,44 @@ export async function composeMessage(ctx, options = {}) {
   if (rendered !== expected) {
     return refusal(`the composer holds "${rendered}" but the message was "${expected}"; nothing was sent`, { rendered, expected });
   }
-  return success({ rendered, lines: lines.length, rtl: isRtlElement(target), editor: target });
+  return success({ rendered, lines: lines.length, rtl: isRtlElement(target), editor: target, container: found.surface?.container ?? null });
 }
 
 /** The newest bubble in the open thread, or null. */
-export function newestBubble(document) {
-  const bubbles = threadBubbles(document);
+export function newestBubble(document, container = null) {
+  const bubbles = threadBubbles(document, container);
   return bubbles.length ? bubbles[bubbles.length - 1] : null;
 }
 
 /**
  * Is the newest message in the open thread one of ours?
  *
- * `ours` is decided by the caller: the extension marks its own bubbles, and
- * Instagram's own DOM gives no reliable "sent by me" attribute across locales.
- * Default is a text comparison, which is enough for the doubled-send check.
+ * Checks structured thread bubbles first (strictly scoped to the active DM
+ * container), then falls back to an optimistic text node inside the DM
+ * container outside the composer so freshly sent floating-dock messages are
+ * verified reliably even before React attaches `role="article"`.
  */
-export function newestIsOurs(document, message) {
-  const bubble = newestBubble(document);
-  if (!bubble) return false;
-  return collapse(bubble.textContent).includes(expectedComposerText(message));
+export function newestIsOurs(document, message, container = null, editor = null) {
+  const wanted = expectedComposerText(message);
+  if (!wanted) return false;
+  const bubble = newestBubble(document, container);
+  if (bubble && collapse(bubble.textContent).includes(wanted)) return true;
+  if (container && container !== document && container !== document?.body && typeof container.querySelectorAll === 'function') {
+    for (const node of [...container.querySelectorAll('[dir="auto"], span, p, div')]) {
+      if (editor && (node === editor || editor.contains?.(node) || node.contains?.(editor))) continue;
+      if (node.closest?.('button, [role="button"], [contenteditable="true"]')) continue;
+      const children = node.children ?? [];
+      if (children.length > 2) continue;
+      const txt = collapse(node.textContent);
+      if (txt && txt.includes(wanted)) return true;
+    }
+  }
+  return false;
 }
 
 /** Has the thread been opened before? One existing bubble is enough to skip. */
-export function hasExistingThread(document) {
-  return threadBubbles(document).length > 0;
+export function hasExistingThread(document, container = null) {
+  return threadBubbles(document, container).length > 0;
 }
 
 /** Receipt wording Instagram renders under the newest message, per locale. */
@@ -560,8 +696,8 @@ export const SEEN_RECEIPT_TEXT = Object.freeze(['Seen', 'تمت المشاهدة
  * scoped to the thread container and matches the wording exactly. Substring
  * matching would report a person called "Seena" as a read receipt.
  */
-export function threadShowsSeen(document) {
-  const bubbles = threadBubbles(document);
+export function threadShowsSeen(document, container = null) {
+  const bubbles = threadBubbles(document, container);
   if (!bubbles.length) return false;
   const scope = bubbles[bubbles.length - 1].parentNode;
   if (!scope) return false;
@@ -573,109 +709,376 @@ export function threadShowsSeen(document) {
   return false;
 }
 
+function restrictionToOutcome(restriction) {
+  if (!restriction) return null;
+  if (restriction.kind === 'invite_sent') {
+    return halted(ActionOutcome.SKIPPED, restriction.reason, { inviteAlreadySent: true });
+  }
+  if (restriction.kind === 'unavailable') {
+    return halted(ActionOutcome.SKIPPED, restriction.reason, { dmUnavailable: true });
+  }
+  return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: restriction.reason };
+}
+
 /**
- * Open the DM thread for the account on the current page.
+ * Open the DM thread for the account on the current page like a normal desktop
+ * user, handling every 2026 Instagram exception:
  *
- * Prefers the Message button on the profile. When there is none — Instagram
- * hides it for accounts that restrict messages, and for some business profiles —
- * the caller may navigate to /direct/new/{username}/ instead, which this
- * function reports as `needsNavigation` rather than pretending the thread opened.
+ *  1. Closes any stale floating bottom-right chat dock belonging to a different
+ *     user before clicking Message on this profile.
+ *  2. Prefers the `<header>` Message button when present.
+ *  3. When no Message button is rendered in `<header>`, opens the `<header>`
+ *     three-dots Options menu (`svg title="Options"`) and looks for
+ *     "Send message" inside the resulting `[role="dialog"]`. If the Options menu
+ *     contains no "Send message" item, closes the dialog and returns `SKIPPED`
+ *     with `dmUnavailable: true` so the campaign moves smoothly to the next lead.
+ *  4. Accepts BOTH outcomes after clicking Message / Send message:
+ *       - the floating bottom-right Direct chat dock on the same profile page, OR
+ *       - SPA navigation to `/direct/t/<threadId>/`, OR
+ *       - a modal Direct dialog —
+ *     while immediately catching restriction notices ("You can't message this
+ *     account", "Invite sent") and action blocks.
  */
 export async function openDm(ctx, options = {}) {
-  const { document, signal = null, timeoutMs = SETTLE_MS.dmOpen, readyTimeoutMs = 0 } = options;
+  const {
+    document,
+    location = null,
+    username = null,
+    signal = null,
+    timeoutMs = SETTLE_MS.dmOpen,
+    readyTimeoutMs = 0,
+  } = options;
   if (!document) return refusal('no document to act on');
-  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+  if (isActionBlocked(document)) {
+    return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+  }
+  if (isProfileUnavailable(document)) {
+    return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
+  }
 
-  let hit = findButtonByLabel(document, [Label.MESSAGE]);
+  const currentPath = () => String(location?.pathname ?? ctx?.location?.pathname ?? document?.location?.pathname ?? '');
+  const targetUser = String(username ?? '').trim().replace(/^@+/, '').toLowerCase() || null;
+
+  // 1. Check for an already-open floating chat dock (could be THIS user or a
+  //    stale dock left open from the previous lead!).
+  const existingSurface = findDmSurface(document, currentPath());
+  const existingDock = existingSurface?.kind === 'dock' ? existingSurface.container : findOpenDmDock(document);
+  if (existingDock) {
+    if (targetUser) {
+      const match = dmContainerUserMatch(existingDock, targetUser);
+      if (match.matched) {
+        const restriction = detectDmRestriction(existingDock);
+        if (restriction) return restrictionToOutcome(restriction);
+        if (existingSurface?.editor) {
+          return success({
+            elapsedMs: 0,
+            via: 'already-open-dock',
+            surfaceKind: 'dock',
+            existingThread: hasExistingThread(document, existingDock),
+            composerFound: true,
+          });
+        }
+      } else {
+        // Stale floating dock belonging to another user (or unidentified): close
+        // it cleanly before opening this profile's chat!
+        const closeBtn = findDmDockCloseButton(existingDock);
+        if (closeBtn) {
+          ctx.virtualCursor?.label?.('Closing previous chat dock…');
+          await humanClick(ctx, closeBtn, { signal, settleMs: 60, label: 'Closing previous chat…' });
+          if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+          await waitFor(ctx, () => (!findOpenDmDock(document) && !findDmSurface(document, currentPath()) ? true : null), {
+            timeoutMs: 2000,
+            intervalMs: 100,
+            signal,
+            label: 'previous chat dock to close',
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Locate the profile header Message button, waiting for SPA profile hydration
+  //    when needed.
+  let hit = findProfileMessageButton(document);
   if (!hit && readyTimeoutMs > 0) {
     ctx.virtualCursor?.label?.('Waiting for profile…');
     const hydrated = await waitFor(ctx, () => {
       if (isActionBlocked(document) || isProfileUnavailable(document)) return { earlyExit: true };
-      const msg = findButtonByLabel(document, [Label.MESSAGE]);
+      const msg = findProfileMessageButton(document);
       if (msg) return msg;
-      // If the profile header already rendered Follow/Following with no Message
-      // button, don't wait the full timeout — this profile hides Message.
+      // If the profile header already rendered Follow/Following or Options, we
+      // know the header mounted (may still hide Message behind Options).
       const rel = readRelationshipState(document);
-      if (rel.button) return { noMessageButton: true };
+      const opt = findProfileOptionsButton(document);
+      if (rel.button || opt) return { headerReady: true };
       return null;
     }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile Message button' });
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
-    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
-    if (hydrated.found && hydrated.value?.button) hit = hydrated.value;
-    else hit = findButtonByLabel(document, [Label.MESSAGE]);
+    if (isActionBlocked(document)) {
+      return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+    }
+    if (isProfileUnavailable(document)) {
+      return halted(ActionOutcome.SKIPPED, 'this profile is unavailable or was deleted', { profileUnavailable: true });
+    }
+    if (hydrated.found && hydrated.value?.button) {
+      hit = hydrated.value;
+    } else {
+      // Give Instagram one short extra beat in case Message renders right after Follow.
+      if (hydrated.found && hydrated.value?.headerReady) {
+        await tickOf(ctx)(250, { signal });
+      }
+      hit = findProfileMessageButton(document);
+    }
   }
-  if (!hit) {
-    return refusal('this profile renders no Message button', { needsNavigation: true });
-  }
-  await humanClick(ctx, hit.button, { signal, label: 'Clicking Message…' });
-  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
+  let via = 'header-message';
+  if (hit) {
+    await humanClick(ctx, hit.button, { signal, label: 'Clicking Message…' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  } else {
+    // 3. Fallback: some profiles hide "Send message" inside the three-dots
+    //    Options (`•••`) menu — and some disable messaging completely even there.
+    const optionsBtn = findProfileOptionsButton(document);
+    if (!optionsBtn) {
+      return refusal('this profile renders no Message button', { needsNavigation: true });
+    }
+    via = 'options-menu';
+    await humanClick(ctx, optionsBtn.button, { signal, label: 'Opening Options menu…' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+
+    const menuWait = await waitFor(ctx, () => {
+      if (isActionBlocked(document)) return { blocked: true };
+      return findOptionsDialogSendMessage(document);
+    }, { timeoutMs: SETTLE_MS.dialog, intervalMs: 120, signal, label: 'profile Options menu' });
+
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (menuWait.value?.blocked || isActionBlocked(document)) {
+      return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+    }
+    if (!menuWait.found) {
+      return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'profile Options menu did not open' };
+    }
+    if (!menuWait.value.sendMessageButton) {
+      // Confirmed: neither the profile header nor the three-dots Options menu
+      // offers a way to message this account. Dismiss cleanly and skip!
+      if (menuWait.value.cancelButton) {
+        await humanClick(ctx, menuWait.value.cancelButton, { signal, settleMs: 40, label: 'Closing Options menu…' });
+      } else {
+        dispatchEscapeKey(ctx, document);
+      }
+      return halted(
+        ActionOutcome.SKIPPED,
+        'This account does not offer a Send message option on their profile or in the Options menu.',
+        { dmUnavailable: true },
+      );
+    }
+    await humanClick(ctx, menuWait.value.sendMessageButton, { signal, label: 'Clicking Send message…' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  }
+
+  // 4. Wait for whatever Instagram opens: floating bottom-right chat dock,
+  //    `/direct/t/...` thread page, modal dialog, restriction notice, or block.
   ctx.virtualCursor?.label?.('Opening message thread…');
-  const opened = await waitFor(ctx, () => composerScope(document, '/direct/'), { timeoutMs, signal, label: 'DM composer' });
-  if (!opened.found) {
+  const opened = await waitFor(ctx, () => {
+    if (isActionBlocked(document)) return { blocked: true };
+    const path = currentPath();
+    const surface = findDmSurface(document, path);
+    if (surface) {
+      const restriction = detectDmRestriction(surface.container);
+      if (restriction) return { restriction };
+      // If a floating dock is open and identifies a DIFFERENT user (e.g., while
+      // switching threads inside the dock), wait for the target thread to render.
+      if (targetUser && surface.kind === 'dock') {
+        const match = dmContainerUserMatch(surface.container, targetUser);
+        if (match.foundUsers.length > 0 && !match.matched) return null;
+      }
+      return { surface };
+    }
+    const dock = findOpenDmDock(document);
+    if (dock) {
+      const restriction = detectDmRestriction(dock);
+      if (restriction) return { restriction };
+    }
+    if (path.startsWith('/direct')) {
+      const mainScope = document.querySelector?.('main, [role="main"]') ?? document.body;
+      const restriction = detectDmRestriction(mainScope);
+      if (restriction) return { restriction };
+    }
+    for (const dlg of findDialogs(document)) {
+      const restriction = detectDmRestriction(dlg);
+      if (restriction) return { restriction };
+    }
+    return null;
+  }, { timeoutMs, signal, label: 'DM composer' });
+
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  if (opened.value?.blocked || isActionBlocked(document)) {
+    return halted(ActionOutcome.STOPPED, 'Instagram blocked opening this chat; the run must stop', { severity: 'account' });
+  }
+  if (opened.value?.restriction) {
+    return restrictionToOutcome(opened.value.restriction);
+  }
+  if (!opened.found || !opened.value?.surface) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: opened.reason, needsNavigation: true };
   }
+
+  const surface = opened.value.surface;
   // The editor stays here: a DOM node cannot cross the storage bridge, and the
   // caller only needs to know the composer is open.
-  return success({ elapsedMs: opened.elapsedMs, existingThread: hasExistingThread(document), composerFound: true });
+  return success({
+    elapsedMs: opened.elapsedMs,
+    via,
+    surfaceKind: surface.kind,
+    existingThread: hasExistingThread(document, surface.container),
+    composerFound: true,
+  });
 }
 
 /**
- * Send one message to the open thread.
+ * Send one message to the open thread (floating dock, `/direct/t/` page, or
+ * Direct dialog).
  *
  * Refuses to send into a thread that already has messages unless `allowExisting`
- * is set: the funnel's rule is one first message, and a second message to a
- * stranger who never answered is what Instagram's spam classifier looks for.
+ * is set, catches restriction notices, waits for React/Lexical to render the
+ * Send button after typing, supports Enter-to-send for Lexical docks with no
+ * rendered Send button, and verifies delivery strictly inside the active DM
+ * container.
  */
 export async function executeDm(ctx, options = {}) {
   const {
     document,
     message,
+    username = null,
     signal = null,
     pathname = '',
     allowExisting = false,
+    allowEnterSubmit = true,
     settleMs = SETTLE_MS.dmSend,
+    sendButtonTimeoutMs = SETTLE_MS.dmSendButton,
   } = options;
 
   if (!document) return refusal('no document to act on');
-  if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
-  if (hasExistingThread(document) && !allowExisting) {
+  if (isActionBlocked(document)) {
+    return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
+  }
+
+  const effectivePath = pathname || String(ctx?.location?.pathname ?? document?.location?.pathname ?? '');
+  const surface = findDmSurface(document, effectivePath);
+  const container = surface?.container ?? findOpenDmDock(document);
+
+  const preRestriction = detectDmRestriction(container);
+  if (preRestriction) return restrictionToOutcome(preRestriction);
+
+  if (username && container) {
+    const match = dmContainerUserMatch(container, username);
+    if (match.foundUsers.length > 0 && !match.matched) {
+      return {
+        ok: false,
+        outcome: ActionOutcome.NOT_DONE,
+        reason: `open DM thread belongs to @${match.foundUsers[0]}, not @${String(username).replace(/^@+/, '')}; refusing to send to the wrong person`,
+      };
+    }
+  }
+
+  if (hasExistingThread(document, container) && !allowExisting) {
     return halted(ActionOutcome.SKIPPED, 'this thread already has messages; the funnel sends one first message only', { existingThread: true });
   }
 
-  const composed = await composeMessage(ctx, { document, message, signal, pathname });
+  const composed = await composeMessage(ctx, {
+    document,
+    message,
+    editor: surface?.editor ?? null,
+    signal,
+    pathname: effectivePath,
+  });
   if (!composed.ok) return composed;
   const editor = composed.editor;
+  const activeContainer = composed.container ?? container;
 
   if (isDoubled(readComposerText(editor), message)) {
     return refusal('the composer doubled the message after verification; nothing was sent');
   }
 
-  const send = findButtonByLabel(document, [Label.SEND]);
-  if (!send) {
+  // React/Lexical swaps Voice Clip / Photo / GIF for the Send button a frame or
+  // two AFTER text lands in the composer. Wait briefly for Send to mount!
+  let send = findSendButton(document, activeContainer);
+  const isLexicalEditor = editor.getAttribute?.('data-lexical-editor') === 'true';
+  if (!send && (isLexicalEditor || sendButtonTimeoutMs > 0)) {
+    const waitedSend = await waitFor(ctx, () => {
+      if (isActionBlocked(document)) return { blocked: true };
+      return findSendButton(document, activeContainer);
+    }, {
+      timeoutMs: isLexicalEditor ? sendButtonTimeoutMs : Math.min(sendButtonTimeoutMs, 200),
+      intervalMs: 100,
+      signal,
+      label: 'Send button',
+    });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (waitedSend.value?.blocked || isActionBlocked(document)) {
+      return halted(ActionOutcome.STOPPED, 'Instagram blocked sending this message; the run must stop', { severity: 'account' });
+    }
+    if (waitedSend.found && waitedSend.value?.button) send = waitedSend.value;
+  }
+
+  if (send) {
+    await humanClick(ctx, send.button, { signal, label: 'Clicking Send…' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  } else if (allowEnterSubmit && isLexicalEditor) {
+    // Some floating-dock builds omit an explicit Send button and submit on Enter.
+    ctx.virtualCursor?.label?.('Pressing Enter to send…');
+    try { editor.focus?.(); } catch { /* noop */ }
+    caretToEnd(ctx, editor);
+    dispatchEnterKey(ctx, editor);
+  } else {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer holds the message but no Send button is rendered' };
   }
-  await humanClick(ctx, send.button, { signal, label: 'Clicking Send…' });
-  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
   ctx.virtualCursor?.label?.('Verifying delivery…');
 
-  const cleared = await waitFor(ctx, () => (readComposerText(editor) === '' ? editor : null), { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
+  const cleared = await waitFor(ctx, () => {
+    if (isActionBlocked(document)) return { blocked: true };
+    const r = detectDmRestriction(activeContainer);
+    if (r) return { restriction: r };
+    return readComposerText(editor) === '' ? { cleared: true } : null;
+  }, { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
+
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  if (cleared.value?.blocked || isActionBlocked(document)) {
+    return halted(ActionOutcome.STOPPED, 'Instagram blocked sending this message; the run must stop', { severity: 'account' });
+  }
+  if (cleared.value?.restriction) {
+    return restrictionToOutcome(cleared.value.restriction);
+  }
   if (!cleared.found) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'Send was clicked but the composer still holds the message', rendered: readComposerText(editor) };
   }
-  const delivered = await waitFor(ctx, () => (newestIsOurs(document, message) ? newestBubble(document) : null), {
-    timeoutMs: Math.max(1000, settleMs - cleared.elapsedMs),
+
+  const delivered = await waitFor(ctx, () => {
+    if (isActionBlocked(document)) return { blocked: true };
+    const r = detectDmRestriction(activeContainer);
+    if (r) return { restriction: r };
+    return newestIsOurs(document, message, activeContainer, editor) ? { delivered: true } : null;
+  }, {
+    timeoutMs: Math.max(1500, settleMs - cleared.elapsedMs),
     signal,
     label: 'message bubble in thread',
   });
+
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  if (delivered.value?.blocked || isActionBlocked(document)) {
+    return halted(ActionOutcome.STOPPED, 'Instagram blocked sending this message; the run must stop', { severity: 'account' });
+  }
+  if (delivered.value?.restriction) {
+    return restrictionToOutcome(delivered.value.restriction);
+  }
   if (!delivered.found) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer cleared but the message never appeared in the thread' };
   }
   return success({
     clearedMs: cleared.elapsedMs,
     deliveredMs: delivered.elapsedMs,
-    seen: threadShowsSeen(document),
+    surfaceKind: surface?.kind ?? null,
+    seen: threadShowsSeen(document, activeContainer),
     rtl: composed.rtl,
   });
 }

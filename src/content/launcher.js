@@ -158,26 +158,6 @@ export function quickActionsFor(context) {
     });
   }
 
-  if (context.kind === 'tag' && context.tag) {
-    actions.push({
-      id: 'collect-grid',
-      tab: 'collector',
-      label: 'Collect from this hashtag',
-      hint: 'Authors of the posts on screen, in order',
-      params: collect({ source: 'hashtag_grid', tag: context.tag }),
-    });
-  }
-
-  if (context.kind === 'explore' || context.kind === 'other') {
-    actions.push({
-      id: 'collect-page',
-      tab: 'collector',
-      label: 'Collect the people on this page',
-      hint: 'Whatever list or grid is open right now',
-      params: collect({ source: 'current_page' }),
-    });
-  }
-
   if (context.kind === 'direct') {
     actions.push({
       id: 'open-thread',
