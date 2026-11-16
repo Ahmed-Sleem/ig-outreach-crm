@@ -273,27 +273,31 @@ export function detectViewerFromDom(document, cookieString = '') {
   let source = null;
 
   if (document && typeof document.querySelectorAll === 'function') {
-    // 1. Navigation rail / bottom bar Profile link
-    const navScopes = [
-      ...document.querySelectorAll('nav, [role="navigation"], header'),
-    ];
-    const scopes = navScopes.length ? navScopes : [document];
+    const insideTargetContent = (node) => Boolean(node?.closest?.('main, [role="main"], [role="dialog"]'));
 
-    for (const scope of scopes) {
+    const matchProfileLink = (link) => {
+      const candidate = usernameFromLinkHref(link.getAttribute?.('href') ?? link.href ?? '');
+      if (!candidate) return null;
+      const text = String(link.textContent ?? '').trim().toLowerCase();
+      const aria = String(link.getAttribute?.('aria-label') ?? '').trim().toLowerCase();
+      const img = link.querySelector?.('img[alt]');
+      const imgAlt = String(img?.getAttribute?.('alt') ?? '');
+      const looksLikeProfile =
+        /\bprofile\b|الملف الشخصي/i.test(text)
+        || /\bprofile\b|الملف الشخصي/i.test(aria)
+        || /profile\s+picture|صورة\s+الملف/i.test(imgAlt);
+      return looksLikeProfile ? candidate : null;
+    };
+
+    // 1. Explicit navigation rails (<nav>, [role="navigation"]) outside <main>/dialogs
+    const navScopes = [...document.querySelectorAll('nav, [role="navigation"]')]
+      .filter((scope) => !insideTargetContent(scope));
+    for (const scope of navScopes) {
       let links = [];
       try { links = [...scope.querySelectorAll('a[href]')]; } catch { links = []; }
       for (const link of links) {
-        const candidate = usernameFromLinkHref(link.getAttribute?.('href') ?? link.href ?? '');
-        if (!candidate) continue;
-        const text = String(link.textContent ?? '').trim().toLowerCase();
-        const aria = String(link.getAttribute?.('aria-label') ?? '').trim().toLowerCase();
-        const img = link.querySelector?.('img[alt]');
-        const imgAlt = String(img?.getAttribute?.('alt') ?? '');
-        const looksLikeProfile =
-          /\bprofile\b|الملف الشخصي/i.test(text)
-          || /\bprofile\b|الملف الشخصي/i.test(aria)
-          || /profile\s+picture|صورة\s+الملف/i.test(imgAlt);
-        if (looksLikeProfile) {
+        const candidate = matchProfileLink(link);
+        if (candidate) {
           username = candidate;
           source = 'dom_nav_profile';
           break;
@@ -301,7 +305,6 @@ export function detectViewerFromDom(document, cookieString = '') {
       }
       if (username) break;
 
-      // 2. Profile picture alt inside nav even if href structure changed
       let imgs = [];
       try { imgs = [...scope.querySelectorAll('img[alt]')]; } catch { imgs = []; }
       for (const img of imgs) {
@@ -313,6 +316,42 @@ export function detectViewerFromDom(document, cookieString = '') {
         }
       }
       if (username) break;
+    }
+
+    // 2. 2026 Instagram renders the left desktop navigation rail as a <div>
+    // outside <main> (without a <nav> tag). Scan profile-avatar links OUTSIDE
+    // <main> and [role="dialog"] so we find the real logged-in user (sidebar)
+    // and NEVER mistake the target profile's <main><header> for the viewer!
+    if (!username) {
+      let allLinks = [];
+      try { allLinks = [...document.querySelectorAll('a[href]')]; } catch { allLinks = []; }
+      for (const link of allLinks) {
+        if (insideTargetContent(link)) continue;
+        // Also skip a profile <header> even if a minimal test DOM omits <main>
+        if (link.closest?.('header') && !link.closest?.('nav, [role="navigation"]')) continue;
+        const candidate = matchProfileLink(link);
+        if (candidate) {
+          username = candidate;
+          source = 'dom_nav_profile';
+          break;
+        }
+      }
+    }
+
+    // 3. Fallback: avatar image outside <main>, <header>, and [role="dialog"]
+    if (!username) {
+      let allImgs = [];
+      try { allImgs = [...document.querySelectorAll('img[alt]')]; } catch { allImgs = []; }
+      for (const img of allImgs) {
+        if (insideTargetContent(img)) continue;
+        if (img.closest?.('header') && !img.closest?.('nav, [role="navigation"]')) continue;
+        const candidate = usernameFromProfilePicAlt(img.getAttribute?.('alt'));
+        if (candidate) {
+          username = candidate;
+          source = 'dom_nav_avatar';
+          break;
+        }
+      }
     }
 
     // 3. Embedded page script JSON (read-only DOM text, zero network calls)

@@ -21,7 +21,6 @@
     const mod = await import(src);
     mod.installMessageHandlers();
   } catch (err) {
-    console.error('[IG Outreach CRM] content module failed to load:', err);
     try {
       chrome.runtime.sendMessage({
         type: 'CONTENT_LOAD_FAILED',

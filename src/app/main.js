@@ -203,7 +203,8 @@ export function createApp(deps = {}) {
   }
 
   async function syncConnection({ openIfMissing = false, focusTab = false, announce = false } = {}) {
-    if (connectionBusy || typeof api.detectConnection !== 'function') return null;
+    // Never probe/ping the mailbox while a Collect or Outreach task is in flight.
+    if (connectionBusy || BUSY_PHASES.includes(controller.state.phase) || typeof api.detectConnection !== 'function') return null;
     connectionBusy = true;
     try {
       const res = await api.detectConnection({ openIfMissing, focusTab });

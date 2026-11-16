@@ -85,11 +85,17 @@ export function isValidIgUsername(raw) {
   return !isReservedSegment(clean);
 }
 
-/** Username from a pathname like "/sara_shop/?hl=en", or null when reserved. */
+/** Username from a pathname like "/sara_shop/?hl=en", or null when reserved or a post URL. */
 export function usernameFromPath(pathname) {
   const cleanPath = String(pathname ?? '').split('?')[0].split('#')[0];
   const segments = cleanPath.split('/').filter(Boolean);
   const first = segments[0] ?? '';
+  const second = String(segments[1] ?? '').toLowerCase();
+  // 2026 Instagram renders profile-prefixed post URLs like /<user>/p/<shortcode>/
+  // and /<user>/reel/<shortcode>/. Those are post views, NOT profile pages.
+  if (segments.length >= 3 && (second === 'p' || second === 'reel' || second === 'reels' || second === 'tv')) {
+    return null;
+  }
   let name = '';
   try { name = decodeURIComponent(first).replace(/\.+$/, ''); } catch { name = first.replace(/\.+$/, ''); }
   if (!name || isReservedSegment(name)) return null;
@@ -124,12 +130,53 @@ function qsa(root, selector) {
   }
 }
 
+const IGNORED_BUTTON_TAGS = new Set(['SVG', 'TITLE', 'STYLE', 'SCRIPT']);
+
+/**
+ * Visible text of a button/control excluding embedded `<svg><title>` icons.
+ *
+ * In 2026 Instagram, the profile "Following" button includes a nested
+ * `<svg><title>Down chevron icon</title></svg>`, so raw `button.textContent`
+ * becomes `"FollowingDown chevron icon"`. Skipping SVG/title subtrees recovers
+ * the exact human-visible label (`"Following"`) across English & Arabic.
+ */
+export function visibleButtonText(node) {
+  if (!node) return '';
+  const kids = node.childNodes ?? node.children;
+  if (!kids || kids.length === 0) return String(node.textContent ?? '');
+  const parts = [];
+  const walk = (cur) => {
+    if (!cur) return;
+    if (typeof cur === 'string') {
+      parts.push(cur);
+      return;
+    }
+    if (cur.nodeType === 3) {
+      parts.push(String(cur.nodeValue ?? cur.textContent ?? ''));
+      return;
+    }
+    const tag = String(cur.tagName ?? '').toUpperCase();
+    if (IGNORED_BUTTON_TAGS.has(tag)) return;
+    const childList = cur.childNodes ?? cur.children;
+    if (childList && childList.length > 0) {
+      for (const child of childList) walk(child);
+    } else if (cur._text !== undefined && cur._text !== null) {
+      parts.push(String(cur._text));
+    } else if (cur.textContent) {
+      parts.push(String(cur.textContent));
+    }
+  };
+  walk(node);
+  const joined = collapse(parts.join(' '));
+  return joined || collapse(node.textContent);
+}
+
 /** Buttons whose exact label is one of the requested kinds. */
 export function findButtonsByLabel(root, kinds) {
   const wanted = new Set(kinds);
   const out = [];
   for (const button of qsa(root, 'button, [role="button"]')) {
-    const kind = labelKind(button.textContent);
+    const kind = labelKind(visibleButtonText(button)) ?? labelKind(button.textContent);
     if (kind && wanted.has(kind)) out.push({ button, kind });
   }
   return out;
@@ -164,6 +211,10 @@ export function composerScope(root, pathname = '') {
   for (const editor of editors) {
     if (editor.closest('[role="dialog"]')) return editor;
     if (onDirect && editor.closest('main, [role="main"], section')) return editor;
+    const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
+    if (aria && /^(message|رسالة|مراسلة)\b/.test(aria) && !/comment|تعليق/.test(aria)) {
+      return editor;
+    }
   }
   return null;
 }
@@ -172,7 +223,22 @@ export function composerScope(root, pathname = '') {
 export function threadBubbles(root) {
   const dialogs = findDialogs(root);
   const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : root;
-  return qsa(scope, '[role="article"]');
+  const articles = qsa(scope, '[role="article"]');
+  if (articles.length > 0) return articles;
+
+  // 2026 Instagram Direct (Comet/Messenger engine) renders message rows inside
+  // a `role="grid"` (often labeled "Messages in conversation with …"). Avoid
+  // grabbing the left-hand Chats/Inbox list by preferring a grid whose label
+  // mentions Messages/Conversation, or falling back to `[role="row"]` nodes
+  // that are not ancestors of the composer textbox.
+  const grids = qsa(scope, '[role="grid"]');
+  const messageGrid = grids.find((g) => /(messages?|conversation|الرسائل|المحادثة)/i.test(String(g.getAttribute?.('aria-label') ?? '')))
+    ?? (grids.length > 0 ? grids[grids.length - 1] : null);
+  const rowSource = messageGrid ?? scope;
+  return qsa(rowSource, '[role="row"]').filter((row) => {
+    if (row.querySelector?.('[contenteditable="true"]')) return false;
+    return collapse(row.textContent).length > 0;
+  });
 }
 
 /** The unfollow/confirm dialog Instagram opens after an Unfollow click. */
@@ -184,13 +250,20 @@ export function findConfirmDialog(root) {
   return null;
 }
 
-/** A visible "Try Again Later"-style action-block dialog. */
+/** A visible "Try Again Later" / "Action Blocked"-style action-block dialog. */
 export function findActionBlockDialog(root) {
+  const blockPatterns = [
+    /action\s+blocked/i,
+    /we\s+(?:limit\s+how\s+often|restrict\s+certain\s+activity)/i,
+    /temporarily\s+(?:blocked|locked|restricted)/i,
+    /تم\s+حظر\s+الإجراء|نقيد\s+بعض\s+الأنشطة/,
+  ];
   for (const dialog of findDialogs(root)) {
     if (labelKind(dialog.textContent) === Label.TRY_AGAIN_LATER) return dialog;
-    if (qsa(dialog, 'button, [role="button"]').some((b) => labelKind(b.textContent) === Label.TRY_AGAIN_LATER)) return dialog;
+    if (qsa(dialog, 'button, [role="button"]').some((b) => labelKind(visibleButtonText(b)) === Label.TRY_AGAIN_LATER)) return dialog;
     const text = collapse(dialog.textContent);
     if (LABEL_TEXT[Label.TRY_AGAIN_LATER].some((t) => text === t || text.startsWith(`${t} `))) return dialog;
+    if (blockPatterns.some((re) => re.test(text))) return dialog;
   }
   return null;
 }
@@ -412,7 +485,8 @@ export function findVisibleDialog(root, { preferTopmost = true, ariaLabel = null
       if (wanted.test(collapse(d.getAttribute?.('aria-label') ?? ''))) return true;
       return qsa(d, 'h1, h2, h3, [role="heading"]').some((h) => wanted.test(collapse(h.textContent)));
     });
-    if (matched.length) return preferTopmost ? matched[matched.length - 1] : matched[0];
+    if (!matched.length) return null;
+    return preferTopmost ? matched[matched.length - 1] : matched[0];
   }
   return preferTopmost ? dialogs[dialogs.length - 1] : dialogs[0];
 }

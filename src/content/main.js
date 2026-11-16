@@ -42,7 +42,7 @@ import {
   scrapeOpenProfile,
   scrapeProfileFromDom,
 } from './adapters.js';
-import { extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
+import { composerScope, extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
 import {
   executeDm,
   executeFollow,
@@ -983,32 +983,49 @@ export function createHandlers(runtime, deps = {}) {
       return result;
     }),
 
-    [CommandType.EXECUTE_DM]: async (payload, ctx) => {
+    [CommandType.EXECUTE_DM]: async (payload, ctx = {}) => {
       const message = String(payload?.message ?? '');
       if (!message.trim()) return { ok: false, outcome: 'refused', reason: 'the message is empty' };
-      return actOnProfile(payload, async () => {
-        const started = await beginRun(runtime, 'dm', { pacing: payload?.pacing, status: ctx.postStatus });
+      const runDmFlow = async () => {
+        const started = await beginRun(runtime, 'dm', { pacing: payload?.pacing, status: ctx?.postStatus });
         if (!started.ok) return started;
         try {
-          // Only the fact that a composer is open matters here: `executeDm`
-          // finds the node itself, and a node could not cross the bridge anyway.
-          const composerOpen = Boolean(runtime.document?.querySelector('[role="dialog"] [contenteditable="true"]'));
-          if (!composerOpen) {
-            const opened = await openDm(ctxOf(runtime, { status: ctx.postStatus }), { document: runtime.document, signal: runtime.signal });
-            if (!opened.ok) return { ...opened, username: payload?.username ?? null, url: opened.needsNavigation ? directUrl(payload?.username ?? runtime.pageUsername) : null };
+          const dmCtx = ctxOf(runtime, { status: ctx?.postStatus });
+          let openedDirect = Boolean(composerScope(runtime.document, runtime.pathname));
+          if (!openedDirect) {
+            const opened = await openDm(dmCtx, { document: runtime.document, signal: runtime.signal });
+            if (!opened.ok) {
+              return {
+                ...opened,
+                username: payload?.username ?? null,
+                url: opened.needsNavigation ? directUrl(payload?.username ?? runtime.pageUsername) : null,
+              };
+            }
+            openedDirect = true;
           }
-          const result = await executeDm(ctxOf(runtime, { status: ctx.postStatus }), {
+          const result = await executeDm(dmCtx, {
             document: runtime.document,
             message,
             signal: runtime.signal,
-            pathname: runtime.pathname,
+            pathname: runtime.pathname || (openedDirect ? '/direct/' : ''),
             allowExisting: Boolean(payload?.allowExisting),
           });
           return { ...result, username: payload?.username ?? runtime.pageUsername, bytes: new TextEncoder().encode(message).length };
         } finally {
           runtime.endRun();
         }
-      });
+      };
+
+      // If the tab was already navigated to /direct/new/<username> or /direct/t/...
+      // with a DM composer rendered (e.g. after openDm returned needsNavigation),
+      // execute the DM right here instead of bouncing back to /<username>/!
+      const pathLower = String(runtime.pathname ?? '').toLowerCase();
+      const targetKey = nameKey(payload?.username ?? '');
+      const onDirectForTarget = pathLower.startsWith('/direct/t/')
+        || (targetKey && pathLower.startsWith(`/direct/new/${targetKey}`))
+        || (pathLower.startsWith('/direct/') && Boolean(composerScope(runtime.document, runtime.pathname)));
+      if (onDirectForTarget) return runDmFlow();
+      return actOnProfile(payload, runDmFlow);
     },
 
     [CommandType.STOP]: async (payload) => runtime.stop(payload?.reason ?? 'stopped from the dashboard'),
@@ -1354,10 +1371,11 @@ export async function installMessageHandlers(deps = {}) {
     const bootstrap = createContentBootstrap(deps);
     pageBootstrap = bootstrap;
     const started = await bootstrap.start();
-    if (!started.ok) console.warn('[IG Outreach CRM]', started.reason);
+    if (!started.ok) {
+      /* keep instagram.com host console clean; status is exposed via storage bridge */
+    }
     return bootstrap;
   } catch (error) {
-    console.error('[IG Outreach CRM] bootstrap failed:', error);
     pageBootstrap = null;
     return { ok: false, reason: `${error?.name ?? 'Error'}: ${error?.message ?? error}`, start: async () => ({ ok: false }), stop: () => ({ stopped: true }) };
   }

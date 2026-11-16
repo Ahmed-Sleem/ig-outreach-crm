@@ -111,6 +111,15 @@ export function usernameFromUrl(url) {
   if (!match) return null;
   const name = match[1];
   if (NON_USERNAME.has(name.toLowerCase())) return null;
+  // 2026 profile-prefixed post URLs (/<user>/p/<code>/, /<user>/reel/<code>/)
+  // are post pages, not profile pages.
+  try {
+    const segs = new URL(String(url)).pathname.split('/').filter(Boolean);
+    const second = String(segs[1] ?? '').toLowerCase();
+    if (segs.length >= 3 && (second === 'p' || second === 'reel' || second === 'reels' || second === 'tv')) {
+      return null;
+    }
+  } catch { /* non-URL string */ }
   return name;
 }
 
@@ -520,6 +529,7 @@ export function createCommandChannel({
   sleep = defaultSleep,
 } = {}) {
   const bridge = () => bridgeFor(state.workspaceId);
+  const stampedTabs = new Set();
 
   return {
     /** Point everything at one workspace, and tell the tabs which one it is. */
@@ -571,6 +581,7 @@ export function createCommandChannel({
       const stampedRes = typeof tabs.stampTabId === 'function' ? await tabs.stampTabId(tabId) : null;
       await tabs.inject(tabId);
       const targetTabId = stampedRes?.stamped ? Number(tabId) : null;
+      if (targetTabId !== null) stampedTabs.add(targetTabId);
 
       // The loader is asynchronous: the script is injected before the module has
       // finished importing, so the first ping can legitimately find nobody home.
@@ -641,8 +652,12 @@ export function createCommandChannel({
     },
 
     /** Stop whatever the tab is doing. Never times out into silence. */
-    async stop(reason = 'stopped from the dashboard') {
-      const posted = await bridge().postStop(reason);
+    async stop(reason = 'stopped from the dashboard', options = {}) {
+      const tabId = options?.tabId;
+      const targetTabId = (tabId !== null && tabId !== undefined && stampedTabs.has(Number(tabId)))
+        ? Number(tabId)
+        : null;
+      const posted = await bridge().postStop(reason, targetTabId !== null ? { targetTabId } : undefined);
       return {
         ok: Boolean(posted?.ok),
         reason: posted?.ok ? null : String(posted?.reason ?? 'the tab did not answer the stop'),
@@ -975,7 +990,14 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
       // An action block or a challenge is the platform saying stop. The lock is
       // persisted, so reloading the dashboard or restarting the browser does not
       // clear it, and retrying during the lock only extends its patience.
-      const flagged = outcome.stopRun || severity === 'account' || result?.severity === 'account' || severity === 'challenge';
+      // IMPORTANT: an owner-initiated Stop (dashboard or in-page HUD Stop button)
+      // must end the run cleanly WITHOUT tripping the 24-hour circuit breaker!
+      const isPlatformFlag = severity === 'account' || result?.severity === 'account' || severity === 'challenge' || result?.severity === 'challenge';
+      const ownerStopped = !isPlatformFlag && (
+        Boolean(result?.stoppedByOwner)
+        || /^stopped\s+(by|from|while)\b/i.test(String(result?.reason ?? '').trim())
+      );
+      const flagged = isPlatformFlag || (outcome.stopRun && !ownerStopped);
       if (flagged) {
         governorState = tripCircuitBreaker(
           governorState,
@@ -986,7 +1008,7 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
       }
       await updateWorkspace(workspaceId, { governorState });
 
-      return { ok: outcome.ok, outcome, lead: { ...lead, ...outcome.patch }, governorState, flagged };
+      return { ok: outcome.ok, outcome, lead: { ...lead, ...outcome.patch }, governorState, flagged, ownerStopped };
     },
 
     /* --------------------------------------------------------------- settings */

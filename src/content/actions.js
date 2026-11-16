@@ -192,19 +192,39 @@ export async function humanClick(ctx, element, options = {}) {
     clientY: rect ? Math.round(rect.top - rect.height * 2) : 0,
   };
   const dispatch = (type, at, target = element) => {
-    const detail = { bubbles: true, cancelable: true, view: ctx.window ?? undefined, ...at };
+    const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window ?? undefined;
+    const detail = { bubbles: true, cancelable: true, composed: true, view, ...at };
+    if (type === 'focus') {
+      target.focus?.();
+      return;
+    }
+    if (type === 'click' && typeof target.click === 'function') {
+      target.click();
+      return;
+    }
+    const PointerCtor = view?.PointerEvent ?? globalThis.PointerEvent;
+    const MouseCtor = view?.MouseEvent ?? globalThis.MouseEvent;
+    const EventCtor = view?.Event ?? globalThis.Event;
     try {
-      if (type.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
-        target.dispatchEvent(new PointerEvent(type, { ...detail, pointerId: 1, isPrimary: true, pointerType: 'mouse' }));
-      } else if (type === 'focus') {
-        target.focus?.();
-      } else if (typeof MouseEvent !== 'undefined' && (type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'mousemove')) {
-        target.dispatchEvent(new MouseEvent(type, detail));
-      } else {
-        target.dispatchEvent({ type, ...detail });
+      if (type.startsWith('pointer') && typeof PointerCtor === 'function') {
+        target.dispatchEvent(new PointerCtor(type, { ...detail, pointerId: 1, isPrimary: true, pointerType: 'mouse' }));
+        return;
       }
-    } catch {
+      if (typeof MouseCtor === 'function' && (type === 'mousedown' || type === 'mouseup' || type === 'click' || type === 'mousemove' || type === 'mouseover')) {
+        target.dispatchEvent(new MouseCtor(type, { ...detail, button: 0 }));
+        return;
+      }
+      if (typeof EventCtor === 'function') {
+        const ev = new EventCtor(type, { bubbles: true, cancelable: true });
+        try { Object.assign(ev, at); } catch { /* readonly properties */ }
+        target.dispatchEvent(ev);
+        return;
+      }
       target.dispatchEvent({ type, ...detail });
+    } catch {
+      try {
+        target.dispatchEvent({ type, ...detail });
+      } catch { /* minimal shim or strict EventTarget */ }
     }
   };
 
@@ -244,7 +264,16 @@ export async function humanClick(ctx, element, options = {}) {
  * failed follow would queue the same person again tomorrow.
  */
 export function readRelationshipState(document) {
-  const hit = findButtonByLabel(document, [Label.FOLLOWING, Label.REQUESTED, Label.FOLLOW, Label.FOLLOW_BACK]);
+  const kinds = [Label.FOLLOWING, Label.REQUESTED, Label.FOLLOW, Label.FOLLOW_BACK];
+  let hit = null;
+  if (typeof document?.querySelectorAll === 'function') {
+    for (const hdr of [...document.querySelectorAll('header')]) {
+      if (hdr.closest?.('[role="dialog"]')) continue;
+      hit = findButtonByLabel(hdr, kinds);
+      if (hit) break;
+    }
+  }
+  if (!hit) hit = findButtonByLabel(document, kinds);
   if (!hit) return { state: 'unknown', kind: null, reason: 'no relationship button rendered on this page' };
   const state = hit.kind === Label.FOLLOWING
     ? 'following'
@@ -274,13 +303,16 @@ export async function executeFollow(ctx, options = {}) {
   if (before.state === 'requested') return halted(ActionOutcome.SKIPPED, 'a follow request is already pending');
   if (!before.button) return refusal(before.reason ?? 'no Follow button found');
 
-  await humanClick(ctx, before.button, { signal });
+  await humanClick(ctx, before.button, { signal, label: 'Clicking Follow…' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
+  ctx.virtualCursor?.label?.('Verifying Follow…');
   const settled = await waitFor(ctx, () => {
     const now = readRelationshipState(document);
     return now.state === 'following' || now.state === 'requested' ? now : null;
   }, { timeoutMs: settleMs, signal, label: 'follow state' });
 
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
   if (isActionBlocked(document)) {
     return halted(ActionOutcome.STOPPED, 'Instagram blocked the follow ("Try Again Later"); the run must stop', { state: before.state });
   }
@@ -313,19 +345,24 @@ export async function executeUnfollow(ctx, options = {}) {
     return halted(ActionOutcome.SKIPPED, `not following this account (state: ${before.state})`);
   }
 
-  await humanClick(ctx, before.button, { signal });
+  await humanClick(ctx, before.button, { signal, label: 'Opening Following menu…' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
   const dialog = await waitFor(ctx, () => findConfirmDialog(document), { timeoutMs: SETTLE_MS.dialog, signal, label: 'unfollow confirm dialog' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
   if (!dialog.found) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: dialog.reason ?? 'the confirm dialog never appeared' };
   }
-  await humanClick(ctx, dialog.value.confirm, { signal });
+  await humanClick(ctx, dialog.value.confirm, { signal, label: 'Confirming Unfollow…' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
+  ctx.virtualCursor?.label?.('Verifying Unfollow…');
   const settled = await waitFor(ctx, () => {
     const now = readRelationshipState(document);
     return now.state === 'none' || now.state === 'follows_me' ? now : null;
   }, { timeoutMs: settleMs, signal, label: 'unfollow state' });
 
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
   if (isActionBlocked(document)) {
     return halted(ActionOutcome.STOPPED, 'Instagram blocked the unfollow; the run must stop');
   }
@@ -417,16 +454,19 @@ export async function composeMessage(ctx, options = {}) {
   const target = editor ?? found.editor;
   if (!target) return refusal(found.reason);
 
+  ctx.virtualCursor?.label?.('Typing message…');
   caretToEnd(ctx, target);
-  document.execCommand?.('selectAll');
-  document.execCommand?.('delete');
   if (readComposerText(target)) {
-    return refusal('the composer still holds text after clearing it; refusing to type on top of someone else\'s draft');
+    document.execCommand?.('selectAll');
+    document.execCommand?.('delete');
+    if (readComposerText(target)) {
+      return refusal('the composer still holds text after clearing it; refusing to type on top of someone else\'s draft');
+    }
   }
 
   const lines = text.split('\n');
   for (let index = 0; index < lines.length; index += 1) {
-    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing');
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
     if (index > 0) document.execCommand?.('insertLineBreak');
     document.execCommand?.('insertText', false, lines[index]);
     await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
@@ -508,8 +548,10 @@ export async function openDm(ctx, options = {}) {
   if (!hit) {
     return refusal('this profile renders no Message button', { needsNavigation: true });
   }
-  await humanClick(ctx, hit.button, { signal });
+  await humanClick(ctx, hit.button, { signal, label: 'Clicking Message…' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
+  ctx.virtualCursor?.label?.('Opening message thread…');
   const opened = await waitFor(ctx, () => composerScope(document, '/direct/'), { timeoutMs, signal, label: 'DM composer' });
   if (!opened.found) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: opened.reason, needsNavigation: true };
@@ -554,7 +596,10 @@ export async function executeDm(ctx, options = {}) {
   if (!send) {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer holds the message but no Send button is rendered' };
   }
-  await humanClick(ctx, send.button, { signal });
+  await humanClick(ctx, send.button, { signal, label: 'Clicking Send…' });
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+
+  ctx.virtualCursor?.label?.('Verifying delivery…');
 
   const cleared = await waitFor(ctx, () => (readComposerText(editor) === '' ? editor : null), { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
   if (!cleared.found) {

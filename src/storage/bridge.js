@@ -199,6 +199,7 @@ export function createBridge(options = {}) {
   const commandKey = keyFor(workspaceId, 'command');
   const resultKey = keyFor(workspaceId, 'result');
   const statusKey = keyFor(workspaceId, 'status');
+  const replyKeyFor = (commandId) => `${resultKey}:${commandId}`;
 
   /** Publish a command and wait for the matching result. */
   async function postCommand(type, payload = {}, { timeoutMs = commandTimeoutMs, signal = null, targetTabId = null } = {}) {
@@ -216,13 +217,20 @@ export function createBridge(options = {}) {
     };
     await storage.set(commandKey, command);
 
+    const replyKey = replyKeyFor(commandId);
     const deadline = now() + Math.max(500, timeoutMs);
     while (now() < deadline) {
       if (signal?.aborted) return { ok: false, reason: 'aborted while waiting for a reply', result: null, commandId };
       if (storage.isDead?.()) return { ok: false, reason: 'extension context was reloaded; refresh the page and try again', result: null, commandId, severity: 'tab' };
-      const result = await storage.get(resultKey);
-      if (result && result.commandId === commandId) {
-        await storage.remove(resultKey);
+      const dedicated = await storage.get(replyKey);
+      const shared = dedicated ? null : await storage.get(resultKey);
+      const result = (dedicated && dedicated.commandId === commandId)
+        ? dedicated
+        : (shared && shared.commandId === commandId ? shared : null);
+      if (result) {
+        if (dedicated) await storage.remove(replyKey);
+        const latestShared = await storage.get(resultKey);
+        if (latestShared && latestShared.commandId === commandId) await storage.remove(resultKey);
         return {
           ok: Boolean(result.ok),
           reason: result.reason ?? null,
@@ -266,6 +274,38 @@ export function createBridge(options = {}) {
    */
   async function runCommandLoop({ handlers, isBusy = () => false, signal = null, onCommand = null, idleMs = pollMs, getTabId = null } = {}) {
     let handled = 0;
+    let runningLong = false;
+
+    const runOne = async (command, handler) => {
+      const commandId = command.commandId;
+      try {
+        const value = await handler(command.payload ?? {}, { command, postStatus, signal });
+        // A handler answers either with a value or with a refusal of its own
+        // (`{ ok: false, reason, severity }`). A refusal must not travel inside a
+        // successful envelope, or the dashboard reports "the tab refused" as
+        // "the tab did it" — and the refusal's own `value` is kept, because it
+        // carries what the dashboard needs next (a url to navigate to, the counts
+        // collected so far, the phase that failed).
+        if (value && typeof value === 'object' && value.ok === false) {
+          await postResult(commandId, {
+            ok: false,
+            reason: value.reason ?? 'the tab refused the command',
+            value: value.value ?? value,
+            severity: value.severity ?? null,
+          });
+        } else {
+          await postResult(commandId, { ok: true, reason: null, value: value ?? null });
+        }
+      } catch (error) {
+        await postResult(commandId, {
+          ok: false,
+          reason: error?.userFacing ? error.message : `${error?.name ?? 'Error'}: ${error?.message ?? 'unknown failure'}`,
+          value: null,
+          severity: error?.severity ?? null,
+        });
+      }
+    };
+
     while (!signal?.aborted) {
       if (storage.isDead?.()) return { handled, invalidated: true };
       let command = null;
@@ -314,7 +354,8 @@ export function createBridge(options = {}) {
         await postResult(commandId, { ok: false, reason: `this tab cannot handle ${command.type}`, value: null });
         continue;
       }
-      if (isBusy() && !ALWAYS_ACCEPTED.includes(command.type)) {
+      const isControl = ALWAYS_ACCEPTED.includes(command.type);
+      if ((isBusy() || runningLong) && !isControl) {
         // `busy` travels inside the value: postResult persists a fixed row shape,
         // so a flag hung off the side would be dropped and the dashboard would
         // read "this tab refused" as "this tab is broken" instead of "try again
@@ -322,39 +363,24 @@ export function createBridge(options = {}) {
         await postResult(commandId, { ok: false, reason: 'a run is already in progress in this tab', value: { busy: true } });
         continue;
       }
-      try {
-        const value = await handler(command.payload ?? {}, { command, postStatus, signal });
-        // A handler answers either with a value or with a refusal of its own
-        // (`{ ok: false, reason, severity }`). A refusal must not travel inside a
-        // successful envelope, or the dashboard reports "the tab refused" as
-        // "the tab did it" — and the refusal's own `value` is kept, because it
-        // carries what the dashboard needs next (a url to navigate to, the counts
-        // collected so far, the phase that failed).
-        if (value && typeof value === 'object' && value.ok === false) {
-          await postResult(commandId, {
-            ok: false,
-            reason: value.reason ?? 'the tab refused the command',
-            value: value.value ?? value,
-            severity: value.severity ?? null,
-          });
-        } else {
-          await postResult(commandId, { ok: true, reason: null, value: value ?? null });
-        }
-      } catch (error) {
-        await postResult(commandId, {
-          ok: false,
-          reason: error?.userFacing ? error.message : `${error?.name ?? 'Error'}: ${error?.message ?? 'unknown failure'}`,
-          value: null,
-          severity: error?.severity ?? null,
-        });
+
+      if (isControl) {
+        await runOne(command, handler);
+      } else {
+        // Run long-lived tasks (COLLECT_LEADS, EXECUTE_*, etc.) concurrently so
+        // the loop stays responsive to STOP / PING / GET_CONTEXT mid-run!
+        runningLong = true;
+        void runOne(command, handler).finally(() => { runningLong = false; });
       }
     }
     return { handled };
   }
 
-  /** Answer a command. */
+  /** Answer a command (writes per-command key + shared wake-up key). */
   async function postResult(commandId, { ok, reason = null, value = null, severity = null }) {
-    await storage.set(resultKey, { commandId, ok: Boolean(ok), reason, value, severity, at: now() });
+    const row = { commandId, ok: Boolean(ok), reason, value, severity, at: now() };
+    await storage.set(replyKeyFor(commandId), row);
+    await storage.set(resultKey, row);
   }
 
   /** Publish progress. The dashboard polls this; nothing is queued. */
@@ -379,8 +405,8 @@ export function createBridge(options = {}) {
   }
 
   /** Ask the tab to stop whatever it is doing. Never times out into silence. */
-  async function postStop(reason = 'stopped from the dashboard') {
-    return postCommand(CommandType.STOP, { reason }, { timeoutMs: Math.max(2000, pollMs * 3) });
+  async function postStop(reason = 'stopped from the dashboard', { targetTabId = null } = {}) {
+    return postCommand(CommandType.STOP, { reason }, { timeoutMs: Math.max(2000, pollMs * 3), targetTabId });
   }
 
   async function clear() {

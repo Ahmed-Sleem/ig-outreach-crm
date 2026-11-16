@@ -772,55 +772,93 @@ export async function collectPostLikersDom(ctx, {
   try {
     checkBlocked(document);
     cursor.show('Reading post…');
+    cursor.progress?.(0, limit);
     onProgress?.({ phase, note: 'Opening post likes…' });
     await humanArriveOnPage(ctx, { signal, label: 'Viewing post…' });
-    if (signal?.aborted) return { ok: false, rows: [], reason: 'Stopped by owner.' };
+    if (signal?.aborted) return { ok: false, rows: [], stoppedByOwner: true, reason: 'Stopped by owner.' };
 
-    const triggerWait = await waitFor(
-      ctx,
-      () => findPostLikersTrigger(document),
-      { timeoutMs: ctx.domTimeoutMs ?? 8000, intervalMs: 250, signal, label: 'the likes link on this post' },
-    );
+    const likesLabel = /^(likes|الإعجابات|تسجيلات الإعجاب)$/i;
+    let dialog = findVisibleDialog(document, { ariaLabel: likesLabel });
+    const openedByUs = !dialog;
 
-    if (!triggerWait.found) {
-      return {
-        ok: false,
-        rows: [],
-        reason: 'Could not find a clickable likes button on this post (likes may be hidden or this post has none yet).',
-      };
+    if (!dialog) {
+      // Remember any existing post modal so dialogWait NEVER mistakes the post
+      // modal itself (dialog #0) for the newly opened Likes modal (dialog #1)!
+      const existingPostDialog = findVisibleDialog(document);
+      const dialogCountBefore = findDialogs(document).length;
+
+      const triggerWait = await waitFor(
+        ctx,
+        () => findPostLikersTrigger(existingPostDialog ?? document),
+        { timeoutMs: ctx.domTimeoutMs ?? 8000, intervalMs: 250, signal, label: 'the likes link on this post' },
+      );
+
+      if (!triggerWait.found) {
+        return {
+          ok: false,
+          rows: [],
+          reason: 'Could not find a clickable likes button on this post (likes may be hidden or this post has none yet).',
+        };
+      }
+
+      cursor.label?.('Clicking likes…');
+      await humanClickTarget(ctx, triggerWait.value, { signal, label: 'Clicking likes…' });
+      if (signal?.aborted) return { ok: false, rows: [], stoppedByOwner: true, reason: 'Stopped by owner.' };
+
+      cursor.label?.('Waiting for Likes list…');
+      const dialogWait = await waitFor(
+        ctx,
+        () => {
+          const labeled = findVisibleDialog(document, { ariaLabel: likesLabel });
+          if (labeled && labeled !== existingPostDialog) {
+            const { users } = extractDialogUsers(labeled, { respectSuggestedBoundary: false });
+            if (users.length > 0 || findScrollableList(labeled) || findDialogLoadingSpinner(labeled)) return labeled;
+          }
+          const dialogs = findDialogs(document);
+          if (dialogs.length > dialogCountBefore) {
+            const top = dialogs[dialogs.length - 1];
+            if (top !== existingPostDialog) {
+              const { users } = extractDialogUsers(top, { respectSuggestedBoundary: false });
+              if (users.length > 0 || findScrollableList(top) || findDialogLoadingSpinner(top)) return top;
+            }
+          }
+          if (!existingPostDialog) {
+            const top = findVisibleDialog(document);
+            if (top) {
+              const { users } = extractDialogUsers(top, { respectSuggestedBoundary: false });
+              if (users.length > 0 || findScrollableList(top) || findDialogLoadingSpinner(top)) return top;
+            }
+          }
+          return null;
+        },
+        { timeoutMs: ctx.domTimeoutMs ?? 10000, intervalMs: 250, signal, label: 'the Likes dialog' },
+      );
+
+      if (!dialogWait.found) {
+        return { ok: false, rows: [], reason: 'Instagram did not open the Likes list for this post.' };
+      }
+      dialog = dialogWait.value;
+    } else {
+      cursor.label?.('Reading open Likes list…');
+      onProgress?.({ phase, note: 'Reading open Likes list…' });
     }
 
-    await humanClickTarget(ctx, triggerWait.value, { signal, label: 'Clicking likes…' });
-
-    const dialogWait = await waitFor(
-      ctx,
-      () => {
-        const dlg = findVisibleDialog(document, { ariaLabel: /^(likes|الإعجابات|تسجيلات الإعجاب)$/i }) ?? findVisibleDialog(document);
-        if (!dlg) return null;
-        const { users } = extractDialogUsers(dlg, { respectSuggestedBoundary: false });
-        if (users.length > 0 || findScrollableList(dlg) || findDialogLoadingSpinner(dlg)) return dlg;
-        return null;
-      },
-      { timeoutMs: ctx.domTimeoutMs ?? 8000, intervalMs: 250, signal, label: 'the Likes dialog' },
-    );
-
-    if (!dialogWait.found) {
-      return { ok: false, rows: [], reason: 'Instagram did not open the Likes list for this post.' };
-    }
-
-    const scraped = await scrollDialogForUsers(ctx, dialogWait.value, {
+    const scraped = await scrollDialogForUsers(ctx, dialog, {
       limit,
       respectSuggestedBoundary: false,
       refId: cleanCode || null,
       phase,
       noun: 'likers',
+      ariaLabel: likesLabel,
       onProgress,
       signal,
     });
 
-    if (!signal?.aborted) {
-      await closeDialogHuman(ctx, dialogWait.value, { signal });
+    if (openedByUs && !signal?.aborted) {
+      await closeDialogHuman(ctx, dialog, { signal });
     }
+
+    if (signal?.aborted) return { ok: false, rows: scraped.rows, stoppedByOwner: true, reason: 'Stopped by owner.' };
 
     return {
       ok: scraped.rows.length > 0,
@@ -924,6 +962,8 @@ export async function collectPostCommentsDom(ctx, {
     };
 
     absorbComments();
+    cursor.progress?.(usersByKey.size, limit);
+    cursor.label?.(`Reading comments · ${usersByKey.size}/${limit}`);
     onProgress?.({ phase, note: `Read ${usersByKey.size}/${limit} commenters…`, count: usersByKey.size, limit, step: 0 });
 
     while (usersByKey.size < limit && steps < 60) {
@@ -936,6 +976,7 @@ export async function collectPostCommentsDom(ctx, {
       // visible without returning new unique commenters.
       const loadMore = loadMoreNoGain < 2 ? findLoadMoreCommentsButton(document) : null;
       if (loadMore) {
+        cursor.label?.(`Clicking "Load more comments" (${usersByKey.size}/${limit})…`);
         onProgress?.({ phase, note: `Loading more comments (${usersByKey.size}/${limit})…`, count: usersByKey.size, limit, step: steps });
         await humanClickTarget(ctx, loadMore, { signal, label: 'Loading more comments…' });
         await wait(humanDelayMs(850, 1750, random), { signal });
@@ -950,6 +991,8 @@ export async function collectPostCommentsDom(ctx, {
 
       if (signal?.aborted) break;
       let added = absorbComments();
+      cursor.progress?.(usersByKey.size, limit);
+      cursor.label?.(`Reading comments · ${usersByKey.size}/${limit}`);
       onProgress?.({ phase, note: `Read ${usersByKey.size}/${limit} commenters…`, count: usersByKey.size, limit, step: steps });
 
       if (added === 0 && usersByKey.size === before) {
@@ -1071,6 +1114,8 @@ export async function collectHashtagDom(ctx, {
               break;
             }
           }
+          cursor.progress?.(collected.size, limit);
+          cursor.label?.(`Reading hashtag authors · ${collected.size}/${limit}`);
           onProgress?.({ phase, note: `Collected ${collected.size}/${limit} authors…`, count: collected.size, limit, step: i + 1 });
 
           if (collected.size >= limit || i >= postLinks.length - 1) break;

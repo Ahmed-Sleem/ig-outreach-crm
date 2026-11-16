@@ -294,9 +294,13 @@ export function createRunController(deps = {}) {
         settleMs: 2500,
       });
 
-      if (state.stopRequested) {
-        await api.finishRun(run.runId, { status: 'stopped', reason: state.stopReason ?? 'stopped by the owner' });
-        return finishCollect({ ok: false, reason: state.stopReason ?? 'stopped', phase: RunPhase.STOPPED, runId: run.runId });
+      const ownerStoppedCollect = state.stopRequested
+        || Boolean(answer?.value?.stoppedByOwner)
+        || /^stopped\s+(by|from)\b/i.test(String(answer?.reason ?? '').trim());
+      if (ownerStoppedCollect) {
+        const stopReason = state.stopReason ?? answer?.reason ?? 'stopped by the owner';
+        await api.finishRun(run.runId, { status: 'stopped', reason: stopReason });
+        return finishCollect({ ok: false, stopped: true, reason: stopReason, phase: RunPhase.STOPPED, runId: run.runId });
       }
       if (!answer.ok) {
         state.lastError = answer.reason;
@@ -401,7 +405,7 @@ export function createRunController(deps = {}) {
     phase(RunPhase.STOPPING, { reason });
     // Tell the tab as well as the loop: a collection in flight is pacing reads
     // inside the page, and only the page can abort those.
-    void api.stop(reason);
+    void api.stop(reason, state.tabId != null ? { tabId: state.tabId } : undefined);
     return { ok: true, reason };
   }
 
@@ -545,7 +549,7 @@ export function resultFromAnswer(answer) {
  */
 async function endOutreach(ctx, { ok, phase: nextPhase, reason = null, plan = null, session = null, gate = null, severity = null, stopTab = false }) {
   const { api, state, emit, phase } = ctx;
-  if (stopTab) { try { await api.stop(reason ?? 'the run ended'); } catch { /* the tab is already gone */ } }
+  if (stopTab) { try { await api.stop(reason ?? 'the run ended', state.tabId != null ? { tabId: state.tabId } : undefined); } catch { /* the tab is already gone */ } }
   let ended = null;
   if (session?.sessionId) {
     try {
@@ -881,6 +885,9 @@ async function runOutreach(ctx) {
     });
     await api.bumpSession(session.sessionId, { counts: { ...state.counts }, lastActionAt: now() });
 
+    if (applied?.ownerStopped || (state.stopRequested && !applied?.flagged)) {
+      return endOutreach(ctx, { ok: true, phase: RunPhase.STOPPED, reason: state.stopReason ?? result.reason ?? 'stopped by the owner', plan, session });
+    }
     if (applied?.flagged || result.stopRun || result.outcome === 'stopped') {
       state.lastError = result.reason ?? 'Instagram refused the action';
       return endOutreach(ctx, {

@@ -71,14 +71,17 @@ export function pageContextFrom(pathname, href = '') {
   const path = String(pathname ?? '');
   const segments = path.split('/').filter(Boolean);
   const first = segments[0] ?? '';
+  const second = segments[1] ?? '';
   const username = usernameFromPath(path);
-  const postCode = POST_SEGMENTS.includes(first.toLowerCase()) ? segments[1] ?? null : null;
+  const postCode = POST_SEGMENTS.includes(first.toLowerCase())
+    ? (segments[1] ?? null)
+    : (POST_SEGMENTS.includes(second.toLowerCase()) ? (segments[2] ?? null) : null);
   const lower = first.toLowerCase();
   const isDirect = lower === 'direct';
   // Hashtags live under /explore/tags/<tag>/, so "explore" alone is not enough.
   const isTag = lower === 'explore' && String(segments[1] ?? '').toLowerCase() === 'tags';
   const isExplore = lower === 'explore' && !isTag;
-  const kind = username ? 'profile' : postCode ? 'post' : isDirect ? 'direct' : isTag ? 'tag' : isExplore ? 'explore' : 'other';
+  const kind = postCode ? 'post' : username ? 'profile' : isDirect ? 'direct' : isTag ? 'tag' : isExplore ? 'explore' : 'other';
   return {
     kind,
     username,
