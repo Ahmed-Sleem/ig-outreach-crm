@@ -41,17 +41,17 @@ export const HOST_ID = 'ui-dock-root';
 export const LAUNCHER_TICK_MS = 1000;
 
 const PALETTE = {
-  ink: '#111827',
-  surface: '#ffffff',
-  border: '#e7e9ee',
-  accent: '#2563eb',
-  accentText: '#ffffff',
-  muted: '#4b5563',
-  track: '#f0f2f5',
-  warn: '#b91c1c',
-  ok: '#15803d',
+  ink: '#3a2a22',
+  surface: '#f8eedb',
+  border: '#c2aa86',
+  accent: '#e5472b',
+  accentText: '#f3e6cf',
+  muted: '#634d40',
+  track: '#ece0c8',
+  warn: '#b5241b',
+  ok: '#1f6f43',
   managed: '#b45309',
-  managedSurface: '#fff6e5',
+  managedSurface: '#f3e6cf',
 };
 
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';

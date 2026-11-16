@@ -4,65 +4,65 @@
  * Every colour, space, radius, font and shadow in this extension is defined here
  * as a custom property. No other stylesheet may declare a raw hex value, and
  * verify.sh fails the build if one appears. This is not tidiness for its own sake:
- * a second place to define "primary blue" is how a UI ends up with four blues.
+ * a second place to define a brand colour is how a UI ends up inconsistent.
  *
- * Light-first: bright, calm and obvious, because the dashboard is read in short
- * glances next to an Instagram tab. There is no theme toggle; :root is the theme.
- *
- * Adapted from the theme file of ig-analysis (MIT, Copyright (c) 2026 Ahmed
- * Sleem); see THIRD_PARTY_NOTICES.md. The lifecycle, warmth and layout tokens at
- * the end are this project's own.
+ * Warm sketchbook palette matching the product landing page: cream grid paper
+ * (#f3e6cf), card cream (#f8eedb), vermilion red (#e5472b), espresso ink
+ * (#3a2a22), and charcoal framing (#1a1a1c) — calm, high-contrast, and legible
+ * next to an Instagram tab. There is no theme toggle; :root is the theme.
  */
 
 :root {
-  /* ---- Palette ---- */
-  --c-bg:            #ffffff;
-  --c-bg-raised:     #ffffff;
-  --c-bg-inset:      #f4f5f7;
-  --c-surface:       #f8f9fb;
-  --c-surface-hover: #f0f2f5;
-  --c-border:        #e7e9ee;
-  --c-border-strong: #d5d9e0;
+  /* ---- Palette (Landing Page Sketchbook System) ---- */
+  --c-bg:            #f3e6cf;
+  --c-bg-raised:     #f8eedb;
+  --c-bg-inset:      #ece0c8;
+  --c-surface:       #fbf4e7;
+  --c-surface-hover: #efe1c7;
+  --c-border:        #d9c7aa;
+  --c-border-strong: #c2aa86;
+  --c-grid-line:     rgba(169, 152, 128, 0.28);
+  --c-ink-dark:      #1a1a1c;
 
-  --c-text:          #111827;
-  --c-text-dim:      #4b5563;
-  --c-text-faint:    #6b7280;   /* >= 4.5:1 on white */
-  --c-text-invert:   #ffffff;
+  --c-text:          #3a2a22;
+  --c-text-dim:      #634d40;
+  --c-text-faint:    #7a6556;   /* >= 4.7:1 on cream surfaces */
+  --c-text-invert:   #fffaf0;
 
-  --c-primary:       #2563eb;
-  --c-primary-hover: #1d4ed8;
-  --c-primary-dim:   #dbe7ff;
-  --c-primary-fade:  rgba(37, 99, 235, 0.08);
+  --c-primary:       #e5472b;
+  --c-primary-ink:   #c53318;   /* >= 4.7:1 small text on cream */
+  --c-primary-hover: #cc3920;
+  --c-primary-dim:   #f8d3c9;
+  --c-primary-fade:  rgba(229, 71, 43, 0.11);
 
-  --c-success:       #15803d;
-  --c-success-fade:  rgba(21, 128, 61, 0.10);
-  --c-warning:       #b45309;
-  --c-warning-fade:  rgba(180, 83, 9, 0.10);
-  --c-danger:        #b91c1c;
-  --c-danger-fade:   rgba(185, 28, 28, 0.08);
-  --c-info:          #0369a1;
-  --c-info-fade:     rgba(3, 105, 161, 0.08);
+  --c-success:       #1f6f43;
+  --c-success-fade:  rgba(31, 111, 67, 0.12);
+  --c-warning:       #a6520a;
+  --c-warning-fade:  rgba(166, 82, 10, 0.12);
+  --c-danger:        #b5241b;
+  --c-danger-fade:   rgba(181, 36, 27, 0.11);
+  --c-info:          #225f8a;
+  --c-info-fade:     rgba(34, 95, 138, 0.11);
 
   /* Data-visualisation ramp. Ordered for categorical use (chart fills). */
-  --c-viz-1: #2563eb;
-  --c-viz-2: #15803d;
-  --c-viz-3: #b45309;
-  --c-viz-4: #7e22ce;
-  --c-viz-5: #be185d;
-  --c-viz-6: #0369a1;
+  --c-viz-1: #e5472b;
+  --c-viz-2: #1f6f43;
+  --c-viz-3: #a6520a;
+  --c-viz-4: #8c3525;
+  --c-viz-5: #b5241b;
+  --c-viz-6: #225f8a;
 
-  /* Heatmap ramp: low -> high, tuned to read on a white card. */
-  --c-heat-0: #eef2f8;
-  --c-heat-1: #d3e3f7;
-  --c-heat-2: #a8cbef;
-  --c-heat-3: #6faede;
-  --c-heat-4: #3d8bc9;
-  --c-heat-5: #1d6aa8;
-  /* Insufficient-sample cells get a distinct treatment, never a colour on the
-     ramp — a thin cell must never look like a cold cell. */
-  --c-heat-na: repeating-linear-gradient(45deg, #eef2f8, #eef2f8 3px, #e2e8f2 3px, #e2e8f2 6px);
+  /* Heatmap ramp: low -> high, tuned to read on cream paper. */
+  --c-heat-0: #f6ead6;
+  --c-heat-1: #f5d2c4;
+  --c-heat-2: #f1b09b;
+  --c-heat-3: #ec8a6d;
+  --c-heat-4: #e76546;
+  --c-heat-5: #e5472b;
+  --c-heat-na: repeating-linear-gradient(45deg, #f3e6cf, #f3e6cf 3px, #e6d6bc 3px, #e6d6bc 6px);
 
   /* ---- Type ---- */
+  --font-serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Times New Roman", serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Noto Sans", "Noto Sans Arabic", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
@@ -99,13 +99,17 @@
   --r-md:   10px;
   --r-lg:   14px;
   --r-xl:   18px;
+  --r-pill: 999px;
   --r-full: 999px;
 
-  --c-backdrop: rgba(17, 24, 39, 0.35);
+  --c-backdrop: rgba(26, 26, 28, 0.45);
 
   --shadow-sm: none;
-  --shadow-md: 0 4px 16px rgba(17, 24, 39, 0.08);
-  --shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.12);
+  --shadow-sketch-xs: 1px 1px 0 #3a2a22;
+  --shadow-sketch-sm: 2px 2px 0 #3a2a22;
+  --shadow-sketch:    3px 3px 0 #3a2a22;
+  --shadow-md: 0 4px 16px rgba(58, 42, 34, 0.10);
+  --shadow-lg: 0 12px 32px rgba(26, 26, 28, 0.18);
 
   /* ---- Motion ---- */
   --t-fast: 120ms ease;
@@ -114,12 +118,11 @@
   /* ---- Layout ---- */
   --sidebar-w: 232px;
   --content-max: 880px;
-  --header-h: 56px;
+  --header-h: 58px;
+
   /* ---- CRM lifecycle states -------------------------------------------------
    * One token per state the lead table can show, bound to the palette above so a
-   * badge is dark text on a soft tint of the same hue and stays readable on white.
-   * A state with no token is a state the UI cannot render honestly, which is why
-   * every value of RelState, DmState and the warmth tiers appears here. */
+   * badge is dark text on a soft tint of the same hue and stays readable on cream. */
   --st-none:            var(--c-text-faint);
   --st-none-fade:       transparent;
   --st-queued:          var(--c-info);
@@ -130,33 +133,31 @@
   --st-following-fade:  var(--c-primary-fade);
   --st-mutual:          var(--c-success);
   --st-mutual-fade:     var(--c-success-fade);
-  --st-followed-by:     #7e22ce;
-  --st-followed-by-fade: rgba(126, 34, 206, 0.10);
+  --st-followed-by:     #7a3380;
+  --st-followed-by-fade: rgba(122, 51, 128, 0.11);
   --st-withdrawn:       var(--c-text-dim);
   --st-withdrawn-fade:  transparent;
   --st-unfollowed:      var(--c-danger);
   --st-unfollowed-fade: var(--c-danger-fade);
 
-  /* DM axis. Sent-as-request is deliberately warmer than sent-as-primary: it is
-     the state that is one message away from being restricted. */
+  /* DM axis */
   --dm-none:            var(--c-text-faint);
   --dm-waiting:         var(--c-info);
   --dm-queued:          var(--c-warning);
   --dm-sent:            var(--c-primary);
-  --dm-sent-request:    #be185d;
+  --dm-sent-request:    #a8244a;
   --dm-replied:         var(--c-success);
   --dm-skipped:         var(--c-text-dim);
   --dm-unavailable:     var(--c-danger);
   --dm-failed:          var(--c-danger);
 
   /* Warmth tiers from core/scoring.js. */
-  --tier-hot:           var(--c-danger);
+  --tier-hot:           var(--c-primary);
   --tier-warm:          var(--c-warning);
   --tier-lukewarm:      var(--c-info);
   --tier-cold:          var(--c-text-faint);
 
-  /* Governor status: green means budget left, amber means near a ceiling, red
-     means a ceiling or a circuit breaker has stopped the run. */
+  /* Governor status */
   --gov-clear:          var(--c-success);
   --gov-near:           var(--c-warning);
   --gov-blocked:        var(--c-danger);
@@ -167,7 +168,6 @@
   --studio-w:     520px;
   --rail-w:       200px;
   --pill-w:       232px;
-  /* The lead table caps its own height in CSS (not a number hard-coded in JS). */
   --table-max-h:  min(70vh, 640px);
 }
 

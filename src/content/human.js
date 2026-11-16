@@ -246,9 +246,9 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       width: '0px',
       height: '0px',
       borderRadius: '8px',
-      border: '2px solid #2563eb',
-      background: 'rgba(37, 99, 235, 0.12)',
-      boxShadow: '0 0 0 3px rgba(37, 99, 235, 0.16)',
+      border: '2px solid #e5472b',
+      background: 'rgba(229, 71, 43, 0.12)',
+      boxShadow: '0 0 0 3px rgba(229, 71, 43, 0.18)',
       pointerEvents: 'none',
       opacity: '0',
       transition: 'opacity 140ms ease, transform 120ms ease',
@@ -265,7 +265,7 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       transform: `translate3d(${x}px, ${y}px, 0)`,
       transition: 'transform 16ms linear',
       willChange: 'transform',
-      filter: 'drop-shadow(0 2px 4px rgba(17, 24, 39, 0.35))',
+      filter: 'drop-shadow(0 2px 4px rgba(58, 42, 34, 0.38))',
     });
 
     if (typeof document.createElementNS === 'function') {
@@ -275,8 +275,8 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       svg.setAttribute('height', '22');
       const arrow = document.createElementNS(SVG_NS, 'path');
       arrow.setAttribute('d', 'M4 3l14 9-6.2 1.4L9 20 4 3z');
-      arrow.setAttribute('fill', '#2563eb');
-      arrow.setAttribute('stroke', '#ffffff');
+      arrow.setAttribute('fill', '#e5472b');
+      arrow.setAttribute('stroke', '#f3e6cf');
       arrow.setAttribute('stroke-width', '1.8');
       arrow.setAttribute('stroke-linejoin', 'round');
       svg.append(arrow);
@@ -293,8 +293,8 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       marginLeft: '-14px',
       marginTop: '-14px',
       borderRadius: '999px',
-      border: '2px solid #2563eb',
-      background: 'rgba(37, 99, 235, 0.16)',
+      border: '2px solid #e5472b',
+      background: 'rgba(229, 71, 43, 0.16)',
       pointerEvents: 'none',
       opacity: '0',
       transform: `translate3d(${x}px, ${y}px, 0) scale(0.4)`,
@@ -308,8 +308,8 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       top: '0px',
       padding: '3px 8px',
       borderRadius: '999px',
-      background: 'rgba(17, 24, 39, 0.88)',
-      color: '#ffffff',
+      background: 'rgba(26, 26, 28, 0.92)',
+      color: '#f3e6cf',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       fontSize: '11px',
       fontWeight: '600',
@@ -333,13 +333,13 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       gap: '10px',
       padding: '8px 14px',
       borderRadius: '999px',
-      background: 'rgba(17, 24, 39, 0.92)',
-      color: '#ffffff',
+      background: 'rgba(26, 26, 28, 0.94)',
+      color: '#f3e6cf',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       fontSize: '12.5px',
       fontWeight: '600',
-      boxShadow: '0 8px 24px rgba(15, 23, 42, 0.28)',
-      border: '1px solid rgba(255, 255, 255, 0.14)',
+      boxShadow: '0 8px 24px rgba(26, 26, 28, 0.34)',
+      border: '2px solid #e5472b',
       pointerEvents: 'auto',
       maxWidth: '90vw',
     });
@@ -349,8 +349,8 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       width: '9px',
       height: '9px',
       borderRadius: '999px',
-      background: '#3b82f6',
-      boxShadow: '0 0 0 3px rgba(59, 130, 246, 0.35)',
+      background: '#e5472b',
+      boxShadow: '0 0 0 3px rgba(229, 71, 43, 0.35)',
       flexShrink: '0',
     });
 
@@ -366,7 +366,7 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
     hudCountEl = document.createElement('span');
     Object.assign(hudCountEl.style, {
       fontVariantNumeric: 'tabular-nums',
-      color: '#93c5fd',
+      color: '#f8d3c9',
       fontSize: '12px',
       display: 'none',
     });
@@ -376,7 +376,7 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       width: '72px',
       height: '5px',
       borderRadius: '999px',
-      background: 'rgba(255, 255, 255, 0.18)',
+      background: 'rgba(243, 230, 207, 0.2)',
       overflow: 'hidden',
       display: 'none',
       flexShrink: '0',
@@ -386,7 +386,7 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
       width: '0%',
       height: '100%',
       borderRadius: '999px',
-      background: '#3b82f6',
+      background: '#e5472b',
       transition: 'width 180ms ease',
     });
     hudBarTrackEl.append(hudBarFillEl);
@@ -401,8 +401,8 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
         border: 'none',
         borderRadius: '999px',
         padding: '4px 10px',
-        background: '#ef4444',
-        color: '#ffffff',
+        background: '#e5472b',
+        color: '#f3e6cf',
         fontFamily: 'inherit',
         fontSize: '11.5px',
         fontWeight: '700',
@@ -470,7 +470,7 @@ export function createVirtualCursor(document, { onStop = null } = {}) {
         hudBarFillEl.style.width = `${pct}%`;
       }
       if (hudDotEl) {
-        hudDotEl.style.background = c > 0 ? '#22c55e' : '#3b82f6';
+        hudDotEl.style.background = c > 0 ? '#22c55e' : '#e5472b';
       }
     },
     highlight(element) {

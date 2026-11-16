@@ -46,11 +46,11 @@ const MARK = {
   dotRadius: 0.075,
 };
 
-/** Palette. Same hues as the dashboard design tokens. */
-const GRADIENT_TOP_LEFT = [31, 58, 102]; // --c-primary-dim
-const GRADIENT_BOTTOM_RIGHT = [79, 140, 255]; // --c-primary
-const MARK_COLOR = [255, 255, 255];
-const DOT_COLOR = [53, 211, 154]; // --c-success
+/** Palette. Matches the sketchbook landing page & dashboard design tokens. */
+const GRADIENT_TOP_LEFT = [196, 52, 29]; // deep vermilion
+const GRADIENT_BOTTOM_RIGHT = [229, 71, 43]; // --c-primary (#e5472b)
+const MARK_COLOR = [243, 230, 207]; // --c-bg cream (#f3e6cf)
+const DOT_COLOR = [255, 212, 130]; // warm highlight lead dot
 
 function lerp(a, b, t) {
   return a + (b - a) * t;

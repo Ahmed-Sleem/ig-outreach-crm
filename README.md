@@ -45,9 +45,9 @@ Building reliable Instagram tooling in 2026 meant testing several common approac
 - **It does not scrape what Instagram withholds.** Liker lists stop at roughly 100 per post, third-party follower lists are server-capped, and hidden counts stay hidden. The app reports the truncation instead of guessing around it.
 - **Your account, your responsibility.** Automated following and messaging conflicts with Instagram's Terms of Use. Use it on an account you can afford to lose, at the lowest settings that still work, and stop immediately if Instagram shows you a checkpoint or an action block.
 
-## What the code in this tree does
+## Architecture at a glance
 
-The extension is being built engine-first: every rule is written as a pure, unit-tested module before the UI that exposes it exists.
+Built engine-first: every rule lives in a pure, unit-tested module beneath the UI, with zero runtime dependencies.
 
 | Module | Behaviour |
 |---|---|
@@ -64,19 +64,49 @@ The extension is being built engine-first: every rule is written as a pure, unit
 
 ## Screenshots
 
-| Collect | Preview & save |
-|---|---|
-| ![Collect screen with source picker](docs/screenshots/01-collect.png) | ![Collected people preview with bucket save](docs/screenshots/02-collect-preview.png) |
+### Collect
 
-| Your people | Lead details |
-|---|---|
-| ![Library table with warmth filter](docs/screenshots/03-library.png) | ![Lead drawer](docs/screenshots/04-lead-drawer.png) |
+Choose from four focused sub-tabs (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), paste a handle or link, and collect visibly inside your Instagram tab.
 
-| Outreach | Settings |
-|---|---|
-| ![Outreach queue and message studio](docs/screenshots/05-outreach.png) | ![Settings drawer](docs/screenshots/06-settings.png) |
+![Collect screen with source picker](docs/screenshots/01-collect.png)
 
-<p align="center"><img src="docs/screenshots/07-popup.png" alt="Toolbar popup" width="280"></p>
+### Preview & save
+
+Review everyone collected — username, full name, and warmth — then save straight into the ready **Default** bucket or create a custom bucket inline.
+
+![Collected people preview with bucket save](docs/screenshots/02-collect-preview.png)
+
+### Your people
+
+Browse **All people**, **Default**, and every custom bucket as its own tab, filter by warmth, add people manually, or manage buckets in bulk.
+
+![Library table with warmth filter](docs/screenshots/03-library.png)
+
+### Lead details
+
+Click any row to inspect full provenance, warmth breakdown, follow/DM state, and bucket memberships in a side drawer.
+
+![Lead drawer](docs/screenshots/04-lead-drawer.png)
+
+### Outreach
+
+Run **Follow**, **Messages**, and **Unfollow** from dedicated sub-tabs with live dry-run previews, message linting, and strict human-paced daily limits.
+
+![Outreach queue and message studio](docs/screenshots/05-outreach.png)
+
+### Settings
+
+Tune pacing, active hours, and workspace backup/export inside code-enforced hard safety ceilings.
+
+![Settings drawer](docs/screenshots/06-settings.png)
+
+### Toolbar popup
+
+Open the dashboard or jump straight into your active Instagram tab from the toolbar icon.
+
+<p align="center">
+  <img src="docs/screenshots/07-popup.png" alt="Toolbar popup" width="280">
+</p>
 
 <!--
   Owner-captured screenshot placeholder (add once captured on a logged-in test session,
@@ -142,9 +172,10 @@ in [INSTALL.md](INSTALL.md).
 | Core engines and local storage | Done, unit-tested |
 | Browser-driven Instagram collection & session detection | Done — 100% visible human DOM automation (zero Instagram API calls), unit-tested |
 | Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, real-UI + Bezier cursor, unit-tested |
-| Dashboard UI | Done — 3 top-level tabs (**Collect**, **Your people** with bucket tabs + ready Default bucket, **Outreach** with **Follow / Messages / Unfollow** sub-tabs); unit-tested and responsive-checked in Chromium (360–1440px) |
+| Dashboard & extension UI | Done — 3 top-level tabs (**Collect**, **Your people** with bucket tabs + ready Default bucket, **Outreach** with **Follow / Messages / Unfollow** sub-tabs), styled to match the landing page; unit-tested and responsive-checked (360–1440px) |
+| GitHub Pages download site | Done — minimal landing page in `docs/index.html` with direct extension zip download and Pages deploy workflow in `.github/workflows/pages.yml` |
 | Loadable `build/extension/` build | Done — `node scripts/build.mjs`, passes the package check |
-| README screenshots | Done for `01`–`07` (captured in Chromium with fictional demo data); `08-in-page-pill.png` is owner-captured — see `docs/screenshots/TODO.md` |
+| README screenshots | Done for `01`–`07` (layout reference captured in Chromium with fictional demo data); `08-in-page-pill.png` is owner-captured — see `docs/screenshots/TODO.md` |
 | Run against a live Instagram account | Owner-verified locally |
 
 ## Repository layout
@@ -158,7 +189,8 @@ src/
 └── app/               # the dashboard: 3 top-level tabs (Collect, Your people, Outreach), nested sub-tabs, design system, popup
 scripts/               # build, package check, icon generation, verification gate
 tests/                 # node:test suites, including mutation negative controls
-docs/                  # architecture and safety
+docs/                  # GitHub Pages landing page (index.html + extension zip), screenshots, architecture, and safety
+.github/workflows/     # GitHub Pages auto-deployment workflow (pages.yml)
 ```
 
 ## Further docs
