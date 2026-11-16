@@ -23,6 +23,7 @@ export const SETTINGS_KEY = 'ig_crm_settings_v1';
 
 export const DEFAULTS = Object.freeze({
   trustPreset: 'balanced',
+  scheduleEnabled: true,
   limits: Object.freeze(presetLimits('balanced')),
   schedule: Object.freeze({
     activeStartLocal: '09:30',
@@ -52,6 +53,7 @@ function deepMerge(base, patch) {
  */
 export function clampSafetySettings(settings = {}) {
   const merged = deepMerge(DEFAULTS, settings);
+  merged.scheduleEnabled = merged.scheduleEnabled !== false;
   const clamped = [];
 
   const { limits, clamped: limitFields } = clampLimits({

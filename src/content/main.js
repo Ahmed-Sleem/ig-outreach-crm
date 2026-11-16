@@ -42,7 +42,7 @@ import {
   scrapeOpenProfile,
   scrapeProfileFromDom,
 } from './adapters.js';
-import { composerScope, extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
+import { composerScope, directThreadMatchesUser, extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
 import {
   executeDm,
   executeFollow,
@@ -940,10 +940,11 @@ export function createHandlers(runtime, deps = {}) {
     },
 
     [CommandType.EXECUTE_FOLLOW]: async (payload, ctx) => actOnProfile(payload, async () => {
-      const started = await beginRun(runtime, 'follow', { pacing: payload?.pacing, status: ctx.postStatus });
+      const started = await beginRun(runtime, 'follow', { pacing: payload?.pacing, status: ctx?.postStatus });
       if (!started.ok) return started;
       try {
-        const result = await executeFollow(ctxOf(runtime, { status: ctx.postStatus }), { document: runtime.document, signal: runtime.signal });
+        const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
+        const result = await executeFollow(ctxOf(runtime, { status: ctx?.postStatus }), { document: runtime.document, signal: runtime.signal, readyTimeoutMs });
         return { ...result, username: payload?.username ?? runtime.pageUsername, stateAfter: readRelationshipState(runtime.document).state };
       } finally {
         runtime.endRun();
@@ -951,10 +952,16 @@ export function createHandlers(runtime, deps = {}) {
     }),
 
     [CommandType.EXECUTE_UNFOLLOW]: async (payload, ctx) => actOnProfile(payload, async () => {
-      const started = await beginRun(runtime, 'unfollow', { pacing: payload?.pacing, status: ctx.postStatus });
+      const started = await beginRun(runtime, 'unfollow', { pacing: payload?.pacing, status: ctx?.postStatus });
       if (!started.ok) return started;
       try {
-        const result = await executeUnfollow(ctxOf(runtime, { status: ctx.postStatus }), { document: runtime.document, signal: runtime.signal });
+        const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
+        const result = await executeUnfollow(ctxOf(runtime, { status: ctx?.postStatus }), {
+          document: runtime.document,
+          signal: runtime.signal,
+          readyTimeoutMs,
+          allowRequested: payload?.cleanupAction === 'WITHDRAW_REQUEST',
+        });
         return { ...result, username: payload?.username ?? runtime.pageUsername, stateAfter: readRelationshipState(runtime.document).state };
       } finally {
         runtime.endRun();
@@ -962,7 +969,8 @@ export function createHandlers(runtime, deps = {}) {
     }),
 
     [CommandType.OPEN_THREAD]: async (payload, ctx) => actOnProfile(payload, async () => {
-      const result = await openDm(ctxOf(runtime, { status: ctx.postStatus }), { document: runtime.document, signal: runtime.signal });
+      const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
+      const result = await openDm(ctxOf(runtime, { status: ctx?.postStatus }), { document: runtime.document, signal: runtime.signal, readyTimeoutMs });
       if (!result.ok && result.needsNavigation && navigate) {
         const username = payload?.username ?? runtime.pageUsername;
         await navigate(directUrl(username));
@@ -991,9 +999,10 @@ export function createHandlers(runtime, deps = {}) {
         if (!started.ok) return started;
         try {
           const dmCtx = ctxOf(runtime, { status: ctx?.postStatus });
+          const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 4500);
           let openedDirect = Boolean(composerScope(runtime.document, runtime.pathname));
           if (!openedDirect) {
-            const opened = await openDm(dmCtx, { document: runtime.document, signal: runtime.signal });
+            const opened = await openDm(dmCtx, { document: runtime.document, signal: runtime.signal, readyTimeoutMs });
             if (!opened.ok) {
               return {
                 ...opened,
@@ -1016,14 +1025,16 @@ export function createHandlers(runtime, deps = {}) {
         }
       };
 
-      // If the tab was already navigated to /direct/new/<username> or /direct/t/...
-      // with a DM composer rendered (e.g. after openDm returned needsNavigation),
-      // execute the DM right here instead of bouncing back to /<username>/!
+      // Only act directly inside /direct/ when the open thread actually matches
+      // the requested target user (or no specific username was asked for). That
+      // prevents a multi-person DM run from ever sending Person B's message
+      // into Person A's still-open /direct/t/... thread!
       const pathLower = String(runtime.pathname ?? '').toLowerCase();
       const targetKey = nameKey(payload?.username ?? '');
-      const onDirectForTarget = pathLower.startsWith('/direct/t/')
-        || (targetKey && pathLower.startsWith(`/direct/new/${targetKey}`))
-        || (pathLower.startsWith('/direct/') && Boolean(composerScope(runtime.document, runtime.pathname)));
+      const hasComposer = Boolean(composerScope(runtime.document, runtime.pathname));
+      const onDirectForTarget = (!targetKey && pathLower.startsWith('/direct/') && hasComposer)
+        || (Boolean(targetKey) && pathLower.startsWith(`/direct/new/${targetKey}`))
+        || (Boolean(targetKey) && pathLower.startsWith('/direct/t/') && hasComposer && directThreadMatchesUser(runtime.document, targetKey));
       if (onDirectForTarget) return runDmFlow();
       return actOnProfile(payload, runDmFlow);
     },

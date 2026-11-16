@@ -294,6 +294,28 @@ export function deleteLead(leadKey) {
   return tx(Store.LEADS, 'readwrite', (s) => wrap(s.delete(String(leadKey))));
 }
 
+/** Delete multiple leads (and their orphaned provenance edges) in one batch. */
+export async function deleteLeads(leadKeys = []) {
+  const keys = [...new Set((leadKeys ?? []).map((k) => String(k)).filter(Boolean))];
+  if (!keys.length) return { deleted: 0 };
+  await tx(Store.LEADS, 'readwrite', (leadsStore) => {
+    for (const key of keys) leadsStore.delete(key);
+  });
+  await tx(Store.LEAD_EDGES, 'readwrite', (edgesStore) => {
+    const idx = edgesStore.index('leadKey');
+    for (const key of keys) {
+      const req = idx.openCursor(IDBKeyRange.only(key));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        edgesStore.delete(cursor.primaryKey ?? cursor.value?.edgeKey);
+        cursor.continue();
+      };
+    }
+  });
+  return { deleted: keys.length };
+}
+
 /* --------------------------------------------------------------------- edges */
 
 export function edgeKeyFor(edge) {

@@ -31,6 +31,8 @@ import { ACTIVE_WORKSPACE_KEY, CommandType, createBridge, chromeStorageAdapter }
 import {
   countEnabledTemplates,
   deleteGroup,
+  deleteLead,
+  deleteLeads,
   finishScrapeRun,
   getGroup,
   getLead,
@@ -638,17 +640,35 @@ export function createCommandChannel({
      */
     async sendWithNavigation(type, payload = {}, options = {}) {
       const tabId = options.tabId;
-      const first = await this.send(type, payload, options);
-      const wanted = first?.value?.url ?? null;
-      if (first?.ok || !first?.value?.needsNavigation || !wanted || tabId === null || tabId === undefined) return first;
-      const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus), timeoutMs: 12_000 });
-      // Only abort navigation if the tab actually failed to move or was closed;
-      // if Chrome still reports status==='loading' while the page is interactive,
-      // let prepare() confirm via live PING on the second send.
-      if (!moved.ok && !moved.tab) return { ...first, reason: `${first.reason} — and the tab could not be moved there (${moved.reason})` };
-      await sleep(options.settleMs ?? 2000);
-      const second = await this.send(type, payload, { ...options, tabId });
-      return { ...second, navigated: true, firstReason: first.reason };
+      let current = await this.send(type, payload, options);
+      const firstReason = current?.reason ?? null;
+      const visited = new Set();
+      let hops = 0;
+      const maxHops = Number(options.maxHops ?? 2);
+
+      while (
+        !current?.ok
+        && current?.value?.needsNavigation
+        && current?.value?.url
+        && tabId !== null
+        && tabId !== undefined
+        && hops < maxHops
+      ) {
+        const wanted = String(current.value.url);
+        if (visited.has(wanted)) break;
+        visited.add(wanted);
+        hops += 1;
+        const moved = await tabs.navigate(tabId, wanted, { focus: Boolean(options.focus), timeoutMs: 12_000 });
+        // Only abort navigation if the tab actually failed to move or was closed;
+        // if Chrome still reports status==='loading' while the page is interactive,
+        // let prepare() confirm via live PING on the next send.
+        if (!moved.ok && !moved.tab) {
+          return { ...current, reason: `${current.reason} — and the tab could not be moved there (${moved.reason})` };
+        }
+        await sleep(options.settleMs ?? 2000);
+        current = await this.send(type, payload, { ...options, tabId });
+      }
+      return hops > 0 ? { ...current, navigated: true, firstReason } : current;
     },
 
     /** Stop whatever the tab is doing. Never times out into silence. */
@@ -753,6 +773,47 @@ export function createCommandChannel({
  * to IndexedDB and fails only if the disk does. Keeping them apart is what lets a
  * run keep recording what it did after the tab it was driving stops answering.
  */
+const HANDLE_TOKEN = /^[a-z0-9._]{1,30}$/i;
+const RESERVED_HANDLES = new Set([
+  'p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct', 'accounts',
+  'about', 'legal', 'developer', 'api', 'graphql', 'oauth', 'challenge',
+]);
+
+/**
+ * Parse a free-form list of Instagram handles or profile URLs into unique,
+ * lowercase valid usernames plus any invalid tokens so the UI can report both.
+ */
+export function parseHandlesInput(input) {
+  const raw = Array.isArray(input) ? input.join('\n') : String(input ?? '');
+  const tokens = raw.split(/[\r\n,;]+/).map((t) => t.trim()).filter(Boolean);
+  const seen = new Set();
+  const valid = [];
+  const invalid = [];
+
+  for (const token of tokens) {
+    let handle = null;
+    if (/^https?:\/\//i.test(token) || /^instagram\.com\//i.test(token) || /^www\.instagram\.com\//i.test(token)) {
+      const fullUrl = /^https?:\/\//i.test(token) ? token : `https://${token}`;
+      handle = usernameFromUrl(fullUrl);
+    } else {
+      const cleaned = token.replace(/^@+/, '').replace(/\/+$/, '');
+      if (HANDLE_TOKEN.test(cleaned) && !cleaned.startsWith('.') && !cleaned.endsWith('.') && !cleaned.includes('..') && !RESERVED_HANDLES.has(cleaned.toLowerCase())) {
+        handle = cleaned;
+      }
+    }
+    if (!handle) {
+      invalid.push(token);
+      continue;
+    }
+    const lower = handle.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      valid.push(lower);
+    }
+  }
+  return { valid, invalid };
+}
+
 export const DEFAULT_BUCKET_NAME = 'Default';
 
 export function defaultBucketIdFor(workspaceId) {
@@ -871,6 +932,78 @@ export function createLedger({ state, now = () => Date.now() } = {}) {
     },
 
     setLeadGroup: (leadKey, groupId, options = { on: true }) => setLeadGroup(String(leadKey), String(groupId), options),
+
+    /**
+     * Manually add one or many people into the library from handles or profile URLs.
+     */
+    async addPeople({ input = '', usernames = [], fullName = '', note = '', groupId = null } = {}) {
+      const workspaceId = ws();
+      const combined = [
+        ...(Array.isArray(usernames) ? usernames : []),
+        ...(input ? [input] : []),
+      ];
+      const { valid, invalid } = parseHandlesInput(combined);
+      if (!valid.length) {
+        return { ok: false, added: 0, updated: 0, invalid, reason: 'Enter at least one valid Instagram username or profile link.' };
+      }
+
+      const bucket = groupId && String(groupId) !== 'all'
+        ? String(groupId)
+        : (await ensureDefaultBucket()).groupId;
+
+      let added = 0;
+      let updated = 0;
+      const single = valid.length === 1;
+      for (const username of valid) {
+        const leadKey = `${workspaceId}:${username}`;
+        const existing = await getLead(leadKey);
+        const incoming = {
+          leadKey,
+          username,
+          fullName: single && fullName.trim() ? fullName.trim() : (existing?.fullName ?? ''),
+          biography: single && note.trim() && !existing?.biography ? note.trim() : (existing?.biography ?? ''),
+          sourceAccounts: existing?.sourceAccounts?.length ? existing.sourceAccounts : ['manual'],
+        };
+        const row = leadRecordSafe({ workspaceId, username }, incoming);
+        const merged = mergeLead(existing, row);
+        if (bucket && !(merged.groupIds ?? []).includes(bucket)) {
+          merged.groupIds = [...(merged.groupIds ?? []), bucket];
+        }
+        await upsertLead(merged);
+        if (existing) updated += 1;
+        else added += 1;
+      }
+      return { ok: true, added, updated, invalid, groupId: bucket, total: valid.length };
+    },
+
+    /** Permanently delete a single person and their provenance edges. */
+    async deleteLead(leadKey) {
+      if (!leadKey) return { deleted: 0 };
+      return deleteLeads([String(leadKey)]);
+    },
+
+    /**
+     * Delete all people in the workspace (or in one bucket), or remove everyone
+     * from a single bucket while keeping them in All people.
+     */
+    async deleteAllPeople({ groupId = null, mode = 'delete' } = {}) {
+      const workspaceId = ws();
+      const all = await listLeads(workspaceId, { limit: 100_000 });
+      const scoped = groupId && String(groupId) !== 'all'
+        ? all.filter((l) => (l.groupIds ?? []).includes(String(groupId)))
+        : all;
+      if (!scoped.length) return { ok: true, deleted: 0, untagged: 0 };
+
+      if (groupId && String(groupId) !== 'all' && mode === 'untag') {
+        for (const lead of scoped) {
+          await setLeadGroup(lead.leadKey, String(groupId), { on: false });
+        }
+        return { ok: true, deleted: 0, untagged: scoped.length };
+      }
+
+      const res = await deleteLeads(scoped.map((l) => l.leadKey));
+      return { ok: true, deleted: res.deleted, untagged: 0 };
+    },
 
     /* ------------------------------------------------------------ collections */
 

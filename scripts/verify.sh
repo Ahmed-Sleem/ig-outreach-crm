@@ -25,7 +25,7 @@ skip()    { SKIPPED=$((SKIPPED + 1)); printf '  [skip]  %s\n' "$1"; }
 
 # Tracked text files, excluding binaries we cannot meaningfully grep.
 tracked_text() {
-  git ls-files | grep -vE '\.(png|jpg|jpeg|gif|ico|woff2?)$' || true
+  git ls-files | grep -vE '\.(png|jpg|jpeg|gif|ico|woff2?|zip)$' || true
 }
 
 # ---------------------------------------------------------------- 1. shape --

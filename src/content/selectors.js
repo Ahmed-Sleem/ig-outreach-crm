@@ -176,7 +176,17 @@ export function findButtonsByLabel(root, kinds) {
   const wanted = new Set(kinds);
   const out = [];
   for (const button of qsa(root, 'button, [role="button"]')) {
-    const kind = labelKind(visibleButtonText(button)) ?? labelKind(button.textContent);
+    const visible = visibleButtonText(button);
+    let kind = labelKind(visible) ?? labelKind(button.textContent);
+    if (!kind) {
+      kind = labelKind(button.getAttribute?.('aria-label'));
+    }
+    if (!kind && !visible) {
+      for (const svg of qsa(button, 'svg[aria-label]')) {
+        kind = labelKind(svg.getAttribute?.('aria-label'));
+        if (kind) break;
+      }
+    }
     if (kind && wanted.has(kind)) out.push({ button, kind });
   }
   return out;
@@ -219,6 +229,36 @@ export function composerScope(root, pathname = '') {
   return null;
 }
 
+const NON_MESSAGE_ROW_PATTERNS = [
+  /\bview profile\b/i,
+  /عرض الملف الشخصي/,
+  /\bend-to-end encrypted\b/i,
+  /مشفرة تمامًا بين الطرفين/,
+  /\byou can send more messages after\b/i,
+  /\byou followed each other on instagram\b/i,
+  /\byou(?:'ve| have)? (?:been )?follow(?:ed|ing) this account\b/i,
+  /\binvite sent\b/i,
+];
+
+function isNonMessageDirectRow(row) {
+  if (!row) return true;
+  if (row.querySelector?.('[contenteditable="true"]')) return true;
+  const text = collapse(row.textContent);
+  if (!text) return true;
+  if (NON_MESSAGE_ROW_PATTERNS.some((re) => re.test(text))) return true;
+  // A brand-new empty 2026 DM thread renders a profile intro card inside the
+  // first [role="row"] with a "View profile" link/button pointing to /<user>/.
+  for (const link of qsa(row, 'a[href]')) {
+    const label = collapse(link.textContent).toLowerCase();
+    if (label === 'view profile' || label === 'عرض الملف الشخصي') return true;
+  }
+  // Pure timestamp separator rows (e.g. "Today 11:42 PM", "Nov 16, 2026")
+  if (/^(?:today|yesterday|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}:\d{2})\b[\d\s,:\u200eAPMapm-]*$/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
 /** Rendered message bubbles of the open thread, in DOM order. */
 export function threadBubbles(root) {
   const dialogs = findDialogs(root);
@@ -229,16 +269,49 @@ export function threadBubbles(root) {
   // 2026 Instagram Direct (Comet/Messenger engine) renders message rows inside
   // a `role="grid"` (often labeled "Messages in conversation with …"). Avoid
   // grabbing the left-hand Chats/Inbox list by preferring a grid whose label
-  // mentions Messages/Conversation, or falling back to `[role="row"]` nodes
-  // that are not ancestors of the composer textbox.
+  // mentions Messages/Conversation, and strictly skip profile intro cards
+  // ("View profile"), timestamps, and system notices so empty new threads are
+  // never mistaken for already-messaged conversations.
   const grids = qsa(scope, '[role="grid"]');
   const messageGrid = grids.find((g) => /(messages?|conversation|الرسائل|المحادثة)/i.test(String(g.getAttribute?.('aria-label') ?? '')))
     ?? (grids.length > 0 ? grids[grids.length - 1] : null);
   const rowSource = messageGrid ?? scope;
-  return qsa(rowSource, '[role="row"]').filter((row) => {
-    if (row.querySelector?.('[contenteditable="true"]')) return false;
-    return collapse(row.textContent).length > 0;
-  });
+  return qsa(rowSource, '[role="row"]').filter((row) => !isNonMessageDirectRow(row));
+}
+
+/** True when the rendered Instagram page is a 404 / unavailable profile. */
+export function isProfileUnavailable(root) {
+  if (!root) return false;
+  const text = collapse(root.body?.textContent ?? root.textContent ?? '');
+  if (!text) return false;
+  return /sorry, this page isn'?t available|profile isn'?t available|the link you followed may be broken|عذرًا، هذه الصفحة غير متوفرة/i.test(text);
+}
+
+/**
+ * True when an already-open `/direct/t/...` thread visibly belongs to `username`
+ * (matching the thread header link `/<username>/` or heading text). Prevents a
+ * multi-person DM run from ever sending Person B's message into Person A's
+ * still-open conversation.
+ */
+export function directThreadMatchesUser(root, username) {
+  const target = String(username ?? '').trim().replace(/^@+/, '').toLowerCase();
+  if (!root || !target) return false;
+  const dialogs = findDialogs(root);
+  const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : (root.querySelector?.('main, [role="main"]') ?? root);
+  for (const link of qsa(scope, 'a[href]')) {
+    const u = usernameFromPath(link.getAttribute?.('href') ?? link.href ?? '');
+    if (u && u.toLowerCase() === target) {
+      // Ignore the left-side inbox thread list if it sits inside `nav` or a
+      // "Chats"/"Thread list" container.
+      const inList = link.closest?.('[aria-label*="Thread" i], [aria-label*="Chat" i], nav');
+      if (!inList) return true;
+    }
+  }
+  for (const heading of qsa(scope, 'h1, h2, h3, [role="heading"]')) {
+    const t = collapse(heading.textContent).replace(/^@+/, '').toLowerCase();
+    if (t === target) return true;
+  }
+  return false;
 }
 
 /** The unfollow/confirm dialog Instagram opens after an Unfollow click. */

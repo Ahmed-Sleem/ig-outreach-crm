@@ -24,20 +24,30 @@ import { Doc } from '../scripts/lib/dom-shim.mjs';
 const createDocument = () => new Doc();
 import {
   Label,
+  directThreadMatchesUser,
   findButtonByLabel,
   findVisibleDialog,
+  isProfileUnavailable,
+  threadBubbles,
   usernameFromPath,
   visibleButtonText,
 } from '../src/content/selectors.js';
-import { readRelationshipState, composeMessage } from '../src/content/actions.js';
+import {
+  composeMessage,
+  executeFollow,
+  hasExistingThread,
+  readComposerText,
+  readRelationshipState,
+} from '../src/content/actions.js';
 import { detectViewerFromDom } from '../src/content/probe.js';
 import { collectPostLikersDom } from '../src/content/browser-collector.js';
 import { createHandlers, createContentRuntime } from '../src/content/main.js';
 import { pageContextFrom } from '../src/content/launcher.js';
 import { createBridge, memoryStorageAdapter, CommandType } from '../src/storage/bridge.js';
-import { createLedger, usernameFromUrl } from '../src/app/lib/api.js';
+import { createLedger, parseHandlesInput, usernameFromUrl } from '../src/app/lib/api.js';
 import { createRunController, RunPhase } from '../src/app/lib/runner.js';
-import { ActionType } from '../src/core/governor.js';
+import { ActionType, canExecute, initialGovernorState } from '../src/core/governor.js';
+import { clampSafetySettings } from '../src/storage/settings.js';
 import { resetDb } from '../src/storage/db.js';
 import { installFakeIndexedDB } from './helpers/fake-indexeddb.mjs';
 
@@ -364,5 +374,144 @@ describe('Pre-release 2026 Instagram audit regressions', () => {
     assert.equal(usernameFromPath('/fightclubpoint/'), 'fightclubpoint');
     assert.equal(usernameFromUrl('https://www.instagram.com/fightclubpoint/'), 'fightclubpoint');
     assert.equal(pageContextFrom('/fightclubpoint/').kind, 'profile');
+  });
+
+  it('12. scheduleEnabled: false allows outreach outside 09:30-22:30 while keeping daily caps intact', () => {
+    const lateNight = new Date(2026, 10, 16, 1, 15, 0); // 01:15 AM local
+    const defaultSettings = clampSafetySettings({}).settings;
+    const blocked = canExecute(ActionType.FOLLOW, {
+      now: lateNight,
+      governorState: initialGovernorState(),
+      settings: defaultSettings,
+      workspaceKey: '77',
+    });
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.reason, 'outside the active window');
+
+    const anytimeSettings = clampSafetySettings({ scheduleEnabled: false }).settings;
+    assert.equal(anytimeSettings.scheduleEnabled, false);
+    const allowed = canExecute(ActionType.FOLLOW, {
+      now: lateNight,
+      governorState: initialGovernorState(),
+      settings: anytimeSettings,
+      workspaceKey: '77',
+    });
+    assert.equal(allowed.ok, true);
+  });
+
+  it('13. brand-new 2026 Direct thread with "View profile" card & encryption notice is treated as empty', () => {
+    const doc = createDocument();
+    const grid = el(doc, 'div', { role: 'grid', 'aria-label': 'Messages in conversation with sara_design' }, [
+      el(doc, 'div', { role: 'row' }, [
+        el(doc, 'span', { text: 'Sara Design · Instagram' }),
+        el(doc, 'a', { href: '/sara_design/', text: 'View profile' }),
+      ]),
+      el(doc, 'div', { role: 'row', text: 'Messages are end-to-end encrypted' }),
+      el(doc, 'div', { role: 'row', text: 'Today 11:42 PM' }),
+    ]);
+    doc.body.appendChild(grid);
+
+    assert.equal(threadBubbles(doc).length, 0);
+    assert.equal(hasExistingThread(doc), false);
+
+    // Once an actual message row arrives, it IS detected as a message bubble
+    grid.appendChild(el(doc, 'div', { role: 'row', text: 'Hey Sara, loved your new collection!' }));
+    assert.equal(threadBubbles(doc).length, 1);
+    assert.equal(hasExistingThread(doc), true);
+  });
+
+  it('14. icon-only 2026 Send button with aria-label="Send" matches Label.SEND', () => {
+    const doc = createDocument();
+    const iconBtn = el(doc, 'div', { role: 'button', 'aria-label': 'Send' }, [
+      el(doc, 'svg', {}, [el(doc, 'title', { text: 'Send' })]),
+    ]);
+    doc.body.appendChild(iconBtn);
+
+    const hit = findButtonByLabel(doc, [Label.SEND]);
+    assert.ok(hit);
+    assert.equal(hit.button, iconBtn);
+    assert.equal(hit.kind, Label.SEND);
+  });
+
+  it('15. multi-person DM run refuses to send Person B into Person A still-open /direct/t/ thread', async () => {
+    const doc = createDocument();
+    doc.cookie = 'ds_user_id=999';
+    const main = el(doc, 'main', {}, [
+      el(doc, 'a', { href: '/alice/', text: 'alice' }),
+      el(doc, 'div', { contenteditable: 'true', role: 'textbox', 'aria-label': 'Message' }),
+      el(doc, 'button', { text: 'Send' }),
+    ]);
+    doc.body.appendChild(main);
+
+    assert.equal(directThreadMatchesUser(doc, 'alice'), true);
+    assert.equal(directThreadMatchesUser(doc, 'bob'), false);
+
+    const runtime = createContentRuntime({
+      document: doc,
+      getSelection: () => doc.selection,
+      location: { pathname: '/direct/t/178411111/' },
+      wait: async () => {},
+      random: () => 0.5,
+    });
+    const handlers = createHandlers(runtime);
+    const res = await handlers[CommandType.EXECUTE_DM]({
+      username: 'bob',
+      message: 'Hi Bob!',
+    });
+
+    assert.equal(res.ok, false);
+    assert.equal(res.needsNavigation, true);
+    assert.equal(res.url, 'https://www.instagram.com/bob/');
+  });
+
+  it('16. readComposerText strips Lexical zero-width chars and executeFollow detects deleted 404 profiles', async () => {
+    const doc = createDocument();
+    const editor = el(doc, 'div', { contenteditable: 'true', text: '\u200B\uFEFF' });
+    assert.equal(readComposerText(editor), '');
+
+    doc.body.appendChild(el(doc, 'h2', { text: "Sorry, this page isn't available." }));
+    assert.equal(isProfileUnavailable(doc), true);
+    const followRes = await executeFollow({ document: doc, wait: async () => {}, random: () => 0.5 }, { document: doc, readyTimeoutMs: 1000 });
+    assert.equal(followRes.ok, false);
+    assert.match(followRes.reason, /unavailable/i);
+  });
+
+  it('17. People addPeople + parseHandlesInput + deleteLead + deleteAllPeople work end-to-end', async () => {
+    const parsed = parseHandlesInput('@Linen.Studio, https://www.instagram.com/cairo.coffee/\ninvalid handle!!\n..bad..\n@linen.studio');
+    assert.deepEqual(parsed.valid, ['linen.studio', 'cairo.coffee']);
+    assert.equal(parsed.invalid.length, 2);
+
+    const restoreIdb = installFakeIndexedDB();
+    try {
+      await resetDb();
+      const ledger = createLedger({ state: { workspaceId: '55' }, now: () => 1_700_000_000_000 });
+      await ledger.ensureWorkspace({ workspaceId: '55', viewerUsername: 'owner' });
+      const vip = await ledger.createGroup({ name: 'VIP' });
+
+      const added = await ledger.addPeople({
+        input: '@alice\nhttps://www.instagram.com/bob/\ncharlie',
+        groupId: vip.groupId,
+      });
+      assert.equal(added.ok, true);
+      assert.equal(added.added, 3);
+      assert.equal((await ledger.leads({})).length, 3);
+
+      // Untagging VIP keeps people in All people
+      const untagged = await ledger.deleteAllPeople({ groupId: vip.groupId, mode: 'untag' });
+      assert.equal(untagged.untagged, 3);
+      assert.equal((await ledger.leads({})).length, 3);
+
+      // Single delete
+      await ledger.deleteLead('55:alice');
+      assert.equal((await ledger.leads({})).length, 2);
+
+      // Delete all at once
+      const wiped = await ledger.deleteAllPeople({ groupId: null, mode: 'delete' });
+      assert.equal(wiped.deleted, 2);
+      assert.equal((await ledger.leads({})).length, 0);
+    } finally {
+      await resetDb();
+      restoreIdb?.uninstall?.();
+    }
   });
 });

@@ -17,7 +17,7 @@ import {
   relTime, scannedText, stateBadge, table, toast, warmthBadge,
 } from '../lib/ui.js';
 import { virtualTable } from '../lib/virtual-list.js';
-import { isDefaultBucket } from '../lib/api.js';
+import { isDefaultBucket, parseHandlesInput } from '../lib/api.js';
 import { listEdgesForLead, setLeadGroup, upsertLead } from '../../storage/db.js';
 
 const TIERS = ['hot', 'warm', 'lukewarm', 'cold'];
@@ -114,31 +114,152 @@ export function createPeopleView(ctx = {}) {
     const titleNode = libraryCard.querySelector('.card__title');
     if (titleNode) titleNode.textContent = group ? group.name : 'All people';
 
+    const scopeCount = countInBucket(activeBucket);
     clear(bucketHeader);
-    if (!group) {
-      bucketHeader.append(el('span', {
-        class: 'small dim',
-        text: 'Everyone you have collected across all buckets. Click any person to view details or assign buckets.',
-      }));
-      return;
+
+    const subtitle = !group
+      ? 'Everyone you have collected or added across all buckets. Click any person to inspect or assign buckets.'
+      : isDefaultBucket(group, api.workspaceId)
+        ? 'Ready default bucket — newly saved people land here unless you pick another bucket.'
+        : (group.note || 'Custom bucket — people stay in All people even if you remove this bucket.');
+
+    const actionButtons = [
+      btn('+ Add people', { variant: 'sm primary', onClick: () => openAddPeopleModal() }),
+      btn(group ? `Delete all (${scopeCount})` : `Delete all (${scopeCount})`, {
+        variant: 'sm danger',
+        disabled: scopeCount === 0,
+        onClick: () => openDeleteAllModal(group, scopeCount),
+      }),
+    ];
+
+    if (group && !isDefaultBucket(group, api.workspaceId)) {
+      actionButtons.push(
+        btn('Rename', { variant: 'sm ghost', onClick: () => openRenameBucketModal(group) }),
+        btn('Remove bucket', { variant: 'sm ghost', onClick: () => openDeleteBucketModal(group) }),
+      );
     }
 
-    const isDef = isDefaultBucket(group, api.workspaceId);
     bucketHeader.append(
-      el('span', {
-        class: 'small dim',
-        text: isDef
-          ? 'Ready default bucket — newly saved people land here unless you pick another bucket.'
-          : (group.note || 'Custom bucket — people stay in All people even if you remove this bucket.'),
-      }),
+      el('span', { class: 'small dim', text: subtitle }),
       el('span', { class: 'grow' }),
+      el('div', { class: 'people__actions' }, actionButtons),
     );
-    if (!isDef) {
-      bucketHeader.append(el('div', { class: 'people__actions' }, [
-        btn('Rename', { variant: 'sm ghost', onClick: () => openRenameBucketModal(group) }),
-        btn('Remove bucket', { variant: 'sm danger', onClick: () => openDeleteBucketModal(group) }),
-      ]));
+  }
+
+  function openAddPeopleModal() {
+    let rawHandles = '';
+    let fullName = '';
+    let noteText = '';
+    const defaultGroup = activeGroup()?.groupId
+      ?? groups.find((g) => isDefaultBucket(g, api.workspaceId))?.groupId
+      ?? groups[0]?.groupId
+      ?? null;
+    let targetGroupId = defaultGroup;
+
+    const previewLine = el('div', { class: 'small dim', text: 'Paste one or more Instagram @usernames or profile links.' });
+    const textarea = el('textarea', {
+      class: 'input input--area',
+      rows: '5',
+      placeholder: '@linen.studio\ncairo.coffee\nhttps://www.instagram.com/handmade.egypt/',
+    });
+    const updatePreview = () => {
+      const { valid, invalid } = parseHandlesInput(rawHandles);
+      if (!rawHandles.trim()) {
+        previewLine.textContent = 'Paste one or more Instagram @usernames or profile links.';
+      } else if (!valid.length) {
+        previewLine.textContent = `No valid handles found (${invalid.length} ignored).`;
+      } else {
+        previewLine.textContent = `${valid.length} ${valid.length === 1 ? 'person' : 'people'} ready to add${invalid.length ? ` (${invalid.length} invalid skipped)` : ''}.`;
+      }
+    };
+    textarea.addEventListener('input', () => { rawHandles = textarea.value; updatePreview(); });
+
+    const bucketSelect = el('select', { class: 'select' });
+    for (const g of groups) {
+      bucketSelect.append(el('option', { value: g.groupId, text: g.name }));
     }
+    if (targetGroupId) bucketSelect.value = targetGroupId;
+    bucketSelect.addEventListener('change', () => { targetGroupId = bucketSelect.value || null; });
+
+    modal({
+      title: 'Add new people',
+      body: el('div', { class: 'col' }, [
+        el('label', { class: 'field' }, [
+          el('span', { class: 'field__label', text: 'Instagram usernames or profile links (one per line or comma-separated)' }),
+          textarea,
+        ]),
+        previewLine,
+        groups.length ? el('label', { class: 'field' }, [
+          el('span', { class: 'field__label', text: 'Save into bucket' }),
+          bucketSelect,
+        ]) : null,
+        field('Full name (optional, when adding 1 person)', { value: '', placeholder: 'Sara Mansour', onInput: (v) => { fullName = v; } }),
+        field('Note (optional, when adding 1 person)', { value: '', placeholder: 'Met at Cairo design week', onInput: (v) => { noteText = v; } }),
+      ]),
+      actions: [
+        { label: 'Cancel', variant: 'ghost' },
+        {
+          label: 'Add people',
+          variant: 'primary',
+          onClick: async () => {
+            const res = await api.addPeople({
+              input: rawHandles,
+              fullName,
+              note: noteText,
+              groupId: targetGroupId,
+            });
+            if (!res?.ok) {
+              say(res?.reason ?? 'Enter at least one valid Instagram username.', 'error');
+              return false;
+            }
+            const bucketName = groups.find((g) => g.groupId === res.groupId)?.name ?? 'Default';
+            const parts = [];
+            if (res.added) parts.push(`added ${res.added}`);
+            if (res.updated) parts.push(`updated ${res.updated}`);
+            say(`${parts.join(' and ') || `saved ${res.total}`} in ${bucketName}.`, 'success');
+            await refresh();
+            ctx.onChanged?.();
+          },
+        },
+      ],
+    });
+  }
+
+  function openDeleteAllModal(group, count) {
+    if (!count) return;
+    const isScoped = Boolean(group);
+    const title = isScoped
+      ? `Clear ${count} ${count === 1 ? 'person' : 'people'} from "${group.name}"?`
+      : `Delete all ${count} ${count === 1 ? 'person' : 'people'}?`;
+    const warning = isScoped
+      ? `You can either remove all ${count} people from "${group.name}" (keeping them in All people), or permanently delete them from your CRM.`
+      : `This permanently deletes all ${count} people and their provenance history from this workspace. Your buckets, templates, and safety settings stay untouched. This cannot be undone.`;
+
+    const actions = [{ label: 'Cancel', variant: 'ghost' }];
+    if (isScoped) {
+      actions.push({
+        label: `Remove from "${group.name}" only`,
+        variant: 'default',
+        onClick: async () => {
+          const res = await api.deleteAllPeople({ groupId: group.groupId, mode: 'untag' });
+          say(`Removed ${res.untagged} ${res.untagged === 1 ? 'person' : 'people'} from "${group.name}".`, 'success');
+          await refresh();
+          ctx.onChanged?.();
+        },
+      });
+    }
+    actions.push({
+      label: isScoped ? `Delete all ${count} permanently` : `Delete all ${count} people`,
+      variant: 'danger-solid',
+      onClick: async () => {
+        const res = await api.deleteAllPeople({ groupId: group?.groupId ?? null, mode: 'delete' });
+        say(`Deleted ${res.deleted} ${res.deleted === 1 ? 'person' : 'people'}.`, 'success');
+        await refresh();
+        ctx.onChanged?.();
+      },
+    });
+
+    modal({ title, body: note(warning, 'danger'), actions });
   }
 
   function openNewBucketModal() {
@@ -350,8 +471,18 @@ export function createPeopleView(ctx = {}) {
           ctx.onChanged?.();
         },
       }),
+      btn('Delete', {
+        variant: 'danger-solid',
+        onClick: async () => {
+          await api.deleteLead(fresh.leadKey);
+          say(`Deleted @${fresh.username}.`, 'success');
+          drawerApi?.close?.();
+          await refresh();
+          ctx.onChanged?.();
+        },
+      }),
     ];
-    drawer({ title: `@${fresh.username}`, body, actions: actions2, width: 'var(--drawer-w)' });
+    const drawerApi = drawer({ title: `@${fresh.username}`, body, actions: actions2, width: 'var(--drawer-w)' });
   }
 
   /* -------------------------------------------------------------- lifecycle */

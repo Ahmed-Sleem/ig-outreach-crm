@@ -53,7 +53,13 @@ export function createSettingsView(ctx = {}) {
   const weightsCard = card('Ranking', el('div'), { hint: 'how a lead earns priority' });
   const actions = el('div', { class: 'row row--end mt-4' });
 
-  function snapshot(settings) { return JSON.stringify(settings.limits) + JSON.stringify(settings.schedule) + JSON.stringify(settings.rankingWeights) + settings.trustPreset; }
+  function snapshot(settings) {
+    return JSON.stringify(settings.limits)
+      + JSON.stringify(settings.schedule)
+      + JSON.stringify(settings.rankingWeights)
+      + settings.trustPreset
+      + String(settings.scheduleEnabled !== false);
+  }
 
   function setPreset(name) {
     if (name === TrustPreset.CUSTOM) {
@@ -119,28 +125,39 @@ export function createSettingsView(ctx = {}) {
   }
 
   function renderSchedule() {
-    const body = el('div', { class: 'grid grid--2' }, [
-      field('Active from (local)', {
-        type: 'time', value: draft.schedule.activeStartLocal,
-        hint: 'Earliest local time outreach may start each day.',
-        onInput: (value) => patchSchedule('activeStartLocal', value),
+    const enabled = draft.scheduleEnabled !== false;
+    const body = el('div', { class: 'col' }, [
+      toggle('Enforce active hours window', enabled, {
+        hint: 'Recommended for automated daily runs. Turn off if you want to run or test outreach at any hour (daily & hourly caps still apply).',
+        onChange: (value) => {
+          draft = { ...draft, scheduleEnabled: value };
+          renderSchedule();
+          renderActions();
+        },
       }),
-      field('Active until (local)', {
-        type: 'time', value: draft.schedule.activeEndLocal,
-        hint: 'Latest local time outreach may run each day.',
-        onInput: (value) => patchSchedule('activeEndLocal', value),
-      }),
-      slider('Daily drift', Number(draft.schedule.dailyDriftMinutes ?? 20), {
-        min: 0, max: 60, format: (v) => `${v} min`,
-        hint: 'how much the window may shift day to day so the pattern is not mechanical',
-        onChange: (value) => patchSchedule('dailyDriftMinutes', value),
-      }),
-      el('div', { class: 'col' }, [
-        toggle('Warm-up ramp (7 days)', Boolean(draft.schedule.warmupRampEnabled), {
-          hint: 'start a new account at 40% of its caps and climb to 100% over a week',
-          onChange: (value) => patchSchedule('warmupRampEnabled', value),
+      el('div', { class: 'grid grid--2' }, [
+        field('Active from (local)', {
+          type: 'time', value: draft.schedule.activeStartLocal,
+          hint: 'Earliest local time outreach may start each day.',
+          onInput: (value) => patchSchedule('activeStartLocal', value),
         }),
-        el('p', { class: 'field__help', text: 'The active window is capped at 14 hours a day; a longer window is corrected on save.' }),
+        field('Active until (local)', {
+          type: 'time', value: draft.schedule.activeEndLocal,
+          hint: 'Latest local time outreach may run each day.',
+          onInput: (value) => patchSchedule('activeEndLocal', value),
+        }),
+        slider('Daily drift', Number(draft.schedule.dailyDriftMinutes ?? 20), {
+          min: 0, max: 60, format: (v) => `${v} min`,
+          hint: 'how much the window may shift day to day so the pattern is not mechanical',
+          onChange: (value) => patchSchedule('dailyDriftMinutes', value),
+        }),
+        el('div', { class: 'col' }, [
+          toggle('Warm-up ramp (7 days)', Boolean(draft.schedule.warmupRampEnabled), {
+            hint: 'start a new account at 40% of its caps and climb to 100% over a week',
+            onChange: (value) => patchSchedule('warmupRampEnabled', value),
+          }),
+          el('p', { class: 'field__help', text: 'The active window is capped at 14 hours a day; a longer window is corrected on save.' }),
+        ]),
       ]),
     ]);
     replaceCard(scheduleCard, body);

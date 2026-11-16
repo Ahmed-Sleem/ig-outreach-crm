@@ -1,16 +1,41 @@
 # IG Outreach CRM
 
-**A local Chrome extension that collects warm Instagram leads from profiles you already have open, and runs a human-paced follow, accept-detect and message funnel from your own logged-in session.**
+**A free, local Chrome extension that collects warm Instagram leads visibly inside your browser tab and runs a human-paced follow, accept-detect, and DM workflow from your own logged-in session.**
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-786%20passing-brightgreen)
+> **Download page:** [https://ahmed-sleem.github.io/ig-outreach-crm/](https://ahmed-sleem.github.io/ig-outreach-crm/)
+
+![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-818%20passing-brightgreen)
 
 ## Why
 
 Messaging strangers cold is how Instagram accounts get restricted. The people worth talking to are already visible: they comment on your competitors' posts, they like the same three accounts in your niche, they follow the shop two streets over. Finding them by hand means scrolling for hours and keeping a spreadsheet that is stale by the time you finish it.
 
-This extension does the collecting, organising and pacing across three clean tabs — **Collect**, **Your people**, and **Outreach** — each organised with focused sub-tabs. **Collect** drives your visible Instagram tab like a real person (natural mouse movement, real clicks, human-paced dialog scrolling — zero forged Instagram API requests), previews the people it found, and saves them into your ready **Default** bucket or any custom bucket you create. **Your people** gives every bucket its own tab with a virtualised table, warmth filters, and one-click bucket assignment. **Outreach** separates **Follow**, **Messages**, and **Unfollow** into dedicated sub-tabs running inside strict daily limits and your waking hours.
+This extension handles collecting, organising, and pacing across three clean tabs — **Collect**, **Your people**, and **Outreach** — each organised with focused sub-tabs. **Collect** drives your visible Instagram tab like a real person (smooth curved cursor movement, real clicks, human-paced dialog scrolling — zero forged Instagram API requests), previews the people it found, and saves them into your ready **Default** bucket or any custom bucket you create. **Your people** gives every bucket its own tab with a virtualised table, warmth filters, manual **+ Add people**, **Delete all** (for a bucket or the whole workspace), and one-click bucket assignment. **Outreach** separates **Follow**, **Messages**, and **Unfollow** into dedicated sub-tabs running inside strict daily limits and an optional active-hours window.
 
-There is no server, no API key and no account. Everything is stored in IndexedDB on your machine and can be exported in full at any time.
+There is no server, no API key, no subscription, and no account. Everything is stored locally in IndexedDB on your machine and can be exported in full at any time.
+
+## Why this approach works (and what we tried that didn't)
+
+Building reliable Instagram tooling in 2026 meant testing several common approaches against live desktop Instagram, seeing where each one breaks, and keeping only what holds up in a real Chrome session.
+
+### Why visible, in-tab human DOM execution is the best approach
+
+- **Zero private API calls:** Instagram's own React app issues every network request with real page focus, browser TLS fingerprint, scroll telemetry, and genuine DOM interaction. The extension never calls `/api/v1/` or GraphQL endpoints directly — it clicks real buttons, scrolls real modals, and verifies outcomes directly off the rendered UI.
+- **Single foreground tab + instant return:** One normal Instagram tab handles the work cleanly (no parallel tabs racing the same session), shows a compact closed-Shadow-DOM HUD with live progress and an instant **Stop** button, and returns focus to the dashboard when done.
+- **Strict safety governor in code:** Hourly/daily ceilings, log-normal delays with natural distractions and breaks, duplicate-DM prevention, and a persisted circuit breaker on real Instagram action blocks are enforced in pure tested code that the UI cannot exceed.
+- **No MV3 service worker:** Chrome terminates idle service workers mid-run and can fail to register them on busy profiles. Running orchestration from the extension's own dashboard tab over a `chrome.storage.local` mailbox keeps multi-hour runs reliable and survivable across page navigations.
+
+### Approaches we tried that did not work (and why we replaced them)
+
+| What we tried | Why it failed on 2026 Instagram | What we do instead |
+|---|---|---|
+| **Direct `/api/v1/` & GraphQL `fetch()` scraping** | Triggered `401`/`429` responses, rotating header checks (`x-ig-app-id` / `x-asbd-id`), and rapid checkpoints because requests lacked real page telemetry and pointer history. | 100% browser-DOM collection and real-UI clicking/typing inside your visible tab. |
+| **Background / hidden tabs** | Chrome throttles timers and `IntersectionObserver` callbacks in hidden tabs, so Instagram's virtualised Followers/Following/Likes modals stall and stop loading new rows. | Bring one normal Instagram tab to the foreground during a run, then switch focus back to the dashboard automatically. |
+| **Naive `chrome.tabs.sendMessage` + service worker** | Promises hang silently whenever Instagram navigates or reloads mid-action, and MV3 kills idle workers during long outreach waits. | Persistent `chrome.storage.local` mailbox with `storage.onChanged` wake-up, per-command reply keys, `targetTabId` multi-tab routing, and concurrent mid-run `STOP`. |
+| **Raw `textContent` & hardcoded CSS classes** | 2026 Instagram randomises class names and puts `<svg><title>Down chevron icon</title></svg>` inside `"Following"` buttons (`"FollowingDown chevron icon"`), hides icon-only `"Send"` buttons behind `aria-label`, and uses `/<user>/p/<code>/` URLs. | Strip SVG/title subtrees for button matching, check `aria-label` on icon buttons, scope relationship checks to profile `<header>`, and recognise profile-prefixed post URLs. |
+| **Clicking the first `followers` link or scrolling the first `overflow` div** | 2026 profiles render a trap link `<a href=".../followers/mutualOnly">Followed by …</a>` above the real modal, wrap Followers in a decoy `height:auto` div, append a second `"Suggested for you"` scroller inside Following, and stack Likes modals on top of Post modals. | Explicitly skip `mutualOnly`, pick the deepest scrollable container holding real user links before `"Suggested for you"`, and match modal headings strictly so Post modals are never mistaken for Likes/Followers. |
+| **Checking `[role="article"]` / generic `[role="row"]` in Direct DMs** | 2026 Comet Direct renders threads in `[role="grid"] [role="row"]` — and puts a `"View profile"` intro card and encryption banner inside empty new threads (which looked like an existing conversation). | Support Comet `[role="grid"] [role="row"]` while filtering out `"View profile"` cards, timestamps, and system notices, and verify the open thread actually matches the target handle before sending. |
+| **Blocking single-command loop & unified Stop handling** | Awaiting a long collection blocked Dashboard `STOP` until timeout, and treating owner-initiated Stop the same as a platform refusal tripped the 48-hour circuit breaker. | Run long commands asynchronously while control commands (`STOP`/`PING`) execute immediately, and cleanly separate owner stops (`STOPPED`) from real Instagram action blocks. |
 
 ## What it is / what it is not
 
@@ -86,15 +111,19 @@ you.
 1. Keep Instagram logged in in any normal browser tab. The dashboard automatically detects your signed-in session (click the connection pill at any time to sync or open Instagram).
 2. In **Collect**, choose a sub-tab (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), enter a handle or link, and click **Collect** — or launch straight from the floating pill on Instagram. Your Instagram tab comes forward and collects visibly with human cursor movement and scrolling.
 3. Review the people it found — username, name and warmth — then choose a bucket (the ready **Default** bucket is pre-selected, or create a new bucket inline) and press **Save**.
-4. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Click any person to inspect their details or toggle bucket memberships.
-5. Open **Outreach** and pick the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab to plan a dry run and run your outreach at a human pace.
+4. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Use **+ Add people** to paste handles or profile links directly, **Delete all** to clear a bucket or workspace, or click any person to inspect details and toggle buckets.
+5. Open **Outreach** and pick the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab to plan a dry run and run your outreach at a human pace (you can adjust or disable the active-hours window in **Settings** or directly from the Outreach banner).
 
 ## Quick start
+
+**Fastest way:** download the ready-to-load extension zip from the [download page](https://ahmed-sleem.github.io/ig-outreach-crm/), unzip it, and load it unpacked in `chrome://extensions`.
+
+**Or build from source:**
 
 ```bash
 git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
 cd ig-outreach-crm
-npm test                       # 786 tests, no dependencies
+npm test                       # 818 tests, no dependencies
 npm run verify                 # 24 checks: shape, hygiene, code invariants, links, tests
 node scripts/build.mjs         # writes the loadable folder to build/extension/
 node scripts/check-package.mjs build/extension   # verifies it the way Chrome would load it

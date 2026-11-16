@@ -35,6 +35,7 @@ import {
   findButtonByLabel,
   findConfirmDialog,
   findDialogs,
+  isProfileUnavailable,
   isRtlElement,
   threadBubbles,
 } from './selectors.js';
@@ -43,8 +44,8 @@ import {
 export const SETTLE_MS = Object.freeze({
   follow: 3500,
   unfollow: 3500,
-  dmSend: 5000,
-  dmOpen: 4000,
+  dmSend: 6500,
+  dmOpen: 7000,
   dialog: 2500,
 });
 
@@ -294,11 +295,25 @@ export function readRelationshipState(document) {
  * an action block is on screen.
  */
 export async function executeFollow(ctx, options = {}) {
-  const { document, signal = null, settleMs = SETTLE_MS.follow } = { ...options };
+  const { document, signal = null, settleMs = SETTLE_MS.follow, readyTimeoutMs = 0 } = { ...options };
   if (!document) return refusal('no document to act on');
   if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
+  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
 
-  const before = readRelationshipState(document);
+  let before = readRelationshipState(document);
+  if (!before.button && readyTimeoutMs > 0) {
+    ctx.virtualCursor?.label?.('Waiting for profile…');
+    const hydrated = await waitFor(ctx, () => {
+      if (isActionBlocked(document) || isProfileUnavailable(document)) return { earlyExit: true };
+      const cur = readRelationshipState(document);
+      return cur.button ? cur : null;
+    }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile Follow button' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
+    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+    if (hydrated.found && hydrated.value?.button) before = hydrated.value;
+    else before = readRelationshipState(document);
+  }
   if (before.state === 'following') return halted(ActionOutcome.SKIPPED, 'already following this account');
   if (before.state === 'requested') return halted(ActionOutcome.SKIPPED, 'a follow request is already pending');
   if (!before.button) return refusal(before.reason ?? 'no Follow button found');
@@ -336,12 +351,27 @@ export async function executeFollow(ctx, options = {}) {
  * the click sequence and verifies it landed.
  */
 export async function executeUnfollow(ctx, options = {}) {
-  const { document, signal = null, settleMs = SETTLE_MS.unfollow } = { ...options };
+  const { document, signal = null, settleMs = SETTLE_MS.unfollow, readyTimeoutMs = 0, allowRequested = false } = { ...options };
   if (!document) return refusal('no document to act on');
   if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
+  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
 
-  const before = readRelationshipState(document);
-  if (before.state !== 'following') {
+  let before = readRelationshipState(document);
+  if (!before.button && readyTimeoutMs > 0) {
+    ctx.virtualCursor?.label?.('Waiting for profile…');
+    const hydrated = await waitFor(ctx, () => {
+      if (isActionBlocked(document) || isProfileUnavailable(document)) return { earlyExit: true };
+      const cur = readRelationshipState(document);
+      return cur.button ? cur : null;
+    }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile relationship button' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (isActionBlocked(document)) return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop');
+    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+    if (hydrated.found && hydrated.value?.button) before = hydrated.value;
+    else before = readRelationshipState(document);
+  }
+  const canClick = before.state === 'following' || (allowRequested && before.state === 'requested');
+  if (!canClick) {
     return halted(ActionOutcome.SKIPPED, `not following this account (state: ${before.state})`);
   }
 
@@ -416,7 +446,7 @@ export function caretToEnd(ctx, editor) {
 export function readComposerText(editor) {
   if (!editor) return '';
   const rendered = typeof editor.innerText === 'string' ? editor.innerText : editor.textContent;
-  return collapse(rendered);
+  return collapse(String(rendered ?? '').replace(/[\u200B-\u200D\uFEFF]/g, ''));
 }
 
 /**
@@ -455,6 +485,7 @@ export async function composeMessage(ctx, options = {}) {
   if (!target) return refusal(found.reason);
 
   ctx.virtualCursor?.label?.('Typing message…');
+  try { target.focus?.(); } catch { /* noop */ }
   caretToEnd(ctx, target);
   if (readComposerText(target)) {
     document.execCommand?.('selectAll');
@@ -468,7 +499,17 @@ export async function composeMessage(ctx, options = {}) {
   for (let index = 0; index < lines.length; index += 1) {
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
     if (index > 0) document.execCommand?.('insertLineBreak');
-    document.execCommand?.('insertText', false, lines[index]);
+    const inserted = document.execCommand?.('insertText', false, lines[index]);
+    if (inserted === false && typeof globalThis.InputEvent === 'function') {
+      try {
+        target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
+          inputType: 'insertText',
+          data: lines[index],
+          bubbles: true,
+          cancelable: true,
+        }));
+      } catch { /* shim */ }
+    }
     await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
   }
 
@@ -541,10 +582,28 @@ export function threadShowsSeen(document) {
  * function reports as `needsNavigation` rather than pretending the thread opened.
  */
 export async function openDm(ctx, options = {}) {
-  const { document, signal = null, timeoutMs = SETTLE_MS.dmOpen } = options;
+  const { document, signal = null, timeoutMs = SETTLE_MS.dmOpen, readyTimeoutMs = 0 } = options;
   if (!document) return refusal('no document to act on');
+  if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
 
-  const hit = findButtonByLabel(document, [Label.MESSAGE]);
+  let hit = findButtonByLabel(document, [Label.MESSAGE]);
+  if (!hit && readyTimeoutMs > 0) {
+    ctx.virtualCursor?.label?.('Waiting for profile…');
+    const hydrated = await waitFor(ctx, () => {
+      if (isActionBlocked(document) || isProfileUnavailable(document)) return { earlyExit: true };
+      const msg = findButtonByLabel(document, [Label.MESSAGE]);
+      if (msg) return msg;
+      // If the profile header already rendered Follow/Following with no Message
+      // button, don't wait the full timeout — this profile hides Message.
+      const rel = readRelationshipState(document);
+      if (rel.button) return { noMessageButton: true };
+      return null;
+    }, { timeoutMs: readyTimeoutMs, intervalMs: 150, signal, label: 'profile Message button' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (isProfileUnavailable(document)) return refusal('this profile is unavailable or was deleted');
+    if (hydrated.found && hydrated.value?.button) hit = hydrated.value;
+    else hit = findButtonByLabel(document, [Label.MESSAGE]);
+  }
   if (!hit) {
     return refusal('this profile renders no Message button', { needsNavigation: true });
   }

@@ -38,8 +38,9 @@ cookies.json
 workspaces/
 leads/
 
-# Packaged extension
+# Packaged extension (except the prebuilt GitHub Pages download bundle)
 *.zip
+!docs/ig-outreach-crm-extension.zip
 *.crx
 
 # Internal working records (never published)

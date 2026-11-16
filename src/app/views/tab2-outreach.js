@@ -272,12 +272,31 @@ export function createOutreachView(ctx = {}) {
       stat('Warm-up', budget.warmupFactor >= 1 ? 'full' : `${Math.round(budget.warmupFactor * 100)}%`, { sub: locked ? 'locked' : `day ${budget.warmupDay}` }),
     );
     clear(gateNote);
+    const outsideWindow = plan?.gate?.reason === 'outside the active window' || (!locked && !budget.scheduleOpen);
     if (locked) {
       gateNote.append(note(`Everything is locked until ${clockAt(budget.lockedUntil)} — ${budget.lockReason ?? 'safety lock'}. Starting again early only extends the platform's patience.`, 'danger'));
+    } else if (outsideWindow) {
+      const startH = plan?.settings?.schedule?.activeStartLocal ?? '09:30';
+      const endH = plan?.settings?.schedule?.activeEndLocal ?? '22:30';
+      const opens = clockAt(budget.windowOpensAt ?? plan?.gate?.opensAt) ?? startH;
+      const box = el('div', { class: 'note note--warning row row--wrap' }, [
+        el('span', {
+          class: 'grow',
+          text: `Paused by your local active-hours schedule (${startH}–${endH}; opens at ${opens}). You have not hit any follow/DM limit — turn off the active-hours window if you want to run right now.`,
+        }),
+        btn('Run at any hour', {
+          variant: 'sm primary',
+          onClick: async () => {
+            await api.saveSettings({ scheduleEnabled: false });
+            say('Active-hours restriction disabled. Daily & hourly caps still apply.', 'success');
+            await refreshPlan();
+            ctx.onChanged?.();
+          },
+        }),
+      ]);
+      gateNote.append(box);
     } else if (plan && !plan.canStart) {
       gateNote.append(note(plan.gateMessage ?? 'The governor will not start this run right now.', 'warning'));
-    } else if (!budget.scheduleOpen) {
-      gateNote.append(note(`Outside the active window. It opens at ${clockAt(budget.windowOpensAt) ?? '—'}.`, 'warning'));
     }
   }
 
@@ -366,7 +385,13 @@ export function createOutreachView(ctx = {}) {
     ]));
     const top = (plan.queue ?? []).slice(0, 12);
     if (!top.length) {
-      body.append(note(counts.ready === 0 ? 'Nobody is waiting for this action right now: everyone in scope was already actioned, is protected, or is inside a spacing delay.' : 'The queue is empty.', ''));
+      const dmMutualEmpty = mode === QueueMode.DM && policyState.mutualOnly && (counts.considered ?? 0) > 0;
+      const emptyMsg = dmMutualEmpty
+        ? 'Nobody in this bucket follows you back yet. Turn off "Only message mutuals" above to message people as cold invites (within your cold-invite cap), or run Follow first.'
+        : (counts.ready === 0
+          ? 'Nobody is waiting for this action right now: everyone in scope was already actioned, is protected, or is inside a spacing delay.'
+          : 'The queue is empty.');
+      body.append(note(emptyMsg, ''));
     } else if (mode === QueueMode.DM) {
       body.append(table(
         ['#', 'Username', 'Warmth', 'Action', 'Message preview'],
