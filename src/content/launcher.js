@@ -35,7 +35,7 @@
 
 import { usernameFromPath } from './selectors.js';
 
-export const HOST_ID = 'ig-crm-launcher-host';
+export const HOST_ID = 'ui-dock-root';
 
 /** How often the pill re-checks the URL and its own existence. */
 export const LAUNCHER_TICK_MS = 1000;

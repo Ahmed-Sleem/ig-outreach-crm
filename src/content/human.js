@@ -16,7 +16,7 @@
 
 import { interruptibleWait } from './pacing.js';
 
-export const CURSOR_HOST_ID = 'ig-crm-human-cursor';
+export const CURSOR_HOST_ID = 'ui-pointer-layer';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -222,7 +222,7 @@ export function createVirtualCursor(document) {
       display: 'none',
     });
 
-    const mountRoot = typeof host.attachShadow === 'function' ? host.attachShadow({ mode: 'open' }) : host;
+    const mountRoot = typeof host.attachShadow === 'function' ? host.attachShadow({ mode: 'closed' }) : host;
 
     pointerEl = document.createElement('div');
     Object.assign(pointerEl.style, {
@@ -607,6 +607,45 @@ export async function humanScrollContainer(ctx, container, {
     didWander,
     didPause,
   };
+}
+
+/**
+ * Scroll-up-then-down recovery nudge for Instagram's virtualized list modals.
+ *
+ * On 2026 desktop Instagram, Followers / Following / Likes / Comments modals
+ * occasionally stall at the bottom without firing the next lazy-load request
+ * until the user scrolls slightly upward and then back down.
+ */
+export async function humanNudgeScroll(ctx, container, {
+  signal = null,
+  label = 'Loading more…',
+} = {}) {
+  if (!container || signal?.aborted) return { nudged: false };
+  const wait = ctx?.wait ?? interruptibleWait;
+  const random = typeof ctx?.random === 'function' ? ctx.random : Math.random;
+  const visual = ctx?.virtualCursor ?? null;
+  visual?.label?.(label);
+
+  const clientH = Math.max(120, Number(container.clientHeight ?? 400));
+  const upPx = randInt(120, Math.min(260, Math.round(clientH * 0.65)), random);
+  const startTop = Number(container.scrollTop ?? 0);
+
+  // 1. Gentle upward pull
+  const upTarget = Math.max(0, startTop - upPx);
+  container.scrollTop = upTarget;
+  dispatchWheelAndScroll(container, -(startTop - upTarget || upPx));
+  await wait(humanDelayMs(240, 520, random), { signal });
+  if (signal?.aborted) return { nudged: false };
+
+  // 2. Smooth downward return to trigger pagination observer
+  const downPx = upPx + randInt(120, 260, random);
+  const scrollH = Number(container.scrollHeight ?? 0);
+  const maxTop = Math.max(0, scrollH - clientH);
+  const nextTop = maxTop > 0 ? Math.min(maxTop, upTarget + downPx) : upTarget + downPx;
+  container.scrollTop = nextTop;
+  dispatchWheelAndScroll(container, downPx);
+  await wait(humanDelayMs(220, 480, random), { signal });
+  return { nudged: true };
 }
 
 /**

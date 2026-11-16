@@ -5,7 +5,8 @@ which parts are in the tree today.
 
 ## Runtime topology
 
-Three contexts, one database, no background service worker.
+Two foreground contexts, one database, no background service worker, strictly
+one active task at a time while the dashboard is open.
 
 ```text
 DASHBOARD TAB  (chrome-extension://<id>/app/index.html)
@@ -13,14 +14,12 @@ DASHBOARD TAB  (chrome-extension://<id>/app/index.html)
 ├── Tab 2  Your people: bucket tabs (All people, ready Default, user buckets + New bucket), virtual table, dossier drawer
 ├── Tab 3  Outreach: 3 separated sub-tabs (Follow, Messages + Message studio, Unfollow), quota meters, live run log
 ├── src/core/*      pure engines: scoring, lifecycle, random, governor, templates, linter
-├── src/storage/*   IndexedDB workspace, clamped settings, BroadcastChannel sync
-└── scheduler.worker.js   dedicated Web Worker, one wall-clock tick per second
+└── src/storage/*   IndexedDB workspace, clamped settings
                     │
-                    │ chrome.tabs.sendMessage (timeout-guarded, visible tab focus)
+                    │ chrome.tabs.sendMessage (one task at a time; auto-returns focus to dashboard when done)
                     ▼
-INSTAGRAM TABS  (https://www.instagram.com/*)
-├── your own browsing tabs   DOM-first session probe, floating pill, visible human DOM collector
-└── one managed worker tab   human Bezier cursor & scroll engine, real-UI follow/DM/unfollow, post-action verification
+INSTAGRAM TAB  (https://www.instagram.com/*)
+└── active foreground tab   DOM-first session probe, 2026 browser-DOM collector, human pointer/scroll/click engine, real-UI follow/DM/unfollow
 ```
 
 ## Why there is no background service worker
@@ -28,17 +27,12 @@ INSTAGRAM TABS  (https://www.instagram.com/*)
 Chrome can refuse to register an MV3 service worker (`Service worker registration
 failed. Status code: 2`) for reasons the user cannot see or fix, and because the
 worker is a single shared dependency, that one failure takes down every feature at
-once. Idle workers are also terminated after roughly thirty seconds, which kills
-in-memory timers, and `chrome.alarms` is clamped to one-minute resolution.
+once.
 
-Nothing here needs one. The dashboard page owns the database, the engines and the
-campaign; the content script owns the in-page launcher and its own stop control.
-
-A multi-hour campaign does hit a second browser constraint: Chrome throttles
-`setTimeout` in an unfocused tab to one wake per minute after five minutes. That is
-solved with a dedicated Web Worker (`src/app/lib/scheduler.worker.js`) posting a
-wall-clock tick every second. Dedicated workers run on their own thread, are exempt
-from DOM timer throttling, and cannot fail to register.
+Nothing here runs in the background. The extension strictly runs one task at a
+time while the dashboard is open: it focuses the single Instagram tab to carry
+out the active scan or outreach step visibly, and automatically switches Chrome
+focus back to the dashboard tab as soon as the task finishes.
 
 Every queue item, cooldown timestamp, quota counter and in-flight action is
 persisted to IndexedDB before it is acted on, so closing the browser mid-campaign
@@ -50,16 +44,16 @@ resumes from stored state instead of repeating an action.
 src/
 ├── manifest.json                # MV3, no service_worker, strict CSP, minimal permissions
 ├── content/
-│   ├── content.js               # classic dynamic-import bootstrapper + duplicate guard
-│   ├── main.js                  # message router: browser-DOM collect, follow, message, unfollow
+│   ├── content.js               # classic dynamic-import bootstrapper + Symbol duplicate guard
+│   ├── main.js                  # message router: browser-DOM collect, follow, message, unfollow (zero IG API calls)
 │   ├── probe.js                 # DOM-first signed-in viewer detection (zero IG API calls)
-│   ├── human.js                 # cubic Bezier cursor engine, Shadow-DOM virtual cursor, human scrolling
-│   ├── browser-collector.js     # 100% browser-driven DOM collection (followers, likers, comments, hashtags, dialogs)
-│   ├── adapters.js              # pure row/pagination helpers (not invoked for live collection)
+│   ├── human.js                 # cubic Bezier pointer path, human wheel scrolling & scroll-up/down nudge
+│   ├── browser-collector.js     # 100% browser-driven 2026 DOM collection (followers, likers, comments, hashtags, dialogs)
+│   ├── adapters.js              # pure row/pagination helpers (not invoked in live browser runs)
 │   ├── actions.js               # real-UI follow, unfollow and Lexical DM composer + verification
-│   ├── selectors.js             # single source of exact English and Arabic UI selectors (2026 DOM)
+│   ├── selectors.js             # single source of exact English and Arabic 2026 Instagram DOM selectors
 │   ├── pacing.js                # read pacer and response/block classification
-│   └── launcher.js              # closed Shadow-DOM pill on instagram.com
+│   └── launcher.js              # closed Shadow-DOM quick launcher on instagram.com
 ├── core/                        # pure JS: no chrome.*, no DOM, unit and mutation tested
 │   ├── scoring.js               # provenance aggregation and the tunable priority score
 │   ├── lifecycle.js             # the authoritative (relState, dmState) state machine
@@ -75,16 +69,15 @@ src/
 │   └── sync.js                  # BroadcastChannel('ig-crm-sync') pub/sub
 └── app/
     ├── index.html               # dashboard shell
-    ├── main.js                  # auto-connect session pill, three-tab router, run banner
+    ├── main.js                  # auto-connect session pill, three-tab router, foreground timer, run banner
     ├── design/{tokens,app}.css  # single source of colour, space, type, theme
     ├── lib/
     │   ├── ui.js                # el(), scannedText(), virtualTable(), modal(), drawer(), toast()
-    │   ├── api.js               # timeout-guarded tab messaging, auto Default bucket, visible tab focus
+    │   ├── api.js               # timeout-guarded tab messaging, auto Default bucket, focusDashboard auto-return
     │   ├── virtual-list.js      # windowed rows for tables of tens of thousands of leads
-    │   ├── export-utils.js      # BOM CSV with formula guard, .igcrm.json backup, printable HTML
-    │   └── scheduler.worker.js  # unthrottled one-second tick
+    │   └── export-utils.js      # BOM CSV with formula guard, .igcrm.json backup, printable HTML
     └── views/
-        ├── tab1-collector.js    # 4 source sub-tabs, visible collection launcher, preview & bucket save
+        ├── tab1-collector.js    # 4 source sub-tabs, single-task collector, preview & bucket save
         ├── tab-people.js        # bucket sub-tabs (All people, Default, custom), virtual table, dossier drawer
         ├── tab2-outreach.js     # 3 separated sub-tabs (Follow, Messages + studio, Unfollow), quota meters
         ├── backup-export.js     # restore points, exports, importers

@@ -149,7 +149,7 @@ export function createCollectorView(ctx = {}) {
     stepDetail.append(field('How many people', {
       type: 'number',
       value: String(limit),
-      hint: 'Between 1 and 5000. Runs visibly in your Instagram tab at a human pace.',
+      hint: 'Between 1 and 5000.',
       onInput: (value) => { limit = Math.max(1, Math.min(5000, Number(value) || 200)); },
     }));
     validate(true);
@@ -226,7 +226,7 @@ export function createCollectorView(ctx = {}) {
       }
       lastParse = parsed;
     }
-    statusLine.textContent = 'Opening Instagram visibly and collecting at a human pace\u2026';
+    statusLine.textContent = 'Scanning\u2026';
     let tabId;
     const from = pendingFrom;
     pendingFrom = null;
@@ -272,7 +272,6 @@ export function createCollectorView(ctx = {}) {
       bannerSlot,
       stepMode,
       stepDetail,
-      note('Runs visibly in your open Instagram tab with human cursor movement and scrolling — no Instagram API calls.', 'info'),
       el('div', { class: 'row row--wrap' }, [collectBtn]),
       statusLine,
       errorSlot,

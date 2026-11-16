@@ -69,15 +69,6 @@ import {
 /** Where the content script looks to find out which workspace it serves. */
 export { ACTIVE_WORKSPACE_KEY };
 
-/**
- * The managed Instagram window: small, parked beside the dashboard, reused.
- *
- * A dedicated window beats driving whatever tab the owner happens to have open,
- * because the owner keeps browsing while a run works, and a run that follows the
- * active tab would navigate away from the page they are reading.
- */
-export const WORKER_WINDOW = Object.freeze({ width: 480, height: 780, left: 40, top: 40 });
-
 const IG_URL_PATTERNS = Object.freeze(['*://www.instagram.com/*', '*://i.instagram.com/*']);
 
 /**
@@ -146,20 +137,14 @@ export function describeTab(tab) {
 /**
  * Which open tab should do the work.
  *
- * Preference order: the tab the owner asked for, then the managed worker window,
- * then an Instagram tab showing the right profile, then any Instagram tab. Picking
- * "the active tab" is what silently aims a follow at the wrong person when the
- * owner has five profiles open and clicks into the dashboard.
+ * Preference order: the tab the owner asked for, then an Instagram tab showing
+ * the right profile, then the active Instagram tab, then any open Instagram tab.
  */
-export function pickTab(tabs, { tabId = null, username = null, workerTabId = null } = {}) {
+export function pickTab(tabs, { tabId = null, username = null } = {}) {
   const described = (tabs ?? []).map(describeTab).filter((tab) => tab.instagram);
   if (tabId !== null && tabId !== undefined) {
     const wanted = described.find((tab) => tab.id === Number(tabId));
     if (wanted) return { tab: wanted, reason: 'requested' };
-  }
-  if (workerTabId !== null && workerTabId !== undefined) {
-    const worker = described.find((tab) => tab.id === Number(workerTabId));
-    if (worker) return { tab: worker, reason: 'worker' };
   }
   if (username) {
     const exact = described.find((tab) => tab.username === username);
@@ -173,49 +158,30 @@ export function pickTab(tabs, { tabId = null, username = null, workerTabId = nul
 
 const defaultSleep = (ms) => new Promise((resolve) => {
   const timer = setTimeout(resolve, ms);
-  // Node only: a pending timer keeps the process alive, so an abandoned wait
-  // would hold `node --test` open long after the tests finished.
   if (typeof timer?.unref === 'function') timer.unref();
 });
 
-/** Where the remembered worker window is kept between dashboard sessions. */
-export const WORKER_WINDOW_KEY = 'ig_crm_worker_window_v1';
-
 /**
- * The managed Instagram window and the tabs inside it.
+ * Single-tab foreground Instagram controller.
  *
- * Everything here is injected (`chromeApi`, `sleep`) because a controller that
- * can only be exercised in a real browser is a controller nobody tests, and the
- * failure it hides — aiming a follow at the wrong tab — is the expensive one.
+ * Strictly runs one task at a time inside a normal Instagram tab while the
+ * user has the dashboard open, and returns focus back to the dashboard tab
+ * automatically as soon as the task finishes.
  */
 export function createTabController({
   chromeApi = null,
   sleep = defaultSleep,
   now = () => Date.now(),
-  windowShape = WORKER_WINDOW,
 } = {}) {
   const chrome = chromeApi ?? globalThis.chrome;
   if (!chrome?.tabs) throw new Error('chrome.tabs is unavailable: the dashboard must run as an extension page');
-
-  const readMemory = async () => {
-    try {
-      return (await chrome.storage?.local?.get(WORKER_WINDOW_KEY))?.[WORKER_WINDOW_KEY] ?? null;
-    } catch {
-      return null;
-    }
-  };
-  const writeMemory = async (value) => {
-    try {
-      await chrome.storage?.local?.set({ [WORKER_WINDOW_KEY]: value });
-    } catch { /* a failed memo costs a new window next time, nothing more */ }
-  };
 
   const tabById = async (tabId) => {
     if (tabId === null || tabId === undefined) return null;
     try {
       return describeTab(await chrome.tabs.get(Number(tabId)));
     } catch {
-      return null; // the tab is gone: closed, crashed or discarded
+      return null;
     }
   };
 
@@ -226,46 +192,7 @@ export function createTabController({
       return (tabs ?? []).map(describeTab);
     },
 
-    /**
-     * The managed worker window, created once and reused.
-     *
-     * `focused: false` matters: stealing focus from the dashboard every time a
-     * run starts is how an extension gets closed in frustration.
-     */
-    async ensureWorker({ url = 'https://www.instagram.com/', reuse = true } = {}) {
-      const remembered = reuse ? await readMemory() : null;
-      if (remembered?.tabId) {
-        const existing = await tabById(remembered.tabId);
-        if (existing) {
-          if (url && existing.url !== url) await chrome.tabs.update(existing.id, { url });
-          return { tab: existing, created: false };
-        }
-      }
-      const win = await chrome.windows.create({
-        url,
-        type: 'popup',
-        width: windowShape.width,
-        height: windowShape.height,
-        left: windowShape.left,
-        top: windowShape.top,
-        focused: false,
-      });
-      const tab = describeTab((win?.tabs ?? [])[0] ?? { id: win?.id, windowId: win?.id, url });
-      await writeMemory({ windowId: win?.id ?? null, tabId: tab.id, createdAt: now() });
-      return { tab, created: true, windowId: win?.id ?? null };
-    },
-
-    /** The remembered worker tab if it still exists, without creating one. */
-    async worker() {
-      const remembered = await readMemory();
-      if (!remembered?.tabId) return null;
-      return tabById(remembered.tabId);
-    },
-
-    /**
-     * Bring an Instagram tab into view so the owner can watch the browser
-     * automation work right in front of them.
-     */
+    /** Bring an Instagram tab into view while a task is actively running. */
     async focus(tabId) {
       if (tabId === null || tabId === undefined) return { ok: false, reason: 'no tab id' };
       try {
@@ -274,6 +201,26 @@ export function createTabController({
           try { await chrome.windows.update(Number(tab.windowId), { focused: true }); } catch { /* window focus may be disallowed */ }
         }
         return { ok: true, tab: describeTab(tab) };
+      } catch (error) {
+        return { ok: false, reason: String(error?.message ?? error) };
+      }
+    },
+
+    /**
+     * Automatically return focus back to the dashboard tab once a scan or
+     * outreach task finishes.
+     */
+    async focusDashboard() {
+      try {
+        const current = typeof chrome.tabs.getCurrent === 'function'
+          ? await chrome.tabs.getCurrent()
+          : null;
+        if (!current?.id) return { ok: false, reason: 'dashboard tab id unavailable' };
+        await chrome.tabs.update(Number(current.id), { active: true });
+        if (current.windowId !== undefined && current.windowId !== null && typeof chrome.windows?.update === 'function') {
+          try { await chrome.windows.update(Number(current.windowId), { focused: true }); } catch { /* best effort */ }
+        }
+        return { ok: true, tabId: current.id };
       } catch (error) {
         return { ok: false, reason: String(error?.message ?? error) };
       }
@@ -296,10 +243,6 @@ export function createTabController({
 
     /**
      * Move a tab and wait for it to arrive.
-     *
-     * `chrome.tabs.update` throws for a discarded or crashed tab, and an uncaught
-     * throw here would surface as "the dashboard broke" instead of "that tab is
-     * gone", so the failure is returned like every other.
      */
     async navigate(tabId, url, options = {}) {
       try {
@@ -327,32 +270,13 @@ export function createTabController({
       return { ok: false, reason: `the tab was still loading after ${Math.round(timeoutMs / 1000)}s`, tab };
     },
 
-    /**
-     * Put the content script in a tab that does not have it.
-     *
-     * A tab opened before the extension was installed or reloaded never ran the
-     * manifest's content script, and without this the dashboard would report
-     * "the tab is not responding" for a page that is perfectly healthy. The
-     * loader guards against running twice, so injecting into a live tab is safe.
-     */
+    /** Put the content script in a tab that does not have it yet. */
     async inject(tabId) {
       try {
         await chrome.scripting.executeScript({ target: { tabId: Number(tabId) }, files: ['content/content.js'] });
         return { ok: true };
       } catch (error) {
         return { ok: false, reason: String(error?.message ?? error) };
-      }
-    },
-
-    async closeWorker() {
-      const remembered = await readMemory();
-      await writeMemory(null);
-      if (!remembered?.windowId) return { closed: false };
-      try {
-        await chrome.windows.remove(Number(remembered.windowId));
-        return { closed: true };
-      } catch {
-        return { closed: false };
       }
     },
 
@@ -1082,8 +1006,7 @@ export function createApiClient({
         tabsList = [opened.tab];
       }
 
-      const worker = typeof controller.worker === 'function' ? await controller.worker() : null;
-      const picked = pickTab(tabsList, { workerTabId: worker?.id ?? null });
+      const picked = pickTab(tabsList);
       const targetTab = picked?.tab ?? tabsList[0];
       if (!targetTab?.id) {
         return { connected: false, loggedIn: false, tabFound: false, tabId: null, viewerUsername: null, viewerId: null, reason: 'No usable Instagram tab found.' };

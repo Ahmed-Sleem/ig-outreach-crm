@@ -4,8 +4,6 @@ import { installFakeIndexedDB } from './helpers/fake-indexeddb.mjs';
 import {
   ACTIVE_WORKSPACE_KEY,
   BOOTSTRAP_WORKSPACE_ID,
-  WORKER_WINDOW,
-  WORKER_WINDOW_KEY,
   applyEvents,
   createApiClient,
   createCommandChannel,
@@ -44,27 +42,31 @@ function fakeChrome({ tabs = [], autoLoad = false, failUpdate = false } = {}) {
         if (!tab) throw new Error('No tab with id');
         return tab;
       },
+      getCurrent: async () => {
+        calls.push(['tabs.getCurrent']);
+        return { id: 99, windowId: 1, url: 'chrome-extension://local/app/index.html', active: false };
+      },
+      create: async (options) => {
+        calls.push(['tabs.create', options]);
+        const id = nextTabId++;
+        const tab = { id, windowId: 1, url: options.url, status: flags.autoLoad ? 'complete' : 'loading', active: Boolean(options.active), title: 'Instagram' };
+        tabMap.set(id, tab);
+        return tab;
+      },
       update: async (id, patch) => {
         calls.push(['update', Number(id), patch]);
         const tab = tabMap.get(Number(id));
-        if (!tab) throw new Error('No tab with id');
+        if (!tab) {
+          if (Number(id) === 99) return { id: 99, windowId: 1, active: Boolean(patch.active) };
+          throw new Error('No tab with id');
+        }
         if (flags.failUpdate) throw new Error('The tab was discarded');
-        // A real page finishes loading; `autoLoad: false` lets a test hold one
-        // mid-load to exercise the ceiling instead of the happy path.
         Object.assign(tab, patch, { status: flags.autoLoad ? 'complete' : 'loading' });
         return tab;
       },
     },
     windows: {
-      create: async (options) => {
-        calls.push(['windows.create', options]);
-        const windowId = nextWindowId++;
-        const id = nextTabId++;
-        const tab = { id, windowId, url: options.url, status: 'loading', active: true, title: 'Instagram' };
-        tabMap.set(id, tab);
-        return { id, tabs: [tab] };
-      },
-      remove: async (id) => { calls.push(['windows.remove', Number(id)]); },
+      update: async (id, patch) => { calls.push(['windows.update', Number(id), patch]); return { id: Number(id), ...patch }; },
     },
     scripting: {
       executeScript: async (options) => {
@@ -138,7 +140,6 @@ describe('urls, tabs and timeouts', () => {
       { id: 3, url: 'https://example.com/', active: false },
     ];
     assert.equal(pickTab(tabs, { tabId: 2 }).reason, 'requested');
-    assert.equal(pickTab(tabs, { workerTabId: 2 }).reason, 'worker');
     assert.equal(pickTab(tabs, { username: 'sara' }).tab.id, 2, 'the active tab is the wrong person here');
     assert.equal(pickTab(tabs, {}).reason, 'active');
     assert.equal(pickTab([{ id: 3, url: 'https://example.com/' }], {}).reason, 'none');
@@ -278,38 +279,27 @@ describe('outcomes become states', () => {
   });
 });
 
-describe('the managed worker window', () => {
-  test('it is created small, unfocused, and remembered', async () => {
-    const fake = fakeChrome();
-    let t = 1000;
-    const tabs = createTabController({ chromeApi: fake.chromeApi, sleep: async () => {}, now: () => t });
-    const first = await tabs.ensureWorker({ url: 'https://www.instagram.com/direct/new/sara/' });
-    assert.equal(first.created, true);
-    const options = fake.calls.find((call) => call[0] === 'windows.create')[1];
-    assert.equal(options.width, WORKER_WINDOW.width);
-    assert.equal(options.height, WORKER_WINDOW.height);
-    assert.equal(options.type, 'popup');
-    assert.equal(options.focused, false, 'stealing focus from the dashboard is how an extension gets closed');
-    assert.ok(fake.store.get(WORKER_WINDOW_KEY).tabId, 'the worker is remembered for the next run');
-    assert.equal(fake.store.get(WORKER_WINDOW_KEY).createdAt, 1000);
-
-    fake.finishLoad(first.tab.id);
-    const second = await tabs.ensureWorker({ url: 'https://www.instagram.com/direct/new/sara/' });
-    assert.equal(second.created, false);
-    assert.equal(second.tab.id, first.tab.id, 'one worker window, reused');
-    assert.equal(fake.calls.filter((call) => call[0] === 'windows.create').length, 1);
+describe('the single foreground Instagram tab controller', () => {
+  test('openInstagram opens a normal visible tab and never creates a detached popup window', async () => {
+    const fake = fakeChrome({ autoLoad: true });
+    const tabs = createTabController({ chromeApi: fake.chromeApi, sleep: async () => {}, now: () => 1000 });
+    const opened = await tabs.openInstagram('https://www.instagram.com/sara/');
+    assert.equal(opened.ok, true);
+    assert.equal(opened.created, true);
+    assert.equal(opened.tab.url, 'https://www.instagram.com/sara/');
+    const createCall = fake.calls.find((c) => c[0] === 'tabs.create');
+    assert.ok(createCall, 'uses a normal browser tab');
+    assert.equal(createCall[1].active, true);
+    assert.equal(tabs.ensureWorker, undefined, 'no separate background worker window exists');
   });
 
-  test('a worker whose tab was closed is replaced, and reuse can be refused', async () => {
+  test('focusDashboard returns Chrome focus back to the dashboard tab automatically', async () => {
     const fake = fakeChrome();
     const tabs = createTabController({ chromeApi: fake.chromeApi, sleep: async () => {}, now: () => 0 });
-    const first = await tabs.ensureWorker({});
-    fake.tabMap.delete(first.tab.id);
-    const replaced = await tabs.ensureWorker({});
-    assert.equal(replaced.created, true);
-    assert.notEqual(replaced.tab.id, first.tab.id);
-    const forced = await tabs.ensureWorker({ reuse: false });
-    assert.equal(forced.created, true);
+    const res = await tabs.focusDashboard();
+    assert.deepEqual(res, { ok: true, tabId: 99 });
+    assert.ok(fake.calls.some((c) => c[0] === 'update' && c[1] === 99 && c[2].active === true));
+    assert.ok(fake.calls.some((c) => c[0] === 'windows.update' && c[1] === 1 && c[2].focused === true));
   });
 
   test('navigation waits for the load and reports a tab that never finishes', async () => {
@@ -321,7 +311,6 @@ describe('the managed worker window', () => {
     assert.match(slow.reason, /still loading after 1s/);
     assert.equal(t >= 1000, true);
 
-    // Now let the page finish loading, as a real one would.
     fake.flags.autoLoad = true;
     const fast = await tabs.navigate(5, 'https://www.instagram.com/omar/');
     assert.equal(fast.ok, true);
@@ -354,16 +343,6 @@ describe('the managed worker window', () => {
     const tabs = createTabController({ chromeApi: fake.chromeApi, sleep: async () => {}, now: () => 0 });
     assert.deepEqual(await tabs.inject(5), { ok: true });
     assert.deepEqual(fake.calls.find((call) => call[0] === 'inject'), ['inject', 5, ['content/content.js']]);
-  });
-
-  test('closing the worker forgets it', async () => {
-    const fake = fakeChrome();
-    const tabs = createTabController({ chromeApi: fake.chromeApi, sleep: async () => {}, now: () => 0 });
-    await tabs.ensureWorker({});
-    assert.deepEqual(await tabs.closeWorker(), { closed: true });
-    assert.equal(fake.store.get(WORKER_WINDOW_KEY), null);
-    assert.deepEqual(await tabs.closeWorker(), { closed: false });
-    assert.equal(await tabs.worker(), null);
   });
 
   test('a controller without chrome.tabs says so instead of failing later', () => {

@@ -19,10 +19,10 @@
 
 import { AccountFlagged, interruptibleWait } from './pacing.js';
 import {
-  createVirtualCursor,
   humanArriveOnPage,
   humanClickTarget,
   humanDelayMs,
+  humanNudgeScroll,
   humanPressEscape,
   humanScrollContainer,
 } from './human.js';
@@ -33,6 +33,8 @@ import {
   findActionBlockDialog,
   findCloseDialogButton,
   findCommentScrollContainer,
+  findDialogLoadMoreButton,
+  findDialogLoadingSpinner,
   findDialogs,
   findLoadMoreCommentsButton,
   findNextPostButton,
@@ -42,6 +44,7 @@ import {
   findScrollableList,
   findVisibleDialog,
   gridTileAuthors,
+  hasFollowerCapNotice,
   isPrivateAccountPage,
   profileLinkUsername,
   usernameFromPath,
@@ -84,15 +87,34 @@ function checkBlocked(document) {
   }
 }
 
+const NOOP_CURSOR = Object.freeze({
+  show() {},
+  move() {},
+  pulseClick() {},
+  label() {},
+  hide() {},
+});
+
 function ensureCursor(ctx) {
+  // Never inject foreign DOM overlay elements into Instagram during live runs;
+  // use an injected cursor only when a caller/test explicitly supplies one.
   if (ctx.virtualCursor) return { cursor: ctx.virtualCursor, owned: false };
-  const cursor = createVirtualCursor(ctx.document);
-  ctx.virtualCursor = cursor;
-  return { cursor, owned: true };
+  return { cursor: NOOP_CURSOR, owned: false };
+}
+
+async function waitWhileLoading(ctx, scope, { maxWaitMs = 4200, signal = null } = {}) {
+  const wait = ctx.wait ?? interruptibleWait;
+  const stepMs = 350;
+  let waited = 0;
+  while (waited < maxWaitMs && !signal?.aborted) {
+    if (!findDialogLoadingSpinner(scope)) break;
+    await wait(stepMs, { signal });
+    waited += stepMs;
+  }
 }
 
 async function closeDialogHuman(ctx, dialog, { signal = null } = {}) {
-  const closeBtn = findCloseDialogButton(dialog);
+  const closeBtn = findCloseDialogButton(dialog, ctx.document);
   if (closeBtn) {
     await humanClickTarget(ctx, closeBtn, { signal, label: 'Closing dialog…', hoverMinMs: 80, hoverMaxMs: 220 });
   } else {
@@ -106,6 +128,14 @@ async function closeDialogHuman(ctx, dialog, { signal = null } = {}) {
 /**
  * Shared human dialog scroller: accumulates unique users from any open
  * Followers, Following, or Likes modal while scrolling naturally.
+ *
+ * Handles all 2026 Instagram dialog behaviors:
+ *   - Waits patiently while `<div role="progressbar">` / `Loading...` is active
+ *   - Clicks in-dialog "See all followers" / "Load more" buttons (never "See All Suggestions")
+ *   - Performs a scroll-up-then-down nudge when Instagram's virtual list stalls
+ *   - Stops cleanly before "Suggested for you"
+ *   - Treats Instagram-imposed partial caps ("Only X can see all followers", 50/100 limit)
+ *     as a normal complete collection of everything Instagram made visible
  */
 export async function scrollDialogForUsers(ctx, dialog, {
   limit = 200,
@@ -114,7 +144,7 @@ export async function scrollDialogForUsers(ctx, dialog, {
   refId = null,
   phase = 'dialog',
   noun = 'people',
-  maxStalls = 5,
+  maxStalls = 4,
   maxSteps = 120,
   onProgress = null,
   signal = null,
@@ -126,6 +156,8 @@ export async function scrollDialogForUsers(ctx, dialog, {
   let stalls = 0;
   let steps = 0;
   let hitSuggested = false;
+  let nudgedAtCount = -1;
+  let loadMoreClicks = 0;
 
   const absorb = () => {
     const extracted = extractDialogUsers(dialog, { excludeUsername, respectSuggestedBoundary });
@@ -148,6 +180,12 @@ export async function scrollDialogForUsers(ctx, dialog, {
     return added;
   };
 
+  // If the dialog opened with a loading spinner still active, let the first batch render
+  await waitWhileLoading(ctx, dialog, { maxWaitMs: 3500, signal });
+  if (signal?.aborted) {
+    return { rows: [...collected.values()].slice(0, limit), steps, hitSuggested, capped: false };
+  }
+
   // Initial read of whatever is already rendered in the dialog
   absorb();
   onProgress?.({
@@ -167,18 +205,33 @@ export async function scrollDialogForUsers(ctx, dialog, {
     steps += 1;
     const beforeSize = collected.size;
 
-    const scrollRes = await humanScrollContainer(ctx, scrollBox, {
-      signal,
-      label: `Scrolling ${noun} (${collected.size}/${limit})…`,
-    });
+    // Click an explicit "See all followers" / "Load more" button if Instagram renders one
+    const loadMoreBtn = loadMoreClicks < 8 ? findDialogLoadMoreButton(dialog) : null;
+    if (loadMoreBtn) {
+      loadMoreClicks += 1;
+      onProgress?.({
+        phase,
+        note: `Loading more ${noun} (${collected.size}/${limit})…`,
+        count: collected.size,
+        limit,
+        step: steps,
+      });
+      await humanClickTarget(ctx, loadMoreBtn, { signal, label: `Loading more ${noun}…` });
+      await wait(humanDelayMs(700, 1400, random), { signal });
+      await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+    } else {
+      await humanScrollContainer(ctx, scrollBox, {
+        signal,
+        label: `Scrolling ${noun} (${collected.size}/${limit})…`,
+      });
+      if (signal?.aborted) break;
+      await wait(humanDelayMs(650, 1450, random), { signal });
+      await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+    }
+
     if (signal?.aborted) break;
 
-    // Wait naturally for React virtual list / network pagination to render new rows
-    const pauseMs = humanDelayMs(650, 1450, random);
-    await wait(pauseMs, { signal });
-    if (signal?.aborted) break;
-
-    const added = absorb();
+    let added = absorb();
     onProgress?.({
       phase,
       note: `Reading ${noun} · ${collected.size}/${limit} collected`,
@@ -192,21 +245,44 @@ export async function scrollDialogForUsers(ctx, dialog, {
 
     if (added === 0 && collected.size === beforeSize) {
       stalls += 1;
-      // One extra patient pause on stall #2 in case Instagram is still loading
-      if (stalls === 2 && !scrollRes.atBottom) {
-        await wait(humanDelayMs(1100, 2100, random), { signal });
-        if (absorb() > 0) stalls = 0;
+
+      // On first stall at a given count, try a gentle scroll-up-then-down nudge
+      // (wakes up Instagram's lazy list IntersectionObserver when it sticks)
+      if (nudgedAtCount !== collected.size && !signal?.aborted) {
+        nudgedAtCount = collected.size;
+        await humanNudgeScroll(ctx, scrollBox, { signal, label: `Refreshing ${noun}…` });
+        await wait(humanDelayMs(750, 1550, random), { signal });
+        await waitWhileLoading(ctx, dialog, { maxWaitMs: 4200, signal });
+        added = absorb();
+        if (added > 0) {
+          stalls = 0;
+          onProgress?.({
+            phase,
+            note: `Reading ${noun} · ${collected.size}/${limit} collected`,
+            count: collected.size,
+            limit,
+            step: steps,
+          });
+          continue;
+        }
       }
+
+      // If Instagram explicitly caps visible followers ("Only X can see all followers")
+      // and a nudge loaded nothing more, stop gracefully right away.
+      if (hasFollowerCapNotice(dialog) && stalls >= 2) break;
       if (stalls >= maxStalls) break;
     } else {
       stalls = 0;
     }
   }
 
+  const rows = [...collected.values()].slice(0, limit);
+  const capped = hasFollowerCapNotice(dialog) || (rows.length > 0 && rows.length < limit && !signal?.aborted);
   return {
-    rows: [...collected.values()].slice(0, limit),
+    rows,
     steps,
     hitSuggested,
+    capped,
   };
 }
 
@@ -281,13 +357,18 @@ export async function collectProfileListDom(ctx, {
     if (!clicked || signal?.aborted) return { ok: false, rows: [], reason: 'Stopped by owner.' };
 
     // Wait for Instagram's followers/following modal to appear & render rows
+    const expectedLabel = listKind === 'following'
+      ? /^(following|أتابع|يتابع|تتابعه)$/i
+      : /^(followers|المتابعون|المتابعين)$/i;
     const dialogWait = await waitFor(
       ctx,
       () => {
-        const dlg = findVisibleDialog(document);
+        const dlg = findVisibleDialog(document, { ariaLabel: expectedLabel }) ?? findVisibleDialog(document);
         if (!dlg) return null;
         const { users } = extractDialogUsers(dlg, { excludeUsername: target });
-        if (users.length > 0 || findScrollableList(dlg)) return dlg;
+        if (users.length > 0 || findScrollableList(dlg) || findDialogLoadingSpinner(dlg) || hasFollowerCapNotice(dlg)) {
+          return dlg;
+        }
         return null;
       },
       { timeoutMs: ctx.domTimeoutMs ?? 9000, intervalMs: 250, signal, label: `the ${listKind} dialog` },
@@ -460,13 +541,17 @@ export async function collectRecentPostLikersDom(ctx, {
         const likesDlgWait = await waitFor(
           ctx,
           () => {
-            const dialogs = [...findDialogs(document)];
+            const labeled = findVisibleDialog(document, { ariaLabel: /^(likes|الإعجابات|تسجيلات الإعجاب)$/i });
+            if (labeled && labeled !== postDialog) {
+              const { users } = extractDialogUsers(labeled, { excludeUsername: target, respectSuggestedBoundary: false });
+              if (users.length > 0 || findScrollableList(labeled) || findDialogLoadingSpinner(labeled)) return labeled;
+            }
+            const dialogs = findDialogs(document);
             if (dialogs.length > dialogCountBefore) {
               const top = dialogs[dialogs.length - 1];
               const { users } = extractDialogUsers(top, { excludeUsername: target, respectSuggestedBoundary: false });
-              if (users.length > 0 || findScrollableList(top)) return top;
+              if (users.length > 0 || findScrollableList(top) || findDialogLoadingSpinner(top)) return top;
             }
-            // Some layouts replace the dialog or open an inline likes dialog
             const top = findVisibleDialog(document);
             if (top && top !== postDialog) return top;
             return null;
@@ -605,10 +690,10 @@ export async function collectPostLikersDom(ctx, {
     const dialogWait = await waitFor(
       ctx,
       () => {
-        const dlg = findVisibleDialog(document);
+        const dlg = findVisibleDialog(document, { ariaLabel: /^(likes|الإعجابات|تسجيلات الإعجاب)$/i }) ?? findVisibleDialog(document);
         if (!dlg) return null;
         const { users } = extractDialogUsers(dlg, { respectSuggestedBoundary: false });
-        if (users.length > 0 || findScrollableList(dlg)) return dlg;
+        if (users.length > 0 || findScrollableList(dlg) || findDialogLoadingSpinner(dlg)) return dlg;
         return null;
       },
       { timeoutMs: ctx.domTimeoutMs ?? 8000, intervalMs: 250, signal, label: 'the Likes dialog' },
@@ -695,6 +780,8 @@ export async function collectPostCommentsDom(ctx, {
     const usersByKey = new Map();
     let stalls = 0;
     let steps = 0;
+    let loadMoreNoGain = 0;
+    let nudgedAtCount = -1;
 
     const absorbComments = () => {
       const found = extractCommentsFromDom(document);
@@ -740,27 +827,46 @@ export async function collectPostCommentsDom(ctx, {
       steps += 1;
       const before = usersByKey.size;
 
-      const loadMore = findLoadMoreCommentsButton(document);
+      // Guard against Instagram's known loop where "Load more comments" stays
+      // visible without returning new unique commenters.
+      const loadMore = loadMoreNoGain < 2 ? findLoadMoreCommentsButton(document) : null;
       if (loadMore) {
         onProgress?.({ phase, note: `Loading more comments (${usersByKey.size}/${limit})…`, count: usersByKey.size, limit, step: steps });
         await humanClickTarget(ctx, loadMore, { signal, label: 'Loading more comments…' });
         await wait(humanDelayMs(850, 1750, random), { signal });
+        await waitWhileLoading(ctx, document, { maxWaitMs: 3500, signal });
       } else {
         const container = findCommentScrollContainer(document) ?? document.scrollingElement ?? document.documentElement;
         if (!container) break;
         await humanScrollContainer(ctx, container, { signal, label: `Scrolling comments (${usersByKey.size}/${limit})…` });
         await wait(humanDelayMs(700, 1450, random), { signal });
+        await waitWhileLoading(ctx, document, { maxWaitMs: 3500, signal });
       }
 
       if (signal?.aborted) break;
-      const added = absorbComments();
+      let added = absorbComments();
       onProgress?.({ phase, note: `Read ${usersByKey.size}/${limit} commenters…`, count: usersByKey.size, limit, step: steps });
 
       if (added === 0 && usersByKey.size === before) {
+        if (loadMore) loadMoreNoGain += 1;
         stalls += 1;
+        const container = findCommentScrollContainer(document);
+        if (container && nudgedAtCount !== usersByKey.size && !signal?.aborted) {
+          nudgedAtCount = usersByKey.size;
+          await humanNudgeScroll(ctx, container, { signal, label: 'Loading comments…' });
+          await wait(humanDelayMs(700, 1400, random), { signal });
+          await waitWhileLoading(ctx, document, { maxWaitMs: 3500, signal });
+          added = absorbComments();
+          if (added > 0) {
+            stalls = 0;
+            loadMoreNoGain = 0;
+            continue;
+          }
+        }
         if (stalls >= 4) break;
       } else {
         stalls = 0;
+        if (loadMore) loadMoreNoGain = 0;
       }
     }
 

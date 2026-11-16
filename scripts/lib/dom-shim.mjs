@@ -34,6 +34,28 @@ class ClassList {
   }
 }
 
+/**
+ * Browser-faithful NodeList returned by `querySelectorAll`.
+ *
+ * Intentionally NOT an Array (no `.some`, `.map`, `.find`, `.filter`) so tests
+ * catch real Chrome `NodeList` crashes (`TypeError: ...some is not a function`)
+ * immediately in Node.
+ */
+class ShimNodeList {
+  constructor(items = []) {
+    for (let i = 0; i < items.length; i += 1) this[i] = items[i];
+    this.length = items.length;
+  }
+  item(i) { return i >= 0 && i < this.length ? this[i] : null; }
+  forEach(fn, thisArg) {
+    for (let i = 0; i < this.length; i += 1) fn.call(thisArg, this[i], i, this);
+  }
+  *keys() { for (let i = 0; i < this.length; i += 1) yield i; }
+  *values() { for (let i = 0; i < this.length; i += 1) yield this[i]; }
+  *entries() { for (let i = 0; i < this.length; i += 1) yield [i, this[i]]; }
+  [Symbol.iterator]() { return this.values(); }
+}
+
 class Element {
   constructor(tagName, doc) {
     this.tagName = tagName;
@@ -181,7 +203,34 @@ class Element {
       };
       walk(this, []);
     }
-    return out;
+    return new ShimNodeList(out);
+  }
+
+  /** Standard DOM tree order comparison (bit 2 = PRECEDING, bit 4 = FOLLOWING, bit 8 = CONTAINS, bit 16 = CONTAINED_BY). */
+  compareDocumentPosition(other) {
+    if (!other || this === other) return 0;
+    let cur = other.parentNode;
+    while (cur) { if (cur === this) return 4 | 16; cur = cur.parentNode; }
+    cur = this.parentNode;
+    while (cur) { if (cur === other) return 2 | 8; cur = cur.parentNode; }
+    let root = this;
+    while (root.parentNode) root = root.parentNode;
+    let seenThis = false;
+    let seenOther = false;
+    let result = 1; // DISCONNECTED
+    const walk = (node) => {
+      if (result !== 1) return;
+      if (node === this) {
+        if (seenOther) { result = 2; return; }
+        seenThis = true;
+      } else if (node === other) {
+        if (seenThis) { result = 4; return; }
+        seenOther = true;
+      }
+      for (const child of node.children ?? []) walk(child);
+    };
+    walk(root);
+    return result;
   }
 
   /** Does this element match the selector? (comma groups, descendant chains.) */

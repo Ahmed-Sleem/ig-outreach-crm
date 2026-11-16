@@ -114,11 +114,21 @@ export function profileLinkUsername(href) {
   return isValidIgUsername(candidate) ? candidate : null;
 }
 
+/** Safe array conversion for `querySelectorAll` (real Chrome returns a non-Array `NodeList`). */
+function qsa(root, selector) {
+  if (!root || typeof root.querySelectorAll !== 'function') return [];
+  try {
+    return [...root.querySelectorAll(selector)];
+  } catch {
+    return [];
+  }
+}
+
 /** Buttons whose exact label is one of the requested kinds. */
 export function findButtonsByLabel(root, kinds) {
   const wanted = new Set(kinds);
   const out = [];
-  for (const button of root.querySelectorAll('button, [role="button"]')) {
+  for (const button of qsa(root, 'button, [role="button"]')) {
     const kind = labelKind(button.textContent);
     if (kind && wanted.has(kind)) out.push({ button, kind });
   }
@@ -135,9 +145,9 @@ export function findButtonByLabel(root, kinds) {
   return null;
 }
 
-/** Any open modal dialog. */
+/** Any open modal dialog (always returned as a plain Array). */
 export function findDialogs(root) {
-  return root.querySelectorAll('[role="dialog"]');
+  return qsa(root, '[role="dialog"]');
 }
 
 /**
@@ -149,7 +159,7 @@ export function findDialogs(root) {
  * dialog on /direct/, or the thread column of the direct page itself.
  */
 export function composerScope(root, pathname = '') {
-  const editors = root.querySelectorAll('[contenteditable="true"]');
+  const editors = qsa(root, '[contenteditable="true"]');
   const onDirect = String(pathname || root?.location?.pathname || '').startsWith('/direct');
   for (const editor of editors) {
     if (editor.closest('[role="dialog"]')) return editor;
@@ -162,7 +172,7 @@ export function composerScope(root, pathname = '') {
 export function threadBubbles(root) {
   const dialogs = findDialogs(root);
   const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : root;
-  return scope.querySelectorAll('[role="article"], [data-igcrm-bubble]');
+  return qsa(scope, '[role="article"]');
 }
 
 /** The unfollow/confirm dialog Instagram opens after an Unfollow click. */
@@ -178,7 +188,7 @@ export function findConfirmDialog(root) {
 export function findActionBlockDialog(root) {
   for (const dialog of findDialogs(root)) {
     if (labelKind(dialog.textContent) === Label.TRY_AGAIN_LATER) return dialog;
-    if (dialog.querySelectorAll('button').some((b) => labelKind(b.textContent) === Label.TRY_AGAIN_LATER)) return dialog;
+    if (qsa(dialog, 'button, [role="button"]').some((b) => labelKind(b.textContent) === Label.TRY_AGAIN_LATER)) return dialog;
     const text = collapse(dialog.textContent);
     if (LABEL_TEXT[Label.TRY_AGAIN_LATER].some((t) => text === t || text.startsWith(`${t} `))) return dialog;
   }
@@ -193,9 +203,18 @@ function overflowYOf(node) {
       if (style?.overflowY) return String(style.overflowY);
     }
   } catch { /* shim */ }
-  return node.style?.overflowY
-    || (node.getAttribute?.('style') ?? '').match(/overflow-y:\s*([a-z-]+)/i)?.[1]
-    || '';
+  if (node.style?.overflowY) return String(node.style.overflowY);
+  if (node.style?.overflow) {
+    const parts = String(node.style.overflow).trim().split(/\s+/);
+    if (parts.length >= 2) return parts[1];
+    if (parts.length === 1 && parts[0]) return parts[0];
+  }
+  const attr = node.getAttribute?.('style') ?? '';
+  const explicit = attr.match(/overflow-y:\s*([a-z-]+)/i)?.[1];
+  if (explicit) return explicit;
+  const shorthand = attr.match(/(?:^|;)\s*overflow:\s*([a-z-]+)(?:\s+([a-z-]+))?/i);
+  if (shorthand) return shorthand[2] ?? shorthand[1] ?? '';
+  return '';
 }
 
 function isNodeVisible(node) {
@@ -214,79 +233,145 @@ function isNodeVisible(node) {
  * The scrollable list inside a followers/following/likers modal — the element
  * the human auto-scroller drives. Chosen by computed overflow and scrollable
  * room, never by a class name Instagram may rename.
+ *
+ * In 2026 Instagram dialogs (e.g. Following with "Suggested for you" underneath),
+ * the modal can contain TWO `overflow: hidden auto` containers: the real list
+ * first, and a second Suggested list below it. We never pick a container that
+ * sits exclusively AFTER the "Suggested for you" boundary.
  */
 export function findScrollableList(root) {
   if (!root) return null;
+  const boundary = findSuggestedBoundary(root);
+  const orderMap = boundary ? buildOrderMap(root) : null;
   let bestExplicit = null;
   let bestExplicitRoom = 0;
   let bestFallback = null;
   let bestFallbackRoom = 0;
+  let firstOverflowWithUsers = null;
 
-  for (const node of root.querySelectorAll('div')) {
+  for (const node of qsa(root, 'div')) {
     if (!isNodeVisible(node)) continue;
-    const room = (Number(node.scrollHeight ?? 0)) - (Number(node.clientHeight ?? 0));
-    if (room <= 0) continue;
+    // Skip any sub-scroller that lives entirely AFTER "Suggested for you"
+    if (boundary && isAfterInRoot(node, boundary, orderMap)) continue;
+
     const overflowY = overflowYOf(node);
     const explicitScrollable = /^(auto|scroll|overlay)$/i.test(overflowY);
     if (overflowY && !explicitScrollable && overflowY !== 'visible') continue;
-    if (explicitScrollable && room > bestExplicitRoom) {
-      bestExplicit = node;
-      bestExplicitRoom = room;
-    } else if (!overflowY && room > bestFallbackRoom) {
-      bestFallback = node;
-      bestFallbackRoom = room;
+
+    const room = (Number(node.scrollHeight ?? 0)) - (Number(node.clientHeight ?? 0));
+    if (room > 0) {
+      if (explicitScrollable && room > bestExplicitRoom) {
+        bestExplicit = node;
+        bestExplicitRoom = room;
+      } else if (!overflowY && room > bestFallbackRoom) {
+        bestFallback = node;
+        bestFallbackRoom = room;
+      }
+    } else if (explicitScrollable && !firstOverflowWithUsers) {
+      if (qsa(node, 'a[href]').some((a) => Boolean(profileLinkUsername(a.getAttribute?.('href') ?? a.href ?? '')))) {
+        firstOverflowWithUsers = node;
+      }
     }
   }
-  return bestExplicit ?? bestFallback;
+  return bestExplicit ?? bestFallback ?? firstOverflowWithUsers;
 }
 
 /* ------------------------------------------- 2026 browser-DOM collection finders */
 
+/** True when an element is the "Followed by @friend" mutuals link (NOT the Followers list trigger). */
+function isMutualOnlyLink(el, href = '', text = '') {
+  const lowerHref = String(href).toLowerCase();
+  if (lowerHref.includes('mutualonly') || lowerHref.includes('/mutual')) return true;
+  if (/^(followed\s+by|متابع\s+من\s+قبل|يتابعه)\b/i.test(text)) return true;
+  return false;
+}
+
 /**
- * Find the clickable Followers or Following link on an Instagram profile page.
- * Supports English and Arabic UI and both `<a href="/user/followers/">` and
- * header count spans wrapped in `[role="link"]` / `<button>`.
+ * Find the clickable Followers or Following trigger on an Instagram profile page.
+ *
+ * In 2026 Instagram desktop HTML:
+ *   - Real triggers in `<header>` are `<a role="link" href="#">236K followers</a>`
+ *     and `<a role="link" href="#">11 following</a>` — clicking them opens the
+ *     native Followers/Following modal WITHOUT changing the page URL.
+ *   - Meanwhile `<a href="/<user>/followers/mutualOnly">Followed by ...</a>`
+ *     navigates away to a mutuals-only page and MUST NEVER be clicked.
+ *
+ * Supports both English and Arabic UI and both `#`-based 2026 triggers and
+ * classic exact `/<user>/followers/` links (strictly excluding `mutualOnly`).
  */
 export function findProfileListTrigger(root, kind = 'followers') {
   if (!root) return null;
   const target = kind === 'following' ? 'following' : 'followers';
-  const scopes = [...root.querySelectorAll('header, main')];
-  const searchRoots = scopes.length ? scopes : [root];
+  const headers = qsa(root, 'header');
+  const mains = qsa(root, 'main');
+  const searchRoots = headers.length ? [...headers, ...mains] : (mains.length ? mains : [root]);
 
-  // 1. Direct href link (`/username/followers/` or `/username/following/`)
+  const countPattern = target === 'followers'
+    ? /\b(followers?)\b|متابعين|متابعون|متابِعون|متابعاً|متابع/i
+    : /\b(following)\b|أتابعه|أتابع|يتابع|تتابعه/i;
+
+  const exactPathRegex = target === 'followers'
+    ? /^\/[A-Za-z0-9._]{1,30}\/followers\/?$/i
+    : /^\/[A-Za-z0-9._]{1,30}\/following\/?$/i;
+
+  const pathnameOf = (href) => {
+    const raw = String(href ?? '').trim();
+    if (!raw || raw === '#') return '';
+    try {
+      if (/^https?:/i.test(raw)) return new URL(raw).pathname;
+    } catch { /* relative */ }
+    return raw.split('?')[0].split('#')[0];
+  };
+
+  // 1. Primary (2026 desktop): count-labeled trigger in header/main (`<a href="#">236K followers</a>`
+  //    or `<a href="/user/followers/">236K followers</a>`), strictly skipping `mutualOnly`
+  //    and skipping the primary "Following" relationship action button.
   for (const scope of searchRoots) {
-    for (const link of scope.querySelectorAll('a')) {
-      const href = String(link.getAttribute?.('href') ?? link.href ?? '');
-      if (href.includes(`/${target}`) && isNodeVisible(link)) return link;
-    }
-  }
-
-  // 2. Fallback: visible count button/link matching localized text
-  const pattern = target === 'followers'
-    ? /\b(followers?)\b|متابعين|متابعون|متابع/i
-    : /\b(following)\b|أتابعه|يتابع|تتابعه/i;
-
-  for (const scope of searchRoots) {
-    for (const el of scope.querySelectorAll('a, button, [role="link"], [role="button"]')) {
+    for (const el of qsa(scope, 'a, button, [role="link"], [role="button"]')) {
       if (!isNodeVisible(el)) continue;
+      const href = String(el.getAttribute?.('href') ?? el.href ?? '');
       const text = collapse(el.textContent);
-      if (!text || text.length > 60) continue;
-      // Avoid matching the primary "Following" relationship button instead of count
+      if (!text || text.length > 50) continue;
+      if (isMutualOnlyLink(el, href, text)) continue;
       if (target === 'following' && labelKind(text) === Label.FOLLOWING) continue;
-      if (pattern.test(text)) return el;
+      if (target === 'followers' && (labelKind(text) === Label.FOLLOW || labelKind(text) === Label.FOLLOW_BACK)) continue;
+      if (!countPattern.test(text)) continue;
+
+      const path = pathnameOf(href);
+      if (!path || exactPathRegex.test(path)) return el;
     }
   }
+
+  // 2. Fallback: exact `<a href="/username/followers/">` or `<a href="/username/following/">`
+  //    (strictly excluding `/followers/mutualOnly` or any sub-route).
+  for (const scope of searchRoots) {
+    for (const link of qsa(scope, 'a[href]')) {
+      if (!isNodeVisible(link)) continue;
+      const href = String(link.getAttribute?.('href') ?? link.href ?? '');
+      const text = collapse(link.textContent);
+      if (isMutualOnlyLink(link, href, text)) continue;
+      const path = pathnameOf(href);
+      if (exactPathRegex.test(path)) return link;
+    }
+  }
+
   return null;
 }
 
 /**
  * Find the active visible Instagram dialog. When stacked (e.g. a Likes dialog
  * opened on top of a Post modal), `preferTopmost: true` returns the topmost one.
+ * Optionally filters by dialog `aria-label` (e.g. 'Likes', 'Followers', 'Following').
  */
-export function findVisibleDialog(root, { preferTopmost = true } = {}) {
+export function findVisibleDialog(root, { preferTopmost = true, ariaLabel = null } = {}) {
   if (!root) return null;
-  const dialogs = [...findDialogs(root)].filter(isNodeVisible);
+  const dialogs = findDialogs(root).filter(isNodeVisible);
   if (!dialogs.length) return null;
+  if (ariaLabel) {
+    const wanted = ariaLabel instanceof RegExp ? ariaLabel : new RegExp(`^${String(ariaLabel)}$`, 'i');
+    const matched = dialogs.filter((d) => wanted.test(collapse(d.getAttribute?.('aria-label') ?? '')));
+    if (matched.length) return preferTopmost ? matched[matched.length - 1] : matched[0];
+  }
   return preferTopmost ? dialogs[dialogs.length - 1] : dialogs[0];
 }
 
@@ -296,9 +381,8 @@ export function findVisibleDialog(root, { preferTopmost = true } = {}) {
  */
 export function findSuggestedBoundary(dialog) {
   if (!dialog) return null;
-  const pattern = /^(suggested\s+for\s+you|similar\s+accounts|اقتراحات\s+لك|حسابات\s+مشابهة|مقترح\s+لك)$/i;
-  for (const node of dialog.querySelectorAll('span, h2, h3, h4, div')) {
-    // Only leaf/small heading elements, not giant containers
+  const pattern = /^(suggested\s+for\s+you|similar\s+accounts|see\s+all\s+suggestions|اقتراحات\s+لك|حسابات\s+مشابهة|مقترح\s+لك|عرض\s+كل\s+الاقتراحات)$/i;
+  for (const node of qsa(dialog, 'span, h2, h3, h4, div, a')) {
     const text = collapse(node.textContent);
     if (!text || text.length > 42) continue;
     if (pattern.test(text)) return node;
@@ -306,59 +390,165 @@ export function findSuggestedBoundary(dialog) {
   return null;
 }
 
-function isAfterNode(candidate, boundary) {
+/**
+ * Detect Instagram's loading spinner (`<div role="progressbar">` or
+ * `<svg aria-label="Loading...">`) inside a dialog or comments pane.
+ */
+export function findDialogLoadingSpinner(root) {
+  if (!root) return null;
+  for (const bar of qsa(root, '[role="progressbar"]')) {
+    if (isNodeVisible(bar)) return bar;
+  }
+  for (const svg of qsa(root, 'svg[aria-label]')) {
+    const label = collapse(svg.getAttribute?.('aria-label') ?? '').toLowerCase();
+    if (/^(loading|جاري\s+التحميل)/.test(label) && isNodeVisible(svg)) return svg;
+  }
+  return null;
+}
+
+/**
+ * Find an in-dialog "See all followers" / "See all" / "Load more" trigger
+ * when Instagram collapses a list, strictly IGNORING "See All Suggestions"
+ * (`/explore/people/`) and anything after "Suggested for you".
+ */
+export function findDialogLoadMoreButton(dialog) {
+  if (!dialog) return null;
+  const boundary = findSuggestedBoundary(dialog);
+  const orderMap = boundary ? buildOrderMap(dialog) : null;
+  const want = /^(see\s+all(\s+(followers?|following|likes))?|show\s+more|load\s+more|view\s+all|عرض\s+الكل|عرض\s+المزيد|تحميل\s+المزيد)$/i;
+  for (const el of qsa(dialog, 'button, a, [role="button"], [role="link"]')) {
+    if (!isNodeVisible(el)) continue;
+    if (boundary && isAfterInRoot(el, boundary, orderMap)) continue;
+    const href = String(el.getAttribute?.('href') ?? el.href ?? '').toLowerCase();
+    if (href.includes('/explore/people') || href.includes('mutualonly')) continue;
+    const text = collapse(el.textContent);
+    if (!text || text.length > 48) continue;
+    if (/suggest|اقتراح/i.test(text)) continue;
+    if (want.test(text)) return el;
+  }
+  return null;
+}
+
+/**
+ * True when Instagram renders its 2025/2026 follower cap notice inside a dialog
+ * (e.g. `"Only fightclubpoint can see all followers"`). Collectors treat this
+ * as a clean partial cap rather than an error.
+ */
+export function hasFollowerCapNotice(dialog) {
+  if (!dialog) return false;
+  const text = collapse(dialog.textContent ?? '');
+  return /only\s+[A-Za-z0-9._]+\s+can\s+see\s+all\s+(followers?|following)/i.test(text)
+    || /فقط\s+يمكنه\s+رؤية\s+جميع\s+(المتابعين|من\s+يتابعهم)/.test(text)
+    || /يمكن\s+ل[ـ\s]*\S+\s+فقط\s+رؤية\s+جميع\s+(المتابعين|من\s+يتابعهم)/.test(text);
+}
+
+/**
+ * Return true if `candidate` appears strictly AFTER `boundary` in document
+ * pre-order within `root`. Uses a single deterministic pre-order check instead
+ * of relying solely on `compareDocumentPosition` (which varies across shims).
+ */
+function buildOrderMap(root) {
+  const map = new Map();
+  if (!root) return map;
+  let index = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node) continue;
+    map.set(node, index++);
+    const children = node.children;
+    if (children && children.length) {
+      for (let i = children.length - 1; i >= 0; i -= 1) stack.push(children[i]);
+    }
+  }
+  return map;
+}
+
+function isAfterInRoot(candidate, boundary, orderMap) {
   if (!candidate || !boundary || candidate === boundary) return false;
+  if (orderMap && orderMap.has(candidate) && orderMap.has(boundary)) {
+    return orderMap.get(candidate) > orderMap.get(boundary);
+  }
   if (typeof boundary.compareDocumentPosition === 'function') {
-    // Node.DOCUMENT_POSITION_FOLLOWING === 4
     return Boolean(boundary.compareDocumentPosition(candidate) & 4);
   }
   return false;
 }
 
+function stripVerifiedLabel(text) {
+  return collapse(String(text ?? '').replace(/\b(verified|تم\s+التحقق|موثّق)\b/gi, ''));
+}
+
 /**
  * Extract clean user rows from an open Followers / Following / Likers dialog.
  *
- * Adapted from battle-tested 2026 DOM scrapers:
- *   - Trusts `<a href="/username/">` (single-segment non-route paths) as the
- *     ground truth username source.
- *   - Stops before any `"Suggested for you"` section boundary.
- *   - Excludes the profile owner and UI action button text (`Follow`, `Remove`).
+ * Verified against real 2026 Instagram HTML snapshots:
+ *   - Parses canonical usernames from `<a href="...">` (supporting both full
+ *     `https://www.instagram.com/username/` and relative `/username/`).
+ *   - Stops strictly before any `"Suggested for you"` / `"See All Suggestions"`
+ *     section boundary (including Instagram's two-scroller Following dialog).
+ *   - Strips `"Verified"` badge text and action button labels (`Follow`,
+ *     `Following`, `Requested`, `Remove`) from display names.
  */
 export function extractDialogUsers(dialog, { excludeUsername = null, respectSuggestedBoundary = true } = {}) {
   if (!dialog) return { users: [], hitSuggested: false };
   const boundary = respectSuggestedBoundary ? findSuggestedBoundary(dialog) : null;
+  const orderMap = boundary ? buildOrderMap(dialog) : null;
   const excludeLower = excludeUsername ? String(excludeUsername).replace(/^@/, '').toLowerCase() : null;
   const scope = findScrollableList(dialog) ?? dialog;
 
   const byKey = new Map();
-  const links = [...scope.querySelectorAll('a[href]')];
+  const links = qsa(scope, 'a[href]');
   let hitSuggested = Boolean(boundary);
 
   for (const link of links) {
-    if (boundary && isAfterNode(link, boundary)) {
+    if (boundary && isAfterInRoot(link, boundary, orderMap)) {
       hitSuggested = true;
       continue;
     }
     const href = link.getAttribute?.('href') ?? link.href ?? '';
+    if (String(href).toLowerCase().includes('/explore/people')) {
+      hitSuggested = true;
+      continue;
+    }
     const username = profileLinkUsername(href);
     if (!username) continue;
     const key = username.toLowerCase();
     if (excludeLower && key === excludeLower) continue;
 
-    // Derive display name from the row surrounding this link (often a sibling span)
     let fullName = '';
     let isVerified = false;
-    const row = link.closest?.('[role="listitem"], li') ?? link.parentNode?.parentNode ?? link.parentNode;
+    let row = link.closest?.('[role="listitem"], li') ?? null;
+    if (!row) {
+      let cur = link.parentNode;
+      for (let depth = 0; depth < 6 && cur && cur !== scope && cur !== dialog; depth += 1) {
+        const distinctUsers = new Set();
+        for (const a of qsa(cur, 'a[href]')) {
+          const u = profileLinkUsername(a.getAttribute?.('href') ?? a.href ?? '');
+          if (u) distinctUsers.add(u.toLowerCase());
+          if (distinctUsers.size > 1) break;
+        }
+        if (distinctUsers.size > 1) break;
+        row = cur;
+        if (qsa(cur, 'button, [role="button"]').length > 0) break;
+        cur = cur.parentNode;
+      }
+    }
+
     if (row) {
       if (row.querySelector?.('svg[aria-label="Verified"], svg[aria-label="تم التحقق"]')) {
         isVerified = true;
       }
-      const spans = [...(row.querySelectorAll?.('span') ?? [])];
+      if (!isVerified && qsa(row, 'title').some((t) => /^(verified|تم\s+التحقق)$/i.test(collapse(t.textContent)))) {
+        isVerified = true;
+      }
+      const spans = qsa(row, 'span');
       for (const span of spans) {
-        const text = collapse(span.textContent);
+        if (qsa(span, 'a, button, [role="button"]').length > 0) continue;
+        const text = stripVerifiedLabel(span.textContent);
         if (!text || text.toLowerCase() === key || text.toLowerCase() === `@${key}`) continue;
-        if (labelKind(text)) continue; // skip "Follow", "Following", "Requested"
-        if (/^(remove|verified|·|•|follow|following|requested|إزالة)$/i.test(text)) continue;
+        if (labelKind(text)) continue;
+        if (/^(remove|verified|·|•|follow|following|requested|follow\s+back|إزالة|متابعة|متابع)$/i.test(text)) continue;
         if (text.length <= 80 && !fullName) {
           fullName = text;
         }
@@ -383,18 +573,19 @@ export function extractDialogUsers(dialog, { excludeUsername = null, respectSugg
 }
 
 /**
- * Find unique post/reel tile links (`/p/<shortcode>/`, `/reel/<shortcode>/`)
- * on a profile or hashtag page, in visual top-to-bottom DOM order.
+ * Find unique post/reel tile links (`/p/<shortcode>/`, `/<user>/p/<shortcode>/`,
+ * `/reel/<shortcode>/`, `/<user>/reel/<shortcode>/`) on a profile or hashtag
+ * page, in visual top-to-bottom DOM order.
  */
 export function findPostGridLinks(root, limit = 12) {
   if (!root) return [];
-  const scopes = [...root.querySelectorAll('main, article')];
+  const scopes = qsa(root, 'main, article');
   const searchRoots = scopes.length ? scopes : [root];
   const seen = new Set();
   const out = [];
 
   for (const scope of searchRoots) {
-    for (const link of scope.querySelectorAll('a[href]')) {
+    for (const link of qsa(scope, 'a[href]')) {
       const href = String(link.getAttribute?.('href') ?? link.href ?? '');
       const match = href.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]{4,})\b/);
       if (!match) continue;
@@ -427,56 +618,77 @@ function isLikeHeartControl(el) {
 }
 
 /**
+ * Return true if `el` lives inside an individual comment row (so its
+ * `<button>28 likes</button>` is a COMMENT likes trigger, NOT the post's).
+ */
+function isInsideCommentRow(el) {
+  if (!el) return false;
+  const li = el.closest?.('li');
+  if (li) {
+    if (qsa(li, 'a[href]').some((a) => /\/c\/\d+/.test(String(a.getAttribute?.('href') ?? a.href ?? '')))) return true;
+    if (qsa(li, 'button, [role="button"]').some((b) => /^(reply|رد|view\s+replies)/i.test(collapse(b.textContent)))) return true;
+    if (li.querySelector?.('h3') && li.querySelector?.('time')) return true;
+  }
+  return false;
+}
+
+/**
  * Find the clickable Likes trigger inside a post modal or post detail page
- * (e.g. `<a href="/p/ABC/liked_by/">`, `"142 likes"`, `"Liked by X and others"`,
- * or Arabic `"142 تسجيل إعجاب"` / `"وآخرون"`).
+ * (e.g. `<a href="/p/ABC/liked_by/">8,391 likes</a>`, `"4,397 others"`,
+ * `"Liked by X and others"`, or Arabic `"142 تسجيل إعجاب"` / `"وآخرون"`).
  *
- * Strictly refuses the heart Like/Unlike icon so the extension NEVER likes a
- * post by mistake.
+ * Strictly refuses:
+ *   - the heart Like/Unlike icon (never likes a post by mistake)
+ *   - comment-row `<button>N likes</button>` triggers (never opens comment likers)
  */
 export function findPostLikersTrigger(root) {
   if (!root) return null;
 
-  // 1. Direct `/liked_by` anchor (classic & 2026 desktop layout)
-  for (const link of root.querySelectorAll('a')) {
+  // 1. Direct `/liked_by` anchor (classic & 2026 desktop layout).
+  //    Prefer one with visible text (e.g. "8,391 likes" / "4,397 others") over
+  //    an empty-text liker avatar anchor.
+  let avatarFallback = null;
+  for (const link of qsa(root, 'a[href]')) {
     const href = String(link.getAttribute?.('href') ?? link.href ?? '');
-    if (href.includes('liked_by') && isNodeVisible(link) && !isLikeHeartControl(link)) return link;
+    if (!href.includes('liked_by')) continue;
+    if (!isNodeVisible(link) || isLikeHeartControl(link) || isInsideCommentRow(link)) continue;
+    if (collapse(link.textContent)) return link;
+    if (!avatarFallback) avatarFallback = link;
   }
+  if (avatarFallback) return avatarFallback;
 
-  // 2. Clickable button/link/span inside the post showing "N likes" or "others"
-  const likesCountPattern = /^\s*\d[\d,.\sKkMm]*\s*(likes?|تسجيلات?\s*إعجاب|إعجاب)\s*$/i;
+  // 2. Clickable button/link inside the post (outside comments) showing "N likes" or "others"
+  const likesCountPattern = /^\s*\d[\d,.\sKkMm]*\s*(likes?|others|تسجيلات?\s*إعجاب|إعجاب)\s*$/i;
   const othersPattern = /\b(and\s+others|others|liked\s+by)\b|وآخرون|وغيرهم|أشخاص\s+آخرين|أعجب\s+به/i;
 
-  const candidates = [...root.querySelectorAll('a, button, [role="button"], [role="link"]')];
+  const candidates = qsa(root, 'a, button, [role="button"], [role="link"]');
   for (const el of candidates) {
-    if (!isNodeVisible(el) || isLikeHeartControl(el)) continue;
+    if (!isNodeVisible(el) || isLikeHeartControl(el) || isInsideCommentRow(el)) continue;
     const text = collapse(el.textContent);
     if (!text || text.length > 90) continue;
     if (likesCountPattern.test(text)) return el;
   }
   for (const el of candidates) {
-    if (!isNodeVisible(el) || isLikeHeartControl(el)) continue;
+    if (!isNodeVisible(el) || isLikeHeartControl(el) || isInsideCommentRow(el)) continue;
     const text = collapse(el.textContent);
     if (!text || text.length > 90) continue;
     if (othersPattern.test(text)) {
-      // If this is a wrapper around "Liked by @user and others", prefer the
-      // inner "others" link/button if one exists so we don't navigate to @user.
-      const inner = [...(el.querySelectorAll?.('a, button, [role="button"], span') ?? [])].find((child) => {
+      const inner = qsa(el, 'a, button, [role="button"], span').find((child) => {
         const ct = collapse(child.textContent);
-        return /^(others|وآخرون|وغيرهم|\d[\d,.\sKkMm]*\s*likes?)$/i.test(ct) && !isLikeHeartControl(child);
+        return /^(others|وآخرون|وغيرهم|\d[\d,.\sKkMm]*\s*(likes?|others))$/i.test(ct) && !isLikeHeartControl(child);
       });
       return inner ?? el;
     }
   }
 
-  // 3. Fallback: clickable <span> with "N likes" or "others" inside a section
-  for (const span of root.querySelectorAll('section span, article span')) {
-    if (!isNodeVisible(span)) continue;
+  // 3. Fallback: clickable <span> with "N likes" or "others" inside a post section
+  for (const span of qsa(root, 'section span, article span')) {
+    if (!isNodeVisible(span) || isInsideCommentRow(span)) continue;
     const text = collapse(span.textContent);
     if (!text || text.length > 60) continue;
     if (likesCountPattern.test(text) || /^(others|وآخرون|وغيرهم)$/i.test(text)) {
       const clickable = span.closest?.('a, button, [role="button"], [role="link"]') ?? span;
-      if (!isLikeHeartControl(clickable)) return clickable;
+      if (!isLikeHeartControl(clickable) && !isInsideCommentRow(clickable)) return clickable;
     }
   }
   return null;
@@ -485,35 +697,43 @@ export function findPostLikersTrigger(root) {
 /** Find the Next post arrow button inside an open post modal. */
 export function findNextPostButton(root) {
   if (!root) return null;
-  for (const svg of root.querySelectorAll('svg[aria-label]')) {
+  for (const svg of qsa(root, 'svg[aria-label]')) {
     const label = collapse(svg.getAttribute?.('aria-label') ?? '').toLowerCase();
     if (label === 'next' || label === 'التالي') {
       const btn = svg.closest?.('button, [role="button"], a');
       if (btn && isNodeVisible(btn)) return btn;
     }
   }
-  for (const btn of root.querySelectorAll('button[aria-label], [role="button"][aria-label]')) {
+  for (const btn of qsa(root, 'button[aria-label], [role="button"][aria-label]')) {
     const label = collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase();
     if ((label === 'next' || label === 'التالي') && isNodeVisible(btn)) return btn;
   }
   return null;
 }
 
-/** Find the Close button of a dialog (or null if Escape fallback should be used). */
-export function findCloseDialogButton(root) {
-  if (!root) return null;
-  for (const svg of root.querySelectorAll('svg[aria-label]')) {
-    const label = collapse(svg.getAttribute?.('aria-label') ?? '').toLowerCase();
-    if (label === 'close' || label === 'إغلاق') {
-      const btn = svg.closest?.('button, [role="button"]');
-      if (btn && isNodeVisible(btn)) return btn;
+/**
+ * Find the Close button of a dialog (or document-level backdrop Close button for
+ * 2026 Post modals whose Close icon sits outside `role="dialog"`).
+ */
+export function findCloseDialogButton(root, fallbackDoc = null) {
+  const searchIn = (scope, excludeDialogs = false) => {
+    if (!scope) return null;
+    for (const btn of qsa(scope, 'button[aria-label], [role="button"][aria-label]')) {
+      if (excludeDialogs && btn.closest?.('[role="dialog"]')) continue;
+      const label = collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase();
+      if ((label === 'close' || label === 'إغلاق') && isNodeVisible(btn)) return btn;
     }
-  }
-  for (const btn of root.querySelectorAll('button[aria-label], [role="button"][aria-label]')) {
-    const label = collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase();
-    if ((label === 'close' || label === 'إغلاق') && isNodeVisible(btn)) return btn;
-  }
-  return null;
+    for (const svg of qsa(scope, 'svg[aria-label]')) {
+      if (excludeDialogs && svg.closest?.('[role="dialog"]')) continue;
+      const label = collapse(svg.getAttribute?.('aria-label') ?? '').toLowerCase();
+      if (label === 'close' || label === 'إغلاق') {
+        const btn = svg.closest?.('button, [role="button"]');
+        if (btn && isNodeVisible(btn)) return btn;
+      }
+    }
+    return null;
+  };
+  return searchIn(root, false) ?? (fallbackDoc && fallbackDoc !== root ? searchIn(fallbackDoc, true) : null);
 }
 
 /** Find the scrollable comments container inside an open post page or post dialog. */
@@ -522,7 +742,7 @@ export function findCommentScrollContainer(root) {
   let bestWithTime = null;
   let bestWithTimeRoom = 0;
 
-  for (const node of root.querySelectorAll('div, ul')) {
+  for (const node of qsa(root, 'div, ul')) {
     if (!isNodeVisible(node)) continue;
     const room = Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0);
     if (room <= 20) continue;
@@ -543,14 +763,14 @@ export function findCommentScrollContainer(root) {
  */
 export function findLoadMoreCommentsButton(root) {
   if (!root) return null;
-  for (const svg of root.querySelectorAll('svg[aria-label]')) {
+  for (const svg of qsa(root, 'svg[aria-label]')) {
     const label = collapse(svg.getAttribute?.('aria-label') ?? '').toLowerCase();
     if (/load more comments|view more comments|تحميل المزيد من التعليقات/.test(label)) {
       const btn = svg.closest?.('button, [role="button"]');
       if (btn && isNodeVisible(btn)) return btn;
     }
   }
-  for (const btn of root.querySelectorAll('button, [role="button"]')) {
+  for (const btn of qsa(root, 'button, [role="button"]')) {
     if (!isNodeVisible(btn)) continue;
     const text = collapse(btn.textContent).toLowerCase();
     const aria = collapse(btn.getAttribute?.('aria-label') ?? '').toLowerCase();
@@ -564,18 +784,16 @@ export function findLoadMoreCommentsButton(root) {
 }
 
 /**
- * Universal semantic `<time>` DOM walker for Instagram comments (adapted from
- * Nov 2026 `dartganan/instagram-comment-scraper`).
+ * Universal semantic `<time>` + `<h3>` DOM walker for 2026 Instagram comments.
  *
- * Works regardless of obfuscated CSS class names or React `ul`/`div` nesting:
- * anchors on `<time>` elements, walks up <= 8 ancestors to the enclosing row
- * holding a single-segment profile link `<a href="/username/">`, and extracts
- * the clean comment text from `span[dir="auto"], div[dir="auto"]`.
+ * Works across standalone `/p/.../` pages, Post modals (`ul > li > h3` +
+ * `<a href=".../c/<id>/"><time>`), and Reels comment drawers regardless of
+ * obfuscated CSS class names.
  */
 export function extractCommentsFromDom(root, { excludeAuthor = null } = {}) {
   if (!root) return [];
   const excludeLower = excludeAuthor ? String(excludeAuthor).replace(/^@/, '').toLowerCase() : null;
-  const times = [...root.querySelectorAll('time')];
+  const times = qsa(root, 'time');
   const seen = new Set();
   const out = [];
 
@@ -586,13 +804,18 @@ export function extractCommentsFromDom(root, { excludeAuthor = null } = {}) {
     let foundUsername = null;
 
     for (let depth = 0; depth < 8 && container && container !== root; depth += 1) {
-      const links = [...(container.querySelectorAll?.('a[href]') ?? [])];
       let user = null;
-      for (const link of links) {
-        const candidate = profileLinkUsername(link.getAttribute?.('href') ?? link.href ?? '');
-        if (candidate) {
-          user = candidate;
-          break;
+      const h3Link = container.querySelector?.('h3 a[href]');
+      if (h3Link) {
+        user = profileLinkUsername(h3Link.getAttribute?.('href') ?? h3Link.href ?? '');
+      }
+      if (!user) {
+        for (const link of qsa(container, 'a[href]')) {
+          const candidate = profileLinkUsername(link.getAttribute?.('href') ?? link.href ?? '');
+          if (candidate) {
+            user = candidate;
+            break;
+          }
         }
       }
       if (user) {
@@ -600,8 +823,7 @@ export function extractCommentsFromDom(root, { excludeAuthor = null } = {}) {
         if (fullText.length > (timeAgo.length + user.length + 1)) {
           foundRow = container;
           foundUsername = user;
-          // Prefer an <li> or a row with a profile avatar img if we reached it
-          if (String(container.tagName ?? '').toUpperCase() === 'LI' || container.querySelector?.('img')) {
+          if (String(container.tagName ?? '').toUpperCase() === 'LI' || container.querySelector?.('h3') || container.querySelector?.('img')) {
             break;
           }
         }
@@ -612,25 +834,39 @@ export function extractCommentsFromDom(root, { excludeAuthor = null } = {}) {
     if (!foundRow || !foundUsername) continue;
     if (excludeLower && foundUsername.toLowerCase() === excludeLower) continue;
 
-    // Extract clean comment text from dir="auto" spans/divs inside this row
-    const dirNodes = [...(foundRow.querySelectorAll?.('span[dir="auto"], div[dir="auto"]') ?? [])];
+    const dirNodes = qsa(foundRow, 'span[dir="auto"], div[dir="auto"]');
     const parts = [];
     for (const node of dirNodes) {
-      const text = collapse(node.textContent);
+      if (node.closest?.('h3, button, [role="button"]')) continue;
+      if (qsa(node, 'h3, time, button').length > 0) continue;
+      const text = stripVerifiedLabel(node.textContent);
       if (!text) continue;
       if (text.toLowerCase() === foundUsername.toLowerCase()) continue;
       if (text === timeAgo) continue;
-      if (/^(reply|رد|see translation|عرض الترجمة|\d+\s*likes?|\d+\s*إعجاب|edited|تم التعديل)$/i.test(text)) continue;
+      if (/^(reply|رد|see translation|عرض الترجمة|view\s+replies\s*\(\d+\)|\d+\s*likes?|\d+\s*إعجاب|edited|تم التعديل)$/i.test(text)) continue;
       parts.push(text);
     }
 
     let commentText = parts.join(' ').trim();
     if (!commentText) {
-      // Fallback: strip username + timeAgo + trailing Reply/Likes labels from row text
-      commentText = collapse(foundRow.textContent)
+      // Fallback: collect leaf text spans outside h3 / button / time / a
+      const leafParts = [];
+      for (const span of qsa(foundRow, 'span')) {
+        if (span.closest?.('h3, button, [role="button"], a, time')) continue;
+        if (qsa(span, 'h3, button, [role="button"], a, time, span').length > 0) continue;
+        const text = stripVerifiedLabel(span.textContent);
+        if (!text || text.toLowerCase() === foundUsername.toLowerCase() || text === timeAgo) continue;
+        if (/^(reply|رد|see translation|عرض الترجمة|view\s+replies\s*\(\d+\)|\d+\s*likes?|\d+\s*إعجاب|edited|تم التعديل)$/i.test(text)) continue;
+        leafParts.push(text);
+      }
+      commentText = leafParts.join(' ').trim();
+    }
+    if (!commentText) {
+      commentText = stripVerifiedLabel(foundRow.textContent)
         .replace(new RegExp(`^@?${foundUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i'), '')
         .replace(timeAgo, '')
-        .replace(/\b(Reply|See translation|\d+\s+likes?)\b/gi, '')
+        .replace(/(?:Reply|See translation|View replies\s*\(\d+\)|\d+\s*likes?)+$/gi, '')
+        .replace(/\b(Reply|See translation|View replies\s*\(\d+\)|\d+\s+likes?)\b/gi, '')
         .trim();
     }
     if (!commentText) continue;
@@ -661,16 +897,18 @@ export function isPrivateAccountPage(root) {
 export function userLinksFrom(root) {
   const out = [];
   const seen = new Set();
-  for (const link of root.querySelectorAll('a')) {
-    const href = link.getAttribute('href') ?? '';
-    if (!href.startsWith('/')) continue;
-    const username = usernameFromPath(href.split('?')[0]);
+  for (const link of qsa(root, 'a[href]')) {
+    const href = link.getAttribute?.('href') ?? link.href ?? '';
+    const username = profileLinkUsername(href);
     if (!username) continue;
-    if (seen.has(username)) continue;
-    seen.add(username);
-    const spans = link.querySelectorAll('span');
-    const fullName = spans.map((s) => collapse(s.textContent)).filter(Boolean).join(' ') || collapse(link.textContent);
-    out.push({ username, fullName, href });
+    const key = username.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const spans = qsa(link, 'span');
+    const fullName = stripVerifiedLabel(
+      spans.map((s) => collapse(s.textContent)).filter(Boolean).join(' ') || collapse(link.textContent),
+    );
+    out.push({ username, fullName, href: `/${username}/` });
   }
   return out;
 }
@@ -678,15 +916,16 @@ export function userLinksFrom(root) {
 /** Authors of tiles on hashtag/explore/saved grids (SRC-8). */
 export function gridTileAuthors(root) {
   const out = [];
-  for (const article of root.querySelectorAll('article, [role="menuitem"], li')) {
-    const link = article.querySelectorAll('a').find((a) => {
-      const href = a.getAttribute('href') ?? '';
-      return href.startsWith('/') && usernameFromPath(href.split('?')[0]);
+  for (const article of qsa(root, 'article, [role="menuitem"], li')) {
+    const link = qsa(article, 'a[href]').find((a) => {
+      const href = a.getAttribute?.('href') ?? a.href ?? '';
+      return Boolean(profileLinkUsername(href));
     });
     if (!link) continue;
-    const username = usernameFromPath((link.getAttribute('href') ?? '').split('?')[0]);
-    if (username && !out.some((row) => row.username === username)) {
-      out.push({ username, href: link.getAttribute('href') });
+    const href = link.getAttribute?.('href') ?? link.href ?? '';
+    const username = profileLinkUsername(href);
+    if (username && !out.some((row) => row.username.toLowerCase() === username.toLowerCase())) {
+      out.push({ username, href: `/${username}/` });
     }
   }
   return out;

@@ -278,8 +278,6 @@ export function createOutreachView(ctx = {}) {
       gateNote.append(note(plan.gateMessage ?? 'The governor will not start this run right now.', 'warning'));
     } else if (!budget.scheduleOpen) {
       gateNote.append(note(`Outside the active window. It opens at ${clockAt(budget.windowOpensAt) ?? '—'}.`, 'warning'));
-    } else {
-      gateNote.append(note('The governor allows this run. Delays between actions are randomised and include breaks.', 'info'));
     }
   }
 
@@ -432,7 +430,7 @@ export function createOutreachView(ctx = {}) {
     const time = clockAt(event.at ?? Date.now()) ?? '';
     switch (event.type) {
       case 'plan': pushLog({ time, text: `Planned ${event.ready} ready of ${event.queued} queued (${event.skipped} skipped).` }); break;
-      case 'session': pushLog({ time, text: `Session opened on ${event.tabLabel ?? 'the worker window'}; ${event.planned} planned.` }); break;
+      case 'session': pushLog({ time, text: `Session opened on ${event.tabLabel ?? 'your Instagram tab'}; ${event.planned} planned.` }); break;
       case 'delay': pushLog({ time, text: `Waiting ${humanDurationMs(event.ms)} before ${event.actionType} @${event.username}.` }); break;
       case 'waiting': pushLog({ time, text: `${event.label ?? 'Waiting'} — ${event.human} left.` }); break;
       case 'action': pushLog({ time, text: `${event.actionType} @${event.username}${event.messagePreview ? ` — "${event.messagePreview}"` : ''}` }); break;

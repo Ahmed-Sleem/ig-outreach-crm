@@ -15,7 +15,6 @@
 
 import { Pacer, PacingStopped, AccountFlagged, interruptibleWait } from './pacing.js';
 import { detectSession, detectAppId, detectAsbd, detectViewerFromDom, harvestDocIds, probeViewer, runProbe } from './probe.js';
-import { createVirtualCursor } from './human.js';
 import {
   collectHashtagDom,
   collectOpenDialogDom,
@@ -42,7 +41,7 @@ import {
   scrapeOpenProfile,
   scrapeProfileFromDom,
 } from './adapters.js';
-import { findScrollableList, usernameFromPath } from './selectors.js';
+import { extractDialogUsers, findVisibleDialog, usernameFromPath } from './selectors.js';
 import {
   executeDm,
   executeFollow,
@@ -136,12 +135,14 @@ export function createContentRuntime(deps = {}) {
   const { asbd, source: asbdSource } = deps.asbd ? { asbd: deps.asbd, source: 'injected' } : detectAsbd(cookieString);
   const docIds = deps.docIds ?? harvestDocIds(document);
 
-  const request = deps.request ?? createApi({
-    fetchImpl: deps.fetchImpl,
-    appId,
-    asbd,
-    csrfToken: session.csrfToken,
-  });
+  const request = deps.request ?? (deps.fetchImpl
+    ? createApi({
+      fetchImpl: deps.fetchImpl,
+      appId,
+      asbd,
+      csrfToken: session.csrfToken,
+    })
+    : null);
 
   const domViewer = detectViewerFromDom(document, cookieString);
 
@@ -164,7 +165,9 @@ export function createContentRuntime(deps = {}) {
     controller: null,
     profileCache: new Map(),
     viewer: deps.viewer ?? domViewer ?? null,
-    virtualCursor: deps.virtualCursor ?? (document ? createVirtualCursor(document) : null),
+    // Do not inject a DOM cursor overlay into live Instagram pages; only use
+    // a virtualCursor if a caller/test explicitly injects one.
+    virtualCursor: deps.virtualCursor ?? null,
 
     refreshSession() {
       const freshCookies = deps.cookieString ?? document?.cookie ?? '';
@@ -522,20 +525,16 @@ export function commentToUserRow(comment) {
 /** Whatever this page renders: an open dialog, a grid, or the profile itself. */
 export function collectCurrentPage(runtime, { limit = 200 } = {}) {
   const document = runtime.document;
-  const dialogs = document?.querySelectorAll('[role="dialog"]') ?? [];
-  if (dialogs.length > 0) {
-    const list = findScrollableList(document);
-    if (list) {
-      const rows = [];
-      const seen = new Set();
-      for (const link of list.querySelectorAll('a')) {
-        const username = usernameFromPath((link.getAttribute('href') ?? '').split('?')[0]);
-        if (!username || seen.has(username.toLowerCase())) continue;
-        seen.add(username.toLowerCase());
-        rows.push({ username, full_name: link.textContent?.trim() ?? '' });
-        if (rows.length >= limit) break;
-      }
-      if (rows.length) return { ok: true, rows, reason: null, via: 'open list dialog' };
+  const topDialog = findVisibleDialog(document);
+  if (topDialog) {
+    const { users } = extractDialogUsers(topDialog, { respectSuggestedBoundary: true });
+    if (users.length) {
+      const rows = users.slice(0, limit).map((u) => ({
+        username: u.username,
+        full_name: u.fullName ?? '',
+        is_verified: Boolean(u.isVerified),
+      }));
+      return { ok: true, rows, reason: null, via: 'open list dialog' };
     }
   }
   const path = runtime.pathname;

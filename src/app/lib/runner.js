@@ -243,7 +243,7 @@ export function createRunController(deps = {}) {
    * contact.
    */
   async function collect(options = {}) {
-    if (state.phase === RunPhase.RUNNING || state.phase === RunPhase.PREPARING || state.phase === RunPhase.WAITING) {
+    if ([RunPhase.RUNNING, RunPhase.PREPARING, RunPhase.WAITING, RunPhase.STOPPING].includes(state.phase)) {
       return { ok: false, reason: `a ${state.kind} run is already in progress`, phase: state.phase };
     }
     const source = options.source ?? null;
@@ -271,8 +271,7 @@ export function createRunController(deps = {}) {
     state.tabId = tab.tabId;
     emit({ type: 'run', runId: run.runId, source, tabId: tab.tabId, tabLabel: tab.label });
 
-    // Bring the Instagram tab into view so the owner can watch the human-like
-    // cursor, clicks and scrolling work visibly in front of them.
+    // Bring the single Instagram tab into view while this task runs.
     if (options.focusTab !== false && typeof api.tabs.focus === 'function') {
       await api.tabs.focus(tab.tabId);
     }
@@ -322,6 +321,10 @@ export function createRunController(deps = {}) {
       });
     } finally {
       watcher?.dispose?.();
+      // Automatically switch focus back to the dashboard tab once the scan finishes.
+      if (options.returnToDashboard !== false && typeof api.tabs?.focusDashboard === 'function') {
+        try { await api.tabs.focusDashboard(); } catch { /* best-effort focus return */ }
+      }
     }
   }
 
@@ -356,12 +359,10 @@ export function createRunController(deps = {}) {
   }
 
   /**
-   * Which tab does the work.
+   * Which open Instagram tab runs the single active foreground task.
    *
-   * A collection runs in the tab the owner is looking at, because "the people
-   * who liked this post" only exists there. An outreach run uses the managed
-   * worker window, because it navigates from profile to profile for hours and
-   * must not hijack the tab he is reading.
+   * Strictly one task at a time in one normal Instagram tab while the user has
+   * the dashboard open — never spawns a separate background popup window.
    */
   async function chooseTab(options = {}) {
     if (options.tabId !== null && options.tabId !== undefined) {
@@ -369,17 +370,9 @@ export function createRunController(deps = {}) {
       if (!tab) return { ok: false, reason: 'the chosen Instagram tab was closed' };
       return { ok: true, tabId: tab.id, label: tab.url ?? 'the chosen tab', tab };
     }
-    if (options.useWorker) {
-      const worker = await api.tabs.ensureWorker({ url: options.workerUrl ?? 'https://www.instagram.com/' });
-      if (!worker?.tab?.id) return { ok: false, reason: 'the worker window could not be opened' };
-      return { ok: true, tabId: worker.tab.id, label: 'the worker window', tab: worker.tab, created: worker.created };
-    }
     const tabs = await api.tabs.listTabs();
-    const worker = await api.tabs.worker();
-    const picked = pickTabFrom(tabs, { tabId: null, username: options.username ?? null, workerTabId: worker?.id ?? null });
+    const picked = pickTabFrom(tabs, { tabId: null, username: options.username ?? null });
     if (picked?.tab) return { ok: true, tabId: picked.tab.id, label: picked.tab.url ?? 'the Instagram tab', tab: picked.tab };
-    // No Instagram tab is open yet: open one visibly for the owner if the browser
-    // controller supports it so collection works with zero manual tab-hunting.
     if (typeof api.tabs.openInstagram === 'function') {
       const startUrl = options.username
         ? `https://www.instagram.com/${encodeURIComponent(String(options.username).replace(/^@+/, ''))}/`
@@ -587,6 +580,9 @@ async function endOutreach(ctx, { ok, phase: nextPhase, reason = null, plan = nu
   state.mode = null;
   state.sessionId = null;
   state.runId = null;
+  if (ctx.returnToDashboard !== false && session?.sessionId && typeof api.tabs?.focusDashboard === 'function') {
+    try { await api.tabs.focusDashboard(); } catch { /* best-effort focus return */ }
+  }
   return summary;
 }
 
@@ -698,9 +694,12 @@ async function runOutreach(ctx) {
     return endOutreach(ctx, { ok: false, phase: RunPhase.BLOCKED, reason: plan.gateMessage, plan, severity: plan.gate?.reason === 'circuit breaker' ? 'account' : null });
   }
 
-  const tab = await chooseTab({ ...ctx, useWorker: ctx.useWorker !== false, tabId: ctx.tabId ?? null });
+  const tab = await chooseTab({ ...ctx, tabId: ctx.tabId ?? null });
   if (!tab.ok) return endOutreach(ctx, { ok: false, phase: RunPhase.FAILED, reason: tab.reason, plan, severity: 'tab' });
   state.tabId = tab.tabId;
+  if (ctx.focusTab !== false && typeof api.tabs?.focus === 'function') {
+    await api.tabs.focus(tab.tabId);
+  }
 
   const session = await api.startSession({ mode, groupId: ctx.groupId ?? null, tabId: tab.tabId, policy, planned: plan.queue.length });
   state.sessionId = session.sessionId;

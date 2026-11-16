@@ -136,8 +136,7 @@ export function createApp(deps = {}) {
   let connectionInfo = null;
   let connectionBusy = false;
   let tickCount = 0;
-  let worker = null;
-  let fallbackTimer = null;
+  let tickTimer = null;
   let statusWatcher = null;
   let onWindowFocus = null;
 
@@ -426,9 +425,6 @@ export function createApp(deps = {}) {
     const onTick = () => {
       tickCount += 1;
       paintCountdown();
-      // A full telemetry re-read once every ten seconds keeps the quota meters
-      // honest without hammering IndexedDB on every beat. If Instagram was not
-      // detected yet, re-check open tabs automatically so connecting is zero-click.
       if (tickCount % 10 === 0) {
         if (!connectionInfo?.connected && typeof api.detectConnection === 'function') {
           void syncConnection({ openIfMissing: false, focusTab: false, announce: false });
@@ -437,24 +433,12 @@ export function createApp(deps = {}) {
         }
       }
     };
-    try {
-      const url = chromeApi?.runtime?.getURL?.('app/lib/scheduler.worker.js');
-      if (!url || typeof Worker === 'undefined') throw new Error('no worker');
-      worker = new Worker(url);
-      worker.onmessage = (event) => { if (event?.data?.type === 'tick') onTick(); };
-      worker.postMessage({ type: 'start', intervalMs: 1000 });
-    } catch {
-      // No worker available (or blocked): fall back to a page timer. It throttles
-      // when the tab is hidden, but the countdown still moves when it is visible.
-      fallbackTimer = setInterval(onTick, 1000);
-      if (typeof fallbackTimer?.unref === 'function') fallbackTimer.unref();
-    }
+    tickTimer = setInterval(onTick, 1000);
+    if (typeof tickTimer?.unref === 'function') tickTimer.unref();
   }
 
   function stopScheduler() {
-    try { worker?.postMessage({ type: 'stop' }); worker?.terminate?.(); } catch { /* already gone */ }
-    worker = null;
-    if (fallbackTimer) { clearInterval(fallbackTimer); fallbackTimer = null; }
+    if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
   }
 
   /* ------------------------------------------------------------- lifecycle */
@@ -466,10 +450,8 @@ export function createApp(deps = {}) {
     renderHeaderRight(null);
     renderRunBanner();
 
-    // Watch the tabs for account switches and blocks so the guardrail pill and a
-    // toast reflect what the content script sees, without a page refresh.
     statusWatcher = api.watch?.((row) => {
-      if (row?.accountSwitched) toast('The Instagram account changed in the worker tab. The run was stopped.', 'error');
+      if (row?.accountSwitched) toast('The Instagram account changed. The run was stopped.', 'error');
       if (row?.blocked) toast(row.reason ?? 'Instagram blocked an action; the autopilot is locked.', 'error');
       void refreshShell();
     }, { intervalMs: 1000 });

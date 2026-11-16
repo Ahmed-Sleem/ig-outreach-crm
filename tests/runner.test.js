@@ -633,7 +633,29 @@ describe('the run loops (real ledger, scripted tab)', () => {
     const second = await controller.collect({ source: 'following' });
     assert.equal(second.ok, false);
     assert.match(second.reason, /already in progress/);
+    const third = await controller.outreach({ mode: QueueMode.FOLLOW, limit: 5 });
+    assert.equal(third.ok, false);
+    assert.match(third.reason, /already in progress/);
     await first;
+  });
+
+  test('collect focuses the Instagram tab while running and automatically returns to the dashboard tab when done', async () => {
+    let focusedTab = null;
+    let returnedToDashboard = 0;
+    const { controller } = makeController({
+      answers: { [CommandType.COLLECT_LEADS]: { ok: true, value: collectResult(['sara_shop']) } },
+      tabs: {
+        tabById: async () => ({ id: 7, url: 'https://www.instagram.com/comp_a/' }),
+        listTabs: async () => [{ id: 7, url: 'https://www.instagram.com/comp_a/', active: true }],
+        focus: async (id) => { focusedTab = id; return { ok: true }; },
+        focusDashboard: async () => { returnedToDashboard += 1; return { ok: true, tabId: 99 }; },
+        navigate: async () => ({ ok: true }),
+      },
+    });
+    const out = await controller.collect({ source: 'followers', username: 'comp_a' });
+    assert.equal(out.ok, true);
+    assert.equal(focusedTab, 7, 'brings Instagram tab forward during scan');
+    assert.equal(returnedToDashboard, 1, 'automatically switches focus back to the dashboard tab on completion');
   });
 
   test('createRunController refuses to build without an api client', () => {

@@ -10,15 +10,14 @@
  * Keep this file dependency-free and boring.
  */
 (async () => {
-  if (window.__IG_CRM_CONTENT_LOADED__) return;
-  window.__IG_CRM_CONTENT_LOADED__ = true;
+  const ready = Symbol.for('content_module_ready');
+  if (globalThis[ready]) return;
+  globalThis[ready] = true;
   try {
     const src = chrome.runtime.getURL('content/main.js');
     const mod = await import(src);
     mod.installMessageHandlers();
   } catch (err) {
-    // Surface the failure instead of dying silently: a dead content script is
-    // the single most confusing failure mode in an extension like this.
     console.error('[IG Outreach CRM] content module failed to load:', err);
     try {
       chrome.runtime.sendMessage({
