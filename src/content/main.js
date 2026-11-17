@@ -44,10 +44,12 @@ import {
 } from './adapters.js';
 import {
   composerScope,
+  detectDmRestriction,
   directThreadMatchesUser,
   dmContainerUserMatch,
   extractDialogUsers,
   findDmSurface,
+  findOpenDmDock,
   findVisibleDialog,
   usernameFromPath,
 } from './selectors.js';
@@ -1010,6 +1012,9 @@ export function createHandlers(runtime, deps = {}) {
       if (!message.trim()) return { ok: false, outcome: 'refused', reason: 'the message is empty' };
       const targetUsername = payload?.username ?? runtime.pageUsername ?? null;
       const targetKey = nameKey(payload?.username ?? '');
+      const viewerUsername = payload?.viewerUsername ?? runtime.viewer?.username ?? null;
+      const alreadyOpened = Boolean(payload?.alreadyOpened);
+      const matchOpts = viewerUsername ? { viewerUsername } : {};
 
       const runDmFlow = async () => {
         const started = await beginRun(runtime, 'dm', { pacing: payload?.pacing, status: ctx?.postStatus });
@@ -1018,15 +1023,46 @@ export function createHandlers(runtime, deps = {}) {
           const dmCtx = ctxOf(runtime, { status: ctx?.postStatus });
           const readyTimeoutMs = runtime.domReadyTimeoutMs ?? (runtime.wait ? 0 : 5000);
           const curPath = String(runtime.location?.pathname ?? runtime.pathname ?? '');
-          const curSurface = findDmSurface(runtime.document, curPath);
-          // An already-open composer only counts if either no specific target was
-          // requested, we are on /direct/new/<target>, or its container visibly
-          // matches the requested target user (prevents sending into a stale dock
-          // left open from the previous lead!).
+          let curSurface = findDmSurface(runtime.document, curPath);
+          let trustedThread = alreadyOpened;
+
+          // When the dashboard just followed a hard navigation to /direct/...
+          // after clicking Message on the profile, the composer may still be
+          // hydrating on this page — wait for it right here instead of
+          // bouncing back to the profile.
+          if (alreadyOpened && !curSurface?.editor) {
+            const hydrateMs = Math.max(readyTimeoutMs, 6000);
+            const hydrated = await waitFor(dmCtx, () => {
+              const s = findDmSurface(runtime.document, String(runtime.location?.pathname ?? runtime.pathname ?? ''));
+              if (s?.editor) return { surface: s };
+              const scope = findOpenDmDock(runtime.document)
+                ?? runtime.document?.querySelector?.('main, [role="main"]')
+                ?? runtime.document?.body;
+              const r = detectDmRestriction(scope);
+              if (r) return { restriction: r };
+              return null;
+            }, { timeoutMs: hydrateMs, intervalMs: 150, signal: runtime.signal, label: 'DM composer on page' });
+            if (hydrated.found && hydrated.value?.surface) {
+              curSurface = hydrated.value.surface;
+            }
+          }
+
+          // An already-open composer counts when:
+          //  - alreadyOpened is set (we just landed here from clicking Message), OR
+          //  - no specific target was requested, OR
+          //  - we are on /direct/new/<target>, OR
+          //  - the container visibly matches <target>, OR
+          //  - we are on /direct/t/ and the container shows NO conflicting user
+          //    (e.g. display-name-only header).
+          const curMatch = curSurface?.container && targetKey
+            ? dmContainerUserMatch(curSurface.container, targetKey, matchOpts)
+            : null;
           let openedForTarget = Boolean(curSurface?.editor) && (
-            !targetKey
+            alreadyOpened
+            || !targetKey
             || curPath.toLowerCase().startsWith(`/direct/new/${targetKey}`)
-            || dmContainerUserMatch(curSurface.container, targetKey).matched
+            || Boolean(curMatch?.matched)
+            || (curPath.toLowerCase().startsWith('/direct/t/') && curMatch?.foundUsers?.length === 0)
           );
 
           if (!openedForTarget) {
@@ -1034,6 +1070,7 @@ export function createHandlers(runtime, deps = {}) {
               document: runtime.document,
               location: runtime.location,
               username: targetUsername,
+              viewerUsername,
               signal: runtime.signal,
               readyTimeoutMs,
             });
@@ -1051,6 +1088,7 @@ export function createHandlers(runtime, deps = {}) {
               };
             }
             openedForTarget = true;
+            if (opened.openedByClick) trustedThread = true;
           }
 
           const finalPath = String(runtime.location?.pathname ?? runtime.pathname ?? '');
@@ -1058,6 +1096,8 @@ export function createHandlers(runtime, deps = {}) {
             document: runtime.document,
             message,
             username: targetUsername,
+            viewerUsername,
+            trustedThread,
             signal: runtime.signal,
             pathname: finalPath || (openedForTarget ? '/direct/' : ''),
             allowExisting: Boolean(payload?.allowExisting),
@@ -1068,17 +1108,27 @@ export function createHandlers(runtime, deps = {}) {
         }
       };
 
-      // Act directly without navigating back to /<user>/ when:
-      //  - no specific username was asked for and a DM composer is already open, OR
+      // Act directly on the current page without bouncing back to /<user>/ when:
+      //  - alreadyOpened is set and we are on /direct/ or a composer is visible, OR
+      //  - no specific username was asked for and a DM composer is visible, OR
       //  - we are on /direct/new/<target>, OR
-      //  - we are on /direct/t/... with a composer visibly matching <target>, OR
-      //  - we are already on /<target>/ with an open dock matching <target>.
+      //  - we are on /direct/t/... with a composer matching <target> (or showing
+      //    no conflicting user, e.g. display-name-only header), OR
+      //  - any page currently shows an open DM composer matching <target>.
       const pathLower = String(runtime.pathname ?? '').toLowerCase();
       const surface = findDmSurface(runtime.document, runtime.pathname);
       const hasComposer = Boolean(surface?.editor);
-      const onDirectForTarget = (!targetKey && hasComposer)
+      const surfaceMatch = (surface?.container && targetKey)
+        ? dmContainerUserMatch(surface.container, targetKey, matchOpts)
+        : null;
+      const onDirectForTarget = (alreadyOpened && (pathLower.startsWith('/direct') || hasComposer))
+        || (!targetKey && hasComposer)
+        || (Boolean(targetKey) && hasComposer && Boolean(surfaceMatch?.matched))
         || (Boolean(targetKey) && pathLower.startsWith(`/direct/new/${targetKey}`))
-        || (Boolean(targetKey) && pathLower.startsWith('/direct/t/') && hasComposer && directThreadMatchesUser(runtime.document, targetKey));
+        || (Boolean(targetKey) && pathLower.startsWith('/direct/t/') && hasComposer && (
+          directThreadMatchesUser(runtime.document, targetKey, matchOpts)
+          || surfaceMatch?.foundUsers?.length === 0
+        ));
       if (onDirectForTarget) return runDmFlow();
       return actOnProfile(payload, runDmFlow);
     },

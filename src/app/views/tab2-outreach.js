@@ -112,7 +112,7 @@ export function createOutreachView(ctx = {}) {
   // never stale relative to what the runner is handed.
   const policyState = {
     allowRefollow: false,
-    mutualOnly: true,
+    mutualOnly: false,
     allowExistingThread: false,
     cleanupMode: CleanupMode.NON_RESPONDERS,
     graceDays: 5,

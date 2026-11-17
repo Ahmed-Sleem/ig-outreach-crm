@@ -124,14 +124,14 @@ describe('message queue', () => {
     assert.equal(actionTypeFor(lead({ relState: 'NONE' }), QueueMode.DM), 'DM_COLD');
   });
 
-  test('the default funnel waits for a follow-back before the first message', () => {
-    const cold = verdict({ relState: 'NONE' }, QueueMode.DM);
-    assert.equal(cold.ok, false);
-    assert.equal(cold.code, SkipCode.NOT_ELIGIBLE);
-    assert.match(cold.reason, /waiting for a follow-back/);
-    const allowed = verdict({ relState: 'NONE' }, QueueMode.DM, { policy: { mutualOnly: false } });
-    assert.equal(allowed.ok, true);
-    assert.equal(allowed.actionType, 'DM_COLD');
+  test('mutualOnly defaults to off (cold invites allowed) and blocks non-mutuals when turned on', () => {
+    const allowedByDefault = verdict({ relState: 'NONE' }, QueueMode.DM);
+    assert.equal(allowedByDefault.ok, true);
+    assert.equal(allowedByDefault.actionType, 'DM_COLD');
+    const coldBlocked = verdict({ relState: 'NONE' }, QueueMode.DM, { policy: { mutualOnly: true } });
+    assert.equal(coldBlocked.ok, false);
+    assert.equal(coldBlocked.code, SkipCode.NOT_ELIGIBLE);
+    assert.match(coldBlocked.reason, /waiting for a follow-back/);
   });
 
   test('one message per person, checked from our own records', () => {
@@ -291,7 +291,7 @@ describe('building a queue', () => {
     const built = buildQueue({ leads, mode: QueueMode.DM, now: NOW, templateCount: 0 });
     assert.equal(built.canStart, false);
     assert.equal(built.gateMessage, 'Add at least one message template before starting a message run.');
-    const withTemplates = buildQueue({ leads, mode: QueueMode.DM, now: NOW, templateCount: 3 });
+    const withTemplates = buildQueue({ leads, mode: QueueMode.DM, now: NOW, templateCount: 3, policy: { mutualOnly: true } });
     assert.equal(withTemplates.canStart, true);
     assert.deepEqual(withTemplates.queue.map((row) => row.lead.username), ['warm_one']);
     assert.equal(withTemplates.actionType, 'DM_WARM');

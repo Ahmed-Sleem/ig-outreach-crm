@@ -46,10 +46,10 @@ export function actionTypeFor(lead, mode) {
 /**
  * One lead, one verdict.
  *
- * `policy` carries the campaign's own choices: `mutualOnly` (message only people
- * who follow us back — the default, because a cold invite to a stranger is the
- * single most reported behaviour), `allowRefollow`, `maxAttempts`, and the
- * cleaner's `mode`/`graceMs`.
+ * `policy` carries the campaign's own choices: `mutualOnly` (opt-in — off by
+ * default so leads can be messaged directly within the cold-invite cap; turn on
+ * to restrict DMs to people who follow us back for primary-inbox delivery),
+ * `allowRefollow`, `maxAttempts`, and the cleaner's `mode`/`graceMs`.
  */
 export function candidateVerdict(lead, { mode, now = Date.now(), policy = {} } = {}) {
   const rel = lead?.relState ?? RelState.NONE;
@@ -114,7 +114,7 @@ export function candidateVerdict(lead, { mode, now = Date.now(), policy = {} } =
   if (dm === DmState.DM_FAILED && Number(lead?.attempts ?? 0) >= Number(policy.maxAttempts ?? 1)) {
     return refuse(SkipCode.NOT_ELIGIBLE, `sending failed ${lead.attempts} time(s); not retrying automatically`);
   }
-  if (policy.mutualOnly !== false && !WARM_REL_STATES.includes(rel)) {
+  if (policy.mutualOnly === true && !WARM_REL_STATES.includes(rel)) {
     return refuse(SkipCode.NOT_ELIGIBLE, 'waiting for a follow-back before the first message');
   }
   return { ok: true, code: null, reason: null, actionType: actionTypeFor(lead, QueueMode.DM) };

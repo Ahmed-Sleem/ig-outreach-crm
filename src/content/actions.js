@@ -44,6 +44,7 @@ import {
   findProfileMessageButton,
   findProfileOptionsButton,
   findSendButton,
+  hasMessageEditorCue,
   isProfileUnavailable,
   isRtlElement,
   threadBubbles,
@@ -431,20 +432,74 @@ export function findComposer(ctx, options = {}) {
  * is correct in both directions — the mistake to avoid is computing a pixel
  * offset and assuming left-to-right.
  */
-export function caretToEnd(ctx, editor) {
-  const document = ctx.document;
+/** Notify Lexical and similar editors that DOM selection changed. */
+function fireSelectionChange(ctx, editor) {
+  const doc = editor?.ownerDocument ?? ctx?.document ?? null;
+  const view = doc?.defaultView ?? ctx?.window ?? globalThis.window ?? null;
+  const EventCtor = view?.Event ?? globalThis.Event;
+  if (typeof EventCtor !== 'function') return;
+  for (const target of [doc, editor, view]) {
+    if (!target || typeof target.dispatchEvent !== 'function') continue;
+    try { target.dispatchEvent(new EventCtor('selectionchange', { bubbles: false })); } catch { /* shim */ }
+  }
+}
+
+/**
+ * Give Lexical/React two animation frames (in a real browser) or a short tick
+ * (in tests) to observe `selectionchange` and reconcile DOM changes.
+ */
+async function waitForEditorFrame(ctx, signal = null) {
+  if (signal?.aborted) return;
+  if (!ctx?.wait && typeof globalThis.requestAnimationFrame === 'function') {
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      const timer = setTimeout(finish, 80);
+      if (typeof timer?.unref === 'function') timer.unref();
+      globalThis.requestAnimationFrame(() => {
+        globalThis.requestAnimationFrame(() => {
+          clearTimeout(timer);
+          finish();
+        });
+      });
+    });
+    return;
+  }
+  await Promise.resolve();
+}
+
+/**
+ * Put focus and caret INSIDE the composer's innermost Lexical `<p>` (or editor
+ * root when no `<p>` exists), fire `selectionchange` so Lexical syncs
+ * `$getSelection()`, and collapse to the END (safe for both LTR and RTL).
+ */
+export function caretToEnd(ctx, editor, { selectAll = false } = {}) {
+  const document = ctx.document ?? editor?.ownerDocument;
+  // Focus FIRST so the browser accepts DOM selection ranges inside the editor.
+  try { editor.focus?.(); } catch { /* noop */ }
   const getSel = ctx.getSelection ?? (typeof getSelection === 'function' ? getSelection : null);
-  const current = getSel ? getSel() : document?.selection ?? null;
+  const current = getSel ? getSel() : document?.getSelection?.() ?? document?.selection ?? null;
   if (!current || typeof document?.createRange !== 'function') {
-    editor.focus?.();
     return { ok: false, reason: 'no selection API available', rtl: isRtlElement(editor) };
   }
   const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.collapse(false);
+  if (selectAll) {
+    range.selectNodeContents(editor);
+  } else {
+    // Placing the collapsed caret inside the last `<p>` (instead of after `<p>`
+    // on the outer contenteditable `<div>`) matches what Lexical expects for
+    // `$getSelection()` and `KEY_ENTER_COMMAND`.
+    let anchor = editor;
+    if (typeof editor.querySelectorAll === 'function') {
+      const paragraphs = [...editor.querySelectorAll('p')];
+      if (paragraphs.length > 0) anchor = paragraphs[paragraphs.length - 1];
+    }
+    range.selectNodeContents(anchor);
+    range.collapse(false);
+  }
   current.removeAllRanges();
   current.addRange(range);
-  editor.focus?.();
+  fireSelectionChange(ctx, editor);
   return { ok: true, reason: null, rtl: isRtlElement(editor) };
 }
 
@@ -482,6 +537,39 @@ export function isDoubled(rendered, message) {
   return text === `${once} ${once}` || text === `${once}${once}`;
 }
 
+/** Build a Chromium-honored `StaticRange[]` from the live DOM selection (or inner `<p>`). */
+function currentStaticRanges(ctx, target) {
+  try {
+    const view = target?.ownerDocument?.defaultView ?? ctx?.window ?? globalThis.window ?? globalThis;
+    const StaticRangeCtor = view?.StaticRange ?? globalThis.StaticRange;
+    if (typeof StaticRangeCtor !== 'function') return [];
+    const getSel = ctx?.getSelection ?? (typeof getSelection === 'function' ? getSelection : null);
+    const sel = getSel ? getSel() : target?.ownerDocument?.getSelection?.() ?? null;
+    if (sel && sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0);
+      if (r) {
+        return [new StaticRangeCtor({
+          startContainer: r.startContainer,
+          startOffset: r.startOffset,
+          endContainer: r.endContainer,
+          endOffset: r.endOffset,
+          collapsed: r.collapsed,
+        })];
+      }
+    }
+    const anchor = (typeof target.querySelector === 'function' && target.querySelector('p')) || target;
+    return [new StaticRangeCtor({
+      startContainer: anchor,
+      startOffset: 0,
+      endContainer: anchor,
+      endOffset: 0,
+      collapsed: true,
+    })];
+  } catch {
+    return [];
+  }
+}
+
 /** Dispatch a real plain-text paste event (Lexical handles PASTE_COMMAND natively). */
 function dispatchPlainTextPaste(target, text) {
   try {
@@ -491,8 +579,52 @@ function dispatchPlainTextPaste(target, text) {
     if (typeof ClipboardCtor !== 'function' || typeof DataTransferCtor !== 'function') return false;
     const dt = new DataTransferCtor();
     dt.setData('text/plain', text);
-    const ev = new ClipboardCtor('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+    const ev = new ClipboardCtor('paste', {
+      clipboardData: dt,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    if (!ev.clipboardData || !ev.clipboardData.getData?.('text/plain')) {
+      try { Object.defineProperty(ev, 'clipboardData', { value: dt, configurable: true }); } catch { /* noop */ }
+    }
     target.dispatchEvent?.(ev);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dispatch a spec-compliant `beforeinput` carrying `targetRanges` in the init
+ * dict (honored across Chrome's ISOLATED-world boundary by Lexical 0.52+).
+ */
+function dispatchLexicalBeforeInput(ctx, target, text, inputType = 'insertText') {
+  try {
+    const view = target?.ownerDocument?.defaultView ?? ctx?.window ?? globalThis.window ?? globalThis;
+    const InputCtor = view?.InputEvent ?? globalThis.InputEvent;
+    if (typeof InputCtor !== 'function') return false;
+    const targetRanges = currentStaticRanges(ctx, target);
+    const init = {
+      inputType,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ...(targetRanges.length ? { targetRanges } : {}),
+    };
+    if (inputType === 'insertFromPaste') {
+      const DataTransferCtor = view?.DataTransfer ?? globalThis.DataTransfer;
+      if (typeof DataTransferCtor === 'function') {
+        const dt = new DataTransferCtor();
+        dt.setData('text/plain', text);
+        init.dataTransfer = dt;
+      } else {
+        init.data = text;
+      }
+    } else if (text !== null && text !== undefined) {
+      init.data = text;
+    }
+    target.dispatchEvent?.(new InputCtor('beforeinput', init));
     return true;
   } catch {
     return false;
@@ -536,10 +668,12 @@ function dispatchEscapeKey(ctx, document) {
  * Type a message into the composer and VERIFY it before anything is sent.
  *
  * The sequence is click/focus (activates Lexical's internal selection),
- * caret-to-end, clear any pre-existing draft with a short post-clear beat so
- * Lexical never swallows the next insertText, insert line by line (with a
- * Lexical paste/beforeinput fallback if execCommand did not stick), then read
- * the composer back. A doubled or partial draft is refused here before Send.
+ * caret inside `<p>` + `selectionchange` + frame settle, clear any pre-existing
+ * draft with a post-clear beat so Lexical never swallows the next insertText,
+ * insert line by line (with Chromium ISOLATED-world Lexical fallbacks:
+ * plain-text `paste`, `beforeinput(insertFromPaste + targetRanges)`, and
+ * `beforeinput(insertText + targetRanges)` if `execCommand` did not stick),
+ * then read the composer back. A doubled or partial draft is refused before Send.
  */
 export async function composeMessage(ctx, options = {}) {
   const { document, message, editor = null, signal = null, pathname = '' } = options;
@@ -557,8 +691,9 @@ export async function composeMessage(ctx, options = {}) {
     await humanClick(ctx, target, { signal, settleMs: 60, label: 'Focusing message box…' });
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
   }
-  try { target.focus?.(); } catch { /* noop */ }
   caretToEnd(ctx, target);
+  await waitForEditorFrame(ctx, signal);
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
 
   if (String(target.tagName ?? '').toUpperCase() === 'TEXTAREA') {
     const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window;
@@ -576,27 +711,25 @@ export async function composeMessage(ctx, options = {}) {
   }
 
   if (readComposerText(target)) {
+    caretToEnd(ctx, target, { selectAll: true });
+    await waitForEditorFrame(ctx, signal);
     document.execCommand?.('selectAll');
     document.execCommand?.('delete');
     // Lexical can suppress an immediate insertText on the same tick after
-    // handled selectAll/delete; let one short frame settle first.
+    // handled selectAll/delete; let one short beat settle first.
     await tickOf(ctx)(60, { signal });
-    if (readComposerText(target) && typeof globalThis.InputEvent === 'function') {
-      try {
-        document.execCommand?.('selectAll');
-        target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
-          inputType: 'deleteContentBackward',
-          bubbles: true,
-          cancelable: true,
-        }));
-        await tickOf(ctx)(60, { signal });
-      } catch { /* shim */ }
+    if (readComposerText(target)) {
+      caretToEnd(ctx, target, { selectAll: true });
+      await waitForEditorFrame(ctx, signal);
+      document.execCommand?.('selectAll');
+      dispatchLexicalBeforeInput(ctx, target, null, 'deleteContentBackward');
+      await tickOf(ctx)(60, { signal });
     }
     if (readComposerText(target)) {
       return refusal('the composer still holds text after clearing it; refusing to type on top of someone else\'s draft');
     }
-    try { target.focus?.(); } catch { /* noop */ }
     caretToEnd(ctx, target);
+    await waitForEditorFrame(ctx, signal);
   }
 
   const lines = text.split('\n');
@@ -604,58 +737,57 @@ export async function composeMessage(ctx, options = {}) {
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
     if (index > 0) {
       const broke = document.execCommand?.('insertLineBreak');
-      if (broke === false && typeof globalThis.InputEvent === 'function') {
-        try {
-          target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
-            inputType: 'insertLineBreak',
-            bubbles: true,
-            cancelable: true,
-          }));
-        } catch { /* shim */ }
+      if (broke === false) {
+        dispatchLexicalBeforeInput(ctx, target, null, 'insertLineBreak');
       }
     }
     const inserted = document.execCommand?.('insertText', false, lines[index]);
-    if (inserted === false && typeof globalThis.InputEvent === 'function') {
-      try {
-        target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
-          inputType: 'insertText',
-          data: lines[index],
-          bubbles: true,
-          cancelable: true,
-        }));
-      } catch { /* shim */ }
+    if (inserted === false) {
+      dispatchLexicalBeforeInput(ctx, target, lines[index], 'insertText');
     }
     await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
   }
+  await waitForEditorFrame(ctx, signal);
 
-  // Fallback for real-browser Lexical quirks where execCommand returned without
-  // mutating the Lexical state: try plain-text paste (Lexical's native
-  // PASTE_COMMAND), then beforeinput/input. Only runs if composer is still empty
-  // so it can never double an already-landed draft.
+  // Fallback ladder for Chromium ISOLATED-world Lexical quirks where
+  // execCommand returned without committing into Lexical's internal state.
+  // Each fallback runs ONLY if the composer is still empty, so it can never
+  // double an already-landed draft.
   if (!readComposerText(target)) {
-    try { target.focus?.(); } catch { /* noop */ }
     caretToEnd(ctx, target);
+    await waitForEditorFrame(ctx, signal);
     if (dispatchPlainTextPaste(target, text)) {
-      await tickOf(ctx)(100, { signal });
+      await waitForEditorFrame(ctx, signal);
+      await tickOf(ctx)(80, { signal });
     }
   }
-  if (!readComposerText(target) && typeof globalThis.InputEvent === 'function') {
-    try {
-      target.focus?.();
-      caretToEnd(ctx, target);
-      target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-        cancelable: true,
-      }));
-      target.dispatchEvent?.(new globalThis.InputEvent('input', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-      }));
-      await tickOf(ctx)(100, { signal });
-    } catch { /* shim */ }
+  if (!readComposerText(target)) {
+    caretToEnd(ctx, target);
+    await waitForEditorFrame(ctx, signal);
+    if (dispatchLexicalBeforeInput(ctx, target, text, 'insertFromPaste')) {
+      await waitForEditorFrame(ctx, signal);
+      await tickOf(ctx)(80, { signal });
+    }
+  }
+  if (!readComposerText(target)) {
+    caretToEnd(ctx, target);
+    await waitForEditorFrame(ctx, signal);
+    if (dispatchLexicalBeforeInput(ctx, target, text, 'insertText')) {
+      try {
+        const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window ?? globalThis;
+        const InputCtor = view?.InputEvent ?? globalThis.InputEvent;
+        if (typeof InputCtor === 'function') {
+          target.dispatchEvent?.(new InputCtor('input', {
+            inputType: 'insertText',
+            data: text,
+            bubbles: true,
+            composed: true,
+          }));
+        }
+      } catch { /* shim */ }
+      await waitForEditorFrame(ctx, signal);
+      await tickOf(ctx)(80, { signal });
+    }
   }
 
   const rendered = readComposerText(target);
@@ -690,14 +822,32 @@ export function newestIsOurs(document, message, container = null, editor = null)
   if (!wanted) return false;
   const bubble = newestBubble(document, container);
   if (bubble && collapse(bubble.textContent).includes(wanted)) return true;
-  if (container && container !== document && container !== document?.body && typeof container.querySelectorAll === 'function') {
-    for (const node of [...container.querySelectorAll('[dir="auto"], span, p, div')]) {
+
+  const checkLeafTextIn = (scope, excludeChrome = false) => {
+    if (!scope || typeof scope.querySelectorAll !== 'function') return false;
+    for (const node of [...scope.querySelectorAll('[dir="auto"], span, p, div')]) {
       if (editor && (node === editor || editor.contains?.(node) || node.contains?.(editor))) continue;
-      if (node.closest?.('button, [role="button"], [contenteditable="true"]')) continue;
+      if (node.closest?.('button, [role="button"], [contenteditable="true"], [contenteditable="plaintext-only"]')) continue;
+      if (excludeChrome && node.closest?.('header, nav, article')) continue;
       const children = node.children ?? [];
       if (children.length > 2) continue;
       const txt = collapse(node.textContent);
       if (txt && txt.includes(wanted)) return true;
+    }
+    return false;
+  };
+
+  if (container && container !== document && container !== document?.body) {
+    if (checkLeafTextIn(container, false)) return true;
+  }
+  // If the bubble rendered outside a narrow container (e.g. a split Comet
+  // thread/composer wrapper), also check structured message bubbles anywhere
+  // on the document outside the composer and feed articles.
+  if (document && container !== document) {
+    for (const node of [...(document.querySelectorAll?.('[role="article"], [role="row"]') ?? [])]) {
+      if (editor && (node === editor || editor.contains?.(node) || node.contains?.(editor))) continue;
+      if (node.closest?.('header, nav')) continue;
+      if (collapse(node.textContent).includes(wanted)) return true;
     }
   }
   return false;
@@ -766,6 +916,7 @@ export async function openDm(ctx, options = {}) {
     document,
     location = null,
     username = null,
+    viewerUsername = null,
     signal = null,
     timeoutMs = SETTLE_MS.dmOpen,
     readyTimeoutMs = 0,
@@ -780,14 +931,17 @@ export async function openDm(ctx, options = {}) {
 
   const currentPath = () => String(location?.pathname ?? ctx?.location?.pathname ?? document?.location?.pathname ?? '');
   const targetUser = String(username ?? '').trim().replace(/^@+/, '').toLowerCase() || null;
+  const userMatchOpts = viewerUsername ? { viewerUsername } : {};
 
   // 1. Check for an already-open floating chat dock (could be THIS user or a
   //    stale dock left open from the previous lead!).
+  let staleDockUser = null;
+  let staleDockNode = null;
   const existingSurface = findDmSurface(document, currentPath());
   const existingDock = existingSurface?.kind === 'dock' ? existingSurface.container : findOpenDmDock(document);
   if (existingDock) {
     if (targetUser) {
-      const match = dmContainerUserMatch(existingDock, targetUser);
+      const match = dmContainerUserMatch(existingDock, targetUser, userMatchOpts);
       if (match.matched) {
         const restriction = detectDmRestriction(existingDock);
         if (restriction) return restrictionToOutcome(restriction);
@@ -803,17 +957,23 @@ export async function openDm(ctx, options = {}) {
       } else {
         // Stale floating dock belonging to another user (or unidentified): close
         // it cleanly before opening this profile's chat!
+        if (match.foundUsers.length > 0) staleDockUser = match.foundUsers[0];
+        staleDockNode = existingDock;
         const closeBtn = findDmDockCloseButton(existingDock);
         if (closeBtn) {
           ctx.virtualCursor?.label?.('Closing previous chat dock…');
           await humanClick(ctx, closeBtn, { signal, settleMs: 60, label: 'Closing previous chat…' });
           if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
-          await waitFor(ctx, () => (!findOpenDmDock(document) && !findDmSurface(document, currentPath()) ? true : null), {
+          const closed = await waitFor(ctx, () => (!findOpenDmDock(document) && !findDmSurface(document, currentPath()) ? true : null), {
             timeoutMs: 2000,
             intervalMs: 100,
             signal,
             label: 'previous chat dock to close',
           });
+          if (closed.found) {
+            staleDockUser = null;
+            staleDockNode = null;
+          }
         }
       }
     }
@@ -908,11 +1068,13 @@ export async function openDm(ctx, options = {}) {
     if (surface) {
       const restriction = detectDmRestriction(surface.container);
       if (restriction) return { restriction };
-      // If a floating dock is open and identifies a DIFFERENT user (e.g., while
-      // switching threads inside the dock), wait for the target thread to render.
+      // Only keep waiting if a STALE previous dock is still visibly showing the
+      // old user without switching yet (never stall on a brand-new dock whose
+      // header renders display name instead of a /username/ anchor!).
       if (targetUser && surface.kind === 'dock') {
-        const match = dmContainerUserMatch(surface.container, targetUser);
-        if (match.foundUsers.length > 0 && !match.matched) return null;
+        const match = dmContainerUserMatch(surface.container, targetUser, userMatchOpts);
+        if (staleDockUser && match.foundUsers.includes(staleDockUser) && !match.matched) return null;
+        if (staleDockNode && surface.container === staleDockNode && match.foundUsers.length > 0 && !match.matched) return null;
       }
       return { surface };
     }
@@ -974,27 +1136,47 @@ export async function openDm(ctx, options = {}) {
   return success({
     elapsedMs: opened.elapsedMs,
     via,
+    openedByClick: true,
     surfaceKind: surface.kind,
     existingThread: hasExistingThread(document, surface.container),
     composerFound: true,
   });
 }
 
+/** Dismiss Instagram's benign "Turn on Notifications" modal if it overlays Direct. */
+async function dismissNotificationsPrompt(ctx, document, signal = null) {
+  for (const dialog of findDialogs(document)) {
+    const txt = collapse(dialog.textContent ?? '');
+    if (!/turn on notifications|تشغيل الإشعارات/i.test(txt)) continue;
+    const buttons = [...(dialog.querySelectorAll?.('button, [role="button"]') ?? [])];
+    const notNow = buttons.find((b) => /^(not now|ليس الآن)$/i.test(collapse(b.textContent ?? b.getAttribute?.('aria-label') ?? '')));
+    if (notNow) {
+      await humanClick(ctx, notNow, { signal, settleMs: 40, label: 'Dismissing notifications prompt…' });
+      await tickOf(ctx)(150, { signal });
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Send one message to the open thread (floating dock, `/direct/t/` page, or
- * Direct dialog).
+ * Send one message to the open thread (floating dock, `/direct/t/` page,
+ * Direct dialog, or any page hosting a visible DM composer).
  *
  * Refuses to send into a thread that already has messages unless `allowExisting`
  * is set, catches restriction notices, waits for React/Lexical to render the
- * Send button after typing, supports Enter-to-send for Lexical docks with no
- * rendered Send button, and verifies delivery strictly inside the active DM
- * container.
+ * Send button after typing, searches the composer bar + DM container + page
+ * for the Send button, supports Enter-to-send for Lexical/message composers
+ * (plus backup Enter if clicking Send fails to clear a Lexical box), and
+ * verifies delivery inside the active thread.
  */
 export async function executeDm(ctx, options = {}) {
   const {
     document,
     message,
     username = null,
+    viewerUsername = null,
+    trustedThread = false,
     signal = null,
     pathname = '',
     allowExisting = false,
@@ -1007,6 +1189,8 @@ export async function executeDm(ctx, options = {}) {
   if (isActionBlocked(document)) {
     return halted(ActionOutcome.STOPPED, 'Instagram is showing an action-block dialog; the run must stop', { severity: 'account' });
   }
+  await dismissNotificationsPrompt(ctx, document, signal);
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
 
   const effectivePath = pathname || String(ctx?.location?.pathname ?? document?.location?.pathname ?? '');
   const surface = findDmSurface(document, effectivePath);
@@ -1015,8 +1199,8 @@ export async function executeDm(ctx, options = {}) {
   const preRestriction = detectDmRestriction(container);
   if (preRestriction) return restrictionToOutcome(preRestriction);
 
-  if (username && container) {
-    const match = dmContainerUserMatch(container, username);
+  if (username && container && !trustedThread) {
+    const match = dmContainerUserMatch(container, username, viewerUsername ? { viewerUsername } : {});
     if (match.foundUsers.length > 0 && !match.matched) {
       return {
         ok: false,
@@ -1046,15 +1230,17 @@ export async function executeDm(ctx, options = {}) {
   }
 
   // React/Lexical swaps Voice Clip / Photo / GIF for the Send button a frame or
-  // two AFTER text lands in the composer. Wait briefly for Send to mount!
-  let send = findSendButton(document, activeContainer);
+  // two AFTER text lands in the composer. Wait briefly for Send to mount,
+  // searching the composer bar beside `editor`, the DM container, and the page.
+  let send = findSendButton(document, activeContainer, editor);
   const isLexicalEditor = editor.getAttribute?.('data-lexical-editor') === 'true';
-  if (!send && (isLexicalEditor || sendButtonTimeoutMs > 0)) {
+  const canSubmitWithEnter = isLexicalEditor || hasMessageEditorCue(editor);
+  if (!send && (canSubmitWithEnter || sendButtonTimeoutMs > 0)) {
     const waitedSend = await waitFor(ctx, () => {
       if (isActionBlocked(document)) return { blocked: true };
-      return findSendButton(document, activeContainer);
+      return findSendButton(document, activeContainer, editor);
     }, {
-      timeoutMs: isLexicalEditor ? sendButtonTimeoutMs : Math.min(sendButtonTimeoutMs, 200),
+      timeoutMs: canSubmitWithEnter ? sendButtonTimeoutMs : Math.min(sendButtonTimeoutMs, 200),
       intervalMs: 100,
       signal,
       label: 'Send button',
@@ -1066,14 +1252,49 @@ export async function executeDm(ctx, options = {}) {
     if (waitedSend.found && waitedSend.value?.button) send = waitedSend.value;
   }
 
+  // Real-browser Lexical self-heal: if execCommand wrote raw DOM text without
+  // Lexical committing it into its internal state (`[data-lexical-text="true"]`
+  // is missing AND Send never mounted), clear the uncommitted draft and paste
+  // via real ClipboardEvent('paste') so Lexical commits it and mounts Send!
+  if (
+    !send
+    && isLexicalEditor
+    && !editor.querySelector?.('[data-lexical-text="true"]')
+    && typeof (editor?.ownerDocument?.defaultView?.ClipboardEvent ?? globalThis.ClipboardEvent) === 'function'
+  ) {
+    caretToEnd(ctx, editor, { selectAll: true });
+    await waitForEditorFrame(ctx, signal);
+    document.execCommand?.('selectAll');
+    document.execCommand?.('delete');
+    await tickOf(ctx)(60, { signal });
+    caretToEnd(ctx, editor);
+    await waitForEditorFrame(ctx, signal);
+    if (dispatchPlainTextPaste(editor, message)) {
+      await waitForEditorFrame(ctx, signal);
+      const rescued = await waitFor(ctx, () => {
+        if (isActionBlocked(document)) return { blocked: true };
+        return findSendButton(document, activeContainer, editor);
+      }, { timeoutMs: Math.min(1000, sendButtonTimeoutMs || 1000), intervalMs: 100, signal, label: 'Send button after paste' });
+      if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+      if (rescued.value?.blocked || isActionBlocked(document)) {
+        return halted(ActionOutcome.STOPPED, 'Instagram blocked sending this message; the run must stop', { severity: 'account' });
+      }
+      if (rescued.found && rescued.value?.button) send = rescued.value;
+    }
+  }
+
+  let submittedVia = 'send-button';
   if (send) {
     await humanClick(ctx, send.button, { signal, label: 'Clicking Send…' });
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
-  } else if (allowEnterSubmit && isLexicalEditor) {
-    // Some floating-dock builds omit an explicit Send button and submit on Enter.
+  } else if (allowEnterSubmit && canSubmitWithEnter) {
+    // Floating-dock and Direct builds that omit an explicit Send button (or
+    // render an unlabelled icon) submit natively on Enter once Lexical has an
+    // active RangeSelection inside the paragraph.
+    submittedVia = 'enter';
     ctx.virtualCursor?.label?.('Pressing Enter to send…');
-    try { editor.focus?.(); } catch { /* noop */ }
     caretToEnd(ctx, editor);
+    await waitForEditorFrame(ctx, signal);
     dispatchEnterKey(ctx, editor);
   } else {
     return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer holds the message but no Send button is rendered' };
@@ -1086,7 +1307,7 @@ export async function executeDm(ctx, options = {}) {
     return findDmSurface(document, effectivePath)?.editor ?? null;
   };
 
-  const cleared = await waitFor(ctx, () => {
+  const checkCleared = () => {
     if (isActionBlocked(document)) return { blocked: true };
     const live = resolveLiveEditor();
     if (newestIsOurs(document, message, activeContainer, live ?? editor)) {
@@ -1101,7 +1322,31 @@ export async function executeDm(ctx, options = {}) {
     }
     if (!live || readComposerText(live) === '') return { cleared: true };
     return null;
-  }, { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
+  };
+
+  let cleared;
+  if (submittedVia === 'send-button' && allowEnterSubmit && canSubmitWithEnter) {
+    // Wait half the settle window after clicking Send; if a Lexical composer
+    // still holds the exact draft, press Enter once as a backup trigger.
+    const firstWaitMs = Math.min(2000, Math.max(400, Math.floor(settleMs / 2)));
+    cleared = await waitFor(ctx, checkCleared, { timeoutMs: firstWaitMs, signal, label: 'composer cleared after send' });
+    if (!cleared.found && !signal?.aborted) {
+      const live = resolveLiveEditor();
+      if (live && readComposerText(live)) {
+        ctx.virtualCursor?.label?.('Pressing Enter to confirm send…');
+        caretToEnd(ctx, live);
+        await waitForEditorFrame(ctx, signal);
+        dispatchEnterKey(ctx, live);
+      }
+      cleared = await waitFor(ctx, checkCleared, {
+        timeoutMs: Math.max(800, settleMs - firstWaitMs),
+        signal,
+        label: 'composer cleared after send',
+      });
+    }
+  } else {
+    cleared = await waitFor(ctx, checkCleared, { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
+  }
 
   if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
   if (cleared.value?.blocked || isActionBlocked(document)) {

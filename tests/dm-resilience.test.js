@@ -32,6 +32,7 @@ import {
 } from '../src/content/selectors.js';
 import {
   ActionOutcome,
+  caretToEnd,
   composeMessage,
   executeDm,
   openDm,
@@ -47,9 +48,10 @@ import {
   RunPhase,
   createRunController,
 } from '../src/app/lib/runner.js';
+import { createOutreachView } from '../src/app/views/tab2-outreach.js';
 import { ActionType } from '../src/core/governor.js';
 import { DmState, RelState } from '../src/core/lifecycle.js';
-import { QueueMode } from '../src/core/queue.js';
+import { QueueMode, buildQueue } from '../src/core/queue.js';
 import { EntropyPoolRNG } from '../src/core/random.js';
 import { CommandType } from '../src/storage/bridge.js';
 import {
@@ -1019,3 +1021,449 @@ describe('Universal skip-on-per-account-failure (Follow, Messages, Unfollow)', (
     assert.equal(apiClosedTab.attempted.length, 1, 'closed tab must stop immediately without retrying');
   });
 });
+
+/* -------- 4. Deep DM reliability, any-page discovery & mutualOnly default */
+
+describe('Deep DM reliability (any-page discovery, Lexical isolated world, hard-nav watch, mutualOnly default)', () => {
+  test('skips composers nested inside a display:none ancestor and picks the visible one', () => {
+    const ctx = makeCtx('/brand_saffron/');
+    const hiddenWrap = ctx.document.createElement('div');
+    hiddenWrap.style.display = 'none';
+    const hiddenEd = ctx.document.createElement('div');
+    hiddenEd.setAttribute('contenteditable', 'true');
+    hiddenEd.setAttribute('role', 'textbox');
+    hiddenEd.setAttribute('aria-placeholder', 'Message...');
+    hiddenEd.setAttribute('data-lexical-editor', 'true');
+    hiddenWrap.append(hiddenEd);
+
+    const visibleWrap = ctx.document.createElement('div');
+    const visibleEd = ctx.document.createElement('div');
+    visibleEd.setAttribute('contenteditable', 'true');
+    visibleEd.setAttribute('role', 'textbox');
+    visibleEd.setAttribute('aria-placeholder', 'Write a message...');
+    visibleEd.setAttribute('data-lexical-editor', 'true');
+    visibleWrap.append(visibleEd);
+
+    ctx.document.body.append(hiddenWrap, visibleWrap);
+    const surface = findDmSurface(ctx.document, '/brand_saffron/');
+    assert.ok(surface);
+    assert.equal(surface.editor, visibleEd, 'must skip hidden ancestor composer and pick visible one');
+  });
+
+  test('finds DM composer & Send button on /direct/t/ with pure <div> layout (no <main>/<section>) and on arbitrary pages', () => {
+    // 1. /direct/t/ built entirely out of <div>s (no <main>, no <section>).
+    const ctx = makeCtx('/direct/t/777111/');
+    const appShell = ctx.document.createElement('div');
+    const threadPane = ctx.document.createElement('div');
+    const grid = ctx.document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    const bar = ctx.document.createElement('div');
+    const edWrap = ctx.document.createElement('div');
+    const ed = ctx.document.createElement('div');
+    ed.setAttribute('contenteditable', 'true');
+    ed.setAttribute('role', 'textbox');
+    ed.setAttribute('data-lexical-editor', 'true');
+    const sibPlaceholder = ctx.document.createElement('div');
+    sibPlaceholder.setAttribute('aria-hidden', 'true');
+    sibPlaceholder.textContent = 'Message...';
+    edWrap.append(ed, sibPlaceholder);
+
+    // Icon-only "Press enter to send" button beside composer.
+    const sendBtn = makeIconButton(ctx.document, 'Press enter to send');
+    bar.append(edWrap, sendBtn);
+    threadPane.append(grid, bar);
+    appShell.append(threadPane);
+    ctx.document.body.append(appShell);
+
+    const surface = findDmSurface(ctx.document, '/direct/t/777111/');
+    assert.ok(surface);
+    assert.equal(surface.kind, 'direct_page');
+    assert.equal(surface.editor, ed);
+    assert.notEqual(surface.container, edWrap, 'container must NOT collapse to tiny editor.parentNode');
+    assert.equal(findSendButton(ctx.document, surface.container, ed)?.button, sendBtn);
+
+    // 2. Arbitrary page (/explore/) with a visible Lexical textbox and a feed comment box + Share button.
+    const ctx2 = makeCtx('/explore/');
+    const article = ctx2.document.createElement('article');
+    const commentBox = ctx2.document.createElement('textarea');
+    commentBox.setAttribute('placeholder', 'Add a comment…');
+    const postSend = makeRoleButton(ctx2.document, 'Send');
+    article.append(commentBox, postSend);
+
+    const floating = ctx2.document.createElement('div');
+    const anyEd = ctx2.document.createElement('div');
+    anyEd.setAttribute('contenteditable', 'true');
+    anyEd.setAttribute('role', 'textbox');
+    anyEd.setAttribute('data-lexical-editor', 'true');
+    const arabicSend = makeRoleButton(ctx2.document, 'إرسال الرسالة');
+    floating.append(anyEd, arabicSend);
+    ctx2.document.body.append(article, floating);
+
+    const anySurface = findDmSurface(ctx2.document, '/explore/');
+    assert.ok(anySurface);
+    assert.equal(anySurface.editor, anyEd, 'must find visible DM Lexical box on any page and skip post comment');
+    assert.equal(findSendButton(ctx2.document, anySurface.container, anyEd)?.button, arabicSend, 'must never click Send inside <article>');
+  });
+
+  test('dmContainerUserMatch preserves "Chat with ..." panels, ignores viewer handle & Chats sidebar, and reads avatar alt', () => {
+    const ctx = makeCtx('/direct/t/888/');
+    const root = ctx.document.createElement('div');
+    root.setAttribute('aria-label', 'Chat with Craft Kamel');
+
+    const sidebar = ctx.document.createElement('div');
+    sidebar.setAttribute('aria-label', 'Chats');
+    const otherLink = ctx.document.createElement('a');
+    otherLink.setAttribute('href', '/unrelated_person/');
+    sidebar.append(otherLink);
+
+    const viewerLink = ctx.document.createElement('a');
+    viewerLink.setAttribute('href', '/viewer_me/');
+
+    const avatar = ctx.document.createElement('img');
+    avatar.setAttribute('alt', "craft_kamel's profile picture");
+
+    root.append(sidebar, viewerLink, avatar);
+
+    const match = dmContainerUserMatch(root, 'craft_kamel', { viewerUsername: 'viewer_me' });
+    assert.equal(match.matched, true);
+    assert.equal(match.foundUsers.includes('viewer_me'), false);
+    assert.equal(match.foundUsers.includes('unrelated_person'), false);
+  });
+
+  test('caretToEnd focuses editor, selects inside inner <p>, and fires selectionchange', () => {
+    const ctx = makeCtx('/brand_saffron/');
+    const ed = ctx.document.createElement('div');
+    ed.setAttribute('contenteditable', 'true');
+    ed.setAttribute('data-lexical-editor', 'true');
+    const p = ctx.document.createElement('p');
+    const br = ctx.document.createElement('br');
+    p.append(br);
+    ed.append(p);
+    ctx.document.body.append(ed);
+
+    const order = [];
+    ed.focus = () => { order.push('focus'); };
+    let selectedNode = null;
+    ctx.document.createRange = () => ({
+      selectNodeContents(node) { selectedNode = node; },
+      collapse() {},
+    });
+    const fakeSel = {
+      removeAllRanges() { order.push('removeAllRanges'); },
+      addRange() { order.push('addRange'); },
+    };
+    ctx.getSelection = () => fakeSel;
+
+    let selChangeCount = 0;
+    ed.addEventListener('selectionchange', () => { selChangeCount += 1; });
+
+    const res = caretToEnd(ctx, ed);
+    assert.equal(res.ok, true);
+    assert.equal(selectedNode, p, 'caret must land inside inner <p>, not outer <div>');
+    assert.equal(order[0], 'focus', 'editor.focus() must run BEFORE setting selection');
+    assert.ok(selChangeCount >= 1, 'selectionchange must be dispatched for Lexical');
+  });
+
+  test('composeMessage falls back to real plain-text paste when execCommand returns false', async () => {
+    const ctx = makeCtx('/brand_saffron/');
+    const { dock, editor } = buildFloatingDock(ctx.document, { username: 'brand_saffron' });
+    ctx.document.body.append(dock);
+
+    // Simulate Chromium Lexical ignoring execCommand('insertText') while
+    // accepting ClipboardEvent('paste') with DataTransfer.
+    ctx.document.execCommand = () => false;
+    const origClipboard = globalThis.ClipboardEvent;
+    const origDT = globalThis.DataTransfer;
+    globalThis.DataTransfer = class FakeDT {
+      constructor() { this._m = new Map(); }
+      setData(k, v) { this._m.set(k, v); }
+      getData(k) { return this._m.get(k) ?? ''; }
+    };
+    globalThis.ClipboardEvent = class FakePasteEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.clipboardData = init.clipboardData ?? null;
+        this.bubbles = Boolean(init.bubbles);
+        this.cancelable = Boolean(init.cancelable);
+        this.composed = Boolean(init.composed);
+      }
+    };
+    let pasteCount = 0;
+    editor.addEventListener('paste', (ev) => {
+      pasteCount += 1;
+      editor._text = ev.clipboardData?.getData('text/plain') ?? '';
+    });
+
+    try {
+      const out = await composeMessage(ctx, {
+        document: ctx.document,
+        message: 'Hello Saffron!',
+        pathname: '/brand_saffron/',
+      });
+      assert.equal(out.ok, true);
+      assert.equal(pasteCount, 1);
+      assert.equal(readComposerText(editor), 'Hello Saffron!');
+    } finally {
+      globalThis.ClipboardEvent = origClipboard;
+      globalThis.DataTransfer = origDT;
+    }
+  });
+
+  test('clicking Message -> floating dock with display-name-only header (no /username/ link) + Notifications modal still sends', async () => {
+    const ctx = makeCtx('/atelier_lina/');
+    buildProfileHeader(ctx.document, { username: 'atelier_lina', hasMessageButton: true });
+    const msgBtn = findProfileMessageButton(ctx.document).button;
+
+    msgBtn.addEventListener('click', () => {
+      // Dock header renders ONLY display name ("Lina Studio"), no /atelier_lina/ anchor.
+      const dock = ctx.document.createElement('div');
+      const header = ctx.document.createElement('div');
+      const title = ctx.document.createElement('h2');
+      title.textContent = 'Lina Studio';
+      header.append(title, makeIconButton(ctx.document, 'Expand'), makeIconButton(ctx.document, 'Close'));
+      const thread = ctx.document.createElement('div');
+      const tray = ctx.document.createElement('div');
+      const editor = ctx.document.createElement('div');
+      editor.setAttribute('contenteditable', 'true');
+      editor.setAttribute('role', 'textbox');
+      editor.setAttribute('aria-placeholder', 'Message...');
+      editor.setAttribute('data-lexical-editor', 'true');
+      const sendBtn = makeIconButton(ctx.document, 'Press enter to send');
+      sendBtn.addEventListener('click', () => {
+        const txt = readComposerText(editor);
+        editor._text = '';
+        editor.children = [];
+        const b = ctx.document.createElement('div');
+        b.setAttribute('role', 'article');
+        b.textContent = txt;
+        thread.append(b);
+      });
+      tray.append(editor, sendBtn);
+      dock.append(header, thread, tray);
+      ctx.document.body.append(dock);
+
+      // Also pop a "Turn on Notifications" dialog over the page!
+      const notif = ctx.document.createElement('div');
+      notif.setAttribute('role', 'dialog');
+      const heading = ctx.document.createElement('h2');
+      heading.textContent = 'Turn on Notifications';
+      const notNow = makeRoleButton(ctx.document, 'Not Now');
+      notNow.addEventListener('click', () => { notif.remove?.(); notif.parentNode?.removeChild?.(notif); });
+      notif.append(heading, notNow);
+      ctx.document.body.append(notif);
+    });
+
+    const opened = await openDm(ctx, {
+      document: ctx.document,
+      location: ctx.location,
+      username: 'atelier_lina',
+      timeoutMs: 1500,
+    });
+    assert.equal(opened.ok, true);
+    assert.equal(opened.openedByClick, true);
+
+    const dm = await executeDm(ctx, {
+      document: ctx.document,
+      message: 'Hi Lina, love the ceramic pieces!',
+      username: 'atelier_lina',
+      trustedThread: true,
+      pathname: '/atelier_lina/',
+      settleMs: 1500,
+    });
+    assert.equal(dm.ok, true, `expected send to succeed: ${dm.reason}`);
+    assert.equal(dm.outcome, ActionOutcome.DONE);
+  });
+
+  test('sendWithNavigation aborts dead 120s wait immediately on hard nav to /direct/t/ and sends with alreadyOpened:true (while never interrupting live SPA busy)', async () => {
+    const store = new Map();
+    const storage = {
+      async get(k) { return store.has(k) ? structuredClone(store.get(k)) : null; },
+      async set(k, v) { store.set(k, structuredClone(v)); },
+      async remove(k) { store.delete(k); },
+    };
+
+    // --- Scenario A: Hard navigation kills old content script mid-EXECUTE_DM ---
+    let tabState = { id: 9, url: 'https://www.instagram.com/brand_saffron/', status: 'complete' };
+    let dmCalls = 0;
+    const receivedPayloads = [];
+    let scriptAlive = true;
+
+    const chromeTabs = {
+      async listTabs() { return [tabState]; },
+      async tabById() { return { ...tabState }; },
+      async waitForLoad() { tabState.status = 'complete'; return { ok: true, tab: { ...tabState } }; },
+      async inject() { scriptAlive = true; return { ok: true }; },
+      async navigate(_id, url) { tabState = { ...tabState, url, status: 'complete' }; return { ok: true, tab: { ...tabState } }; },
+      async stampTabId() { return { ok: true, stamped: false }; },
+    };
+
+    const client = createApiClient({
+      storage,
+      tabs: chromeTabs,
+      workspaceId: 'ws_hardnav',
+      pollMs: 20,
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 25))),
+    });
+
+    // Simulate the content script mailbox loop:
+    // - First EXECUTE_DM claims the command, switches tab URL to /direct/t/999/,
+    //   and dies (never writes a result!).
+    // - After api.js injects on /direct/t/999/, second EXECUTE_DM arrives with
+    //   alreadyOpened: true and succeeds immediately!
+    const cmdKey = 'ig_crm_bridge_v1:ws_hardnav:command';
+    const resKey = 'ig_crm_bridge_v1:ws_hardnav:result';
+    let stopLoop = false;
+    const responder = (async () => {
+      while (!stopLoop) {
+        const cmd = await storage.get(cmdKey);
+        if (cmd) {
+          if (cmd.type === CommandType.PING) {
+            await storage.remove(cmdKey);
+            if (scriptAlive) {
+              const row = { commandId: cmd.commandId, ok: true, value: { pong: true, busy: false }, at: Date.now() };
+              await storage.set(`${resKey}:${cmd.commandId}`, row);
+              await storage.set(resKey, row);
+            }
+          } else if (cmd.type === CommandType.EXECUTE_DM) {
+            await storage.remove(cmdKey);
+            dmCalls += 1;
+            receivedPayloads.push(cmd.payload);
+            if (dmCalls === 1) {
+              // Simulate hard navigation unloading old content script!
+              scriptAlive = false;
+              tabState = { id: 9, url: 'https://www.instagram.com/direct/t/999/', status: 'loading' };
+            } else {
+              const row = { commandId: cmd.commandId, ok: true, value: { ok: true, outcome: 'done' }, at: Date.now() };
+              await storage.set(`${resKey}:${cmd.commandId}`, row);
+              await storage.set(resKey, row);
+            }
+          }
+        }
+        await new Promise((r) => setTimeout(r, 15));
+      }
+    })();
+
+    const startedAt = Date.now();
+    const res = await client.sendWithNavigation(
+      CommandType.EXECUTE_DM,
+      { username: 'brand_saffron', message: 'Hi!' },
+      { tabId: 9, timeoutMs: 30_000, settleMs: 10, navPollMs: 150, navGraceMs: 200 },
+    );
+    const elapsed = Date.now() - startedAt;
+    stopLoop = true;
+    await responder;
+
+    assert.equal(res.ok, true, `hard-nav handoff must succeed: ${res.reason}`);
+    assert.equal(dmCalls, 2);
+    assert.equal(receivedPayloads[1]?.alreadyOpened, true, 'resumed command on /direct/t/ must pass alreadyOpened: true');
+    assert.ok(elapsed < 5000, `must recover immediately without hanging for timeout (took ${elapsed}ms)`);
+  });
+
+  test('EXECUTE_DM with alreadyOpened:true on /direct/t/ hydrates and sends without bouncing back to profile', async () => {
+    const ctx = makeCtx('/direct/t/555444/');
+    // Start with empty /direct/t/ page (React still hydrating the composer!).
+    // Mount the /direct/t/ composer + Send button on the 3rd virtual tick.
+    let ticks = 0;
+    let mounted = false;
+    const origWait = ctx.wait;
+    ctx.wait = async (ms) => {
+      await origWait(ms);
+      ticks += 1;
+      if (!mounted && ticks >= 3) {
+        mounted = true;
+        const pane = ctx.document.createElement('div');
+        const grid = ctx.document.createElement('div');
+        grid.setAttribute('role', 'grid');
+        const ed = ctx.document.createElement('div');
+        ed.setAttribute('contenteditable', 'true');
+        ed.setAttribute('role', 'textbox');
+        ed.setAttribute('aria-placeholder', 'Message...');
+        ed.setAttribute('data-lexical-editor', 'true');
+        const send = makeRoleButton(ctx.document, 'Send');
+        send.addEventListener('click', () => {
+          const txt = readComposerText(ed);
+          ed._text = '';
+          ed.children = [];
+          const b = ctx.document.createElement('div');
+          b.setAttribute('role', 'article');
+          b.textContent = txt;
+          grid.append(b);
+        });
+        pane.append(grid, ed, send);
+        ctx.document.body.append(pane);
+      }
+    };
+
+    const runtime = createContentRuntime({
+      document: ctx.document,
+      location: ctx.location,
+      cookieString: 'ds_user_id=99; csrftoken=abc',
+      wait: ctx.wait,
+      now: ctx.now,
+      random: ctx.random,
+    });
+    const handlers = createHandlers(runtime);
+
+    const out = await handlers[CommandType.EXECUTE_DM]({
+      username: 'brand_saffron',
+      message: 'Hey there!',
+      alreadyOpened: true,
+    });
+    assert.equal(out.ok, true, `expected alreadyOpened /direct/t/ send to succeed: ${out.reason}`);
+    assert.equal(out.outcome, ActionOutcome.DONE);
+    assert.notEqual(out.needsNavigation, true, 'must NEVER bounce back to /brand_saffron/');
+  });
+
+  test('Only message mutuals (wait for follow-back) defaults to OFF in both queue planner and Outreach UI', async () => {
+    const wsId = 'ws_mutual_default';
+    const nowTs = new Date(2026, 5, 1, 14, 0, 0).getTime();
+
+    // 1. Core queue planner defaults mutualOnly to false.
+    const coldLead = leadRecord({ workspaceId: wsId, username: 'cold_lead_1' }, { relState: RelState.NONE, priorityScore: 70 });
+    const builtDefault = buildQueue({ leads: [coldLead], mode: QueueMode.DM, now: nowTs, templateCount: 1 });
+    assert.equal(builtDefault.queue.length, 1);
+    assert.equal(builtDefault.queue[0].actionType, ActionType.DM_COLD);
+
+    const builtMutualOnly = buildQueue({ leads: [coldLead], mode: QueueMode.DM, now: nowTs, templateCount: 1, policy: { mutualOnly: true } });
+    assert.equal(builtMutualOnly.queue.length, 0);
+
+    // 2. Outreach UI toggle starts unchecked on the Messages sub-tab.
+    const doc = installDom();
+    const root = doc.createElement('div');
+    doc.body.append(root);
+    const seenPolicies = [];
+    const fakeApi = {
+      workspaceId: wsId,
+      async groups() { return []; },
+      async templates() { return []; },
+      async settings() { return {}; },
+      async workspace() { return { workspaceId: wsId, governorState: null }; },
+    };
+    const fakeController = {
+      state: { phase: 'idle' },
+      subscribe() { return () => {}; },
+      async outreach({ policy }) {
+        seenPolicies.push(policy);
+        return { ok: true, dryRun: true, plan: { counts: { ready: 0, queued: 0, skipped: 0, considered: 0, byCode: {} }, queue: [], canStart: false } };
+      },
+      stop() {},
+    };
+    const view = createOutreachView({ api: fakeApi, controller: fakeController });
+    view.mount(root);
+    await view.refresh();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Click the "Messages" sub-tab button.
+    const msgTab = [...root.querySelectorAll('.subtab')].find((b) => /Messages/i.test(b.textContent));
+    assert.ok(msgTab, 'Messages sub-tab must exist');
+    msgTab._listeners?.click?.[0]?.({ target: msgTab });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const mutualCheckbox = [...root.querySelectorAll('label')].find((l) => /Only message mutuals/i.test(l.textContent))?.querySelector('input[type="checkbox"]');
+    assert.ok(mutualCheckbox, 'Only message mutuals toggle must render on Messages sub-tab');
+    assert.equal(mutualCheckbox.checked, false, 'Only message mutuals must default to OFF');
+    assert.equal(seenPolicies.at(-1)?.mutualOnly, false, 'planned DM policy must default mutualOnly to false');
+    view.destroy?.();
+  });
+});
+

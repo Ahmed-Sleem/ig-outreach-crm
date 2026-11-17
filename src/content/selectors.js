@@ -38,7 +38,7 @@ export const LABEL_TEXT = Object.freeze({
   [Label.SEND_MESSAGE]: ['Send message', 'Send Message', 'إرسال رسالة'],
   [Label.OPTIONS]: ['Options', 'More options', 'خيارات', 'المزيد من الخيارات'],
   [Label.CLOSE]: ['Close', 'إغلاق'],
-  [Label.SEND]: ['Send', 'إرسال'],
+  [Label.SEND]: ['Send', 'Send a message', 'Press enter to send', 'Press Enter to send', 'إرسال', 'إرسال الرسالة', 'ارسال'],
   [Label.UNFOLLOW]: ['Unfollow', 'إلغاء المتابعة'],
   [Label.CANCEL]: ['Cancel', 'إلغاء'],
   [Label.TRY_AGAIN_LATER]: ['Try Again Later', 'حاول لاحقًا', 'حاولي لاحقًا'],
@@ -250,6 +250,12 @@ export function findProfileMessageButton(root) {
   for (const hdr of headers) {
     const hit = findButtonByLabel(hdr, [Label.MESSAGE, Label.SEND_MESSAGE]);
     if (hit && isNodeVisible(hit.button)) return hit;
+    for (const link of qsa(hdr, 'a[href*="/direct/"]')) {
+      const kind = labelKind(visibleButtonText(link)) ?? labelKind(link.getAttribute?.('aria-label'));
+      if ((kind === Label.MESSAGE || kind === Label.SEND_MESSAGE) && isNodeVisible(link)) {
+        return { button: link, kind };
+      }
+    }
   }
   // Responsive/narrow layout fallback: check directly inside <main> outside
   // feed <article> cards, dialogs, and nav.
@@ -334,20 +340,62 @@ export function findOptionsDialogSendMessage(root) {
   return null;
 }
 
+const UNRELATED_EDITOR_RE = /\b(comment|reply to|search|caption|bio|note|notes|find)\b|تعليق|رد على|بحث|إضافة تعليق|اكتب تعليق|коммент|поиск/i;
+const MESSAGE_CUE_RE = /\b(messages?|write a message|send a message|type a message|chat)\b|رسالة|مراسلة|اكتب رسالة|сообщени|envoyer|enviar|nachricht|mesaj/i;
+const COMPOSER_TRAY_RE = /^(choose an emoji|voice clip|add photo or video|choose a gif|like|send|press enter to send|إرسال|مقطع صوتي|إضافة صورة)/i;
+const SEND_BUTTON_RE = /^(send(\s+(a\s+)?message)?|press\s+enter\s+to\s+send|إرسال(\s+(الرسالة|رسالة))?|ارسال)$/i;
+
+function editorLabelText(editor) {
+  if (!editor) return '';
+  return collapse([
+    editor.getAttribute?.('aria-label'),
+    editor.getAttribute?.('aria-placeholder'),
+    editor.getAttribute?.('placeholder'),
+    editor.getAttribute?.('data-placeholder'),
+  ].filter(Boolean).join(' '));
+}
+
+function siblingPlaceholderText(editor) {
+  const parent = editor?.parentNode;
+  if (!parent) return '';
+  const kids = parent.children ?? parent.childNodes ?? [];
+  const parts = [];
+  for (const kid of kids) {
+    if (!kid || kid === editor) continue;
+    const tag = String(kid.tagName ?? '').toUpperCase();
+    if (!tag || tag === 'BUTTON' || tag === 'SVG' || tag === 'SCRIPT' || tag === 'STYLE') continue;
+    if (kid.getAttribute?.('role') === 'button') continue;
+    const txt = collapse(kid.textContent ?? '');
+    if (txt && txt.length <= 60) parts.push(txt);
+  }
+  return parts.join(' ');
+}
+
+/** True when `editor` carries an explicit Message/DM placeholder or aria-label. */
+export function hasMessageEditorCue(editor) {
+  if (!editor) return false;
+  const own = editorLabelText(editor);
+  if (own && MESSAGE_CUE_RE.test(own)) return true;
+  const sib = siblingPlaceholderText(editor);
+  if (sib && MESSAGE_CUE_RE.test(sib) && !UNRELATED_EDITOR_RE.test(sib)) return true;
+  return false;
+}
+
 function isCommentEditor(editor) {
   if (!editor) return true;
-  const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
-  const placeholder = collapse(
-    editor.getAttribute?.('aria-placeholder')
-    ?? editor.getAttribute?.('placeholder')
-    ?? '',
-  ).toLowerCase();
-  const combined = `${aria} ${placeholder}`;
-  if (/comment|تعليق|reply to\b|رد على/.test(combined)) return true;
-  // A contenteditable nested inside a feed/post <article> is a comment box,
-  // never a Direct composer (DM docks render [role="article"] as sibling message
-  // bubbles above the composer, never wrapping the composer itself).
-  if (editor.closest?.('article')) return true;
+  const combined = editorLabelText(editor);
+  if (combined && UNRELATED_EDITOR_RE.test(combined)) return true;
+  const role = String(editor.getAttribute?.('role') ?? '').toLowerCase();
+  if (role === 'searchbox') return true;
+  const type = String(editor.getAttribute?.('type') ?? '').toLowerCase();
+  if (type === 'search') return true;
+  // A contenteditable or textarea nested inside a feed/post <article>, site
+  // <nav>, profile <header>, or search container is never a Direct composer
+  // (DM docks render [role="article"] as sibling message bubbles above the
+  // composer, never wrapping the composer itself).
+  if (editor.closest?.('article, nav, [role="search"], form[role="search"]')) return true;
+  // Never pick an editor inside a profile <header> (e.g. bio edit).
+  if (editor.closest?.('header')) return true;
   return false;
 }
 
@@ -373,10 +421,11 @@ function hasComposerTrayIcons(node) {
   for (const btn of qsa(node, 'button, [role="button"]')) {
     const labels = [
       collapse(btn.getAttribute?.('aria-label') ?? ''),
+      visibleButtonText(btn),
       ...svgLabelsOf(btn),
     ];
     for (const l of labels) {
-      if (/^(choose an emoji|voice clip|add photo or video|choose a gif|like|send|إرسال|مقطع صوتي|إضافة صورة)/i.test(l)) {
+      if (l && COMPOSER_TRAY_RE.test(l)) {
         hits += 1;
         break;
       }
@@ -386,34 +435,97 @@ function hasComposerTrayIcons(node) {
   return false;
 }
 
+function isFixedPositionNode(node) {
+  if (!node) return false;
+  try {
+    if (typeof getComputedStyle === 'function') {
+      if (getComputedStyle(node)?.position === 'fixed') return true;
+    }
+  } catch { /* shim */ }
+  if (node.style?.position === 'fixed') return true;
+  const attr = String(node.getAttribute?.('style') ?? '');
+  return /(?:^|;)\s*position\s*:\s*fixed/i.test(attr);
+}
+
 /**
- * Walk up from a Lexical composer to locate the floating bottom-right Direct
- * chat dock container on a profile/feed page (where there is NO [role="dialog"]
- * and the URL stays on /<username>/).
+ * Walk up from a Lexical/textbox composer to locate the floating bottom-right
+ * Direct chat dock container on a profile/feed page (where there is NO
+ * [role="dialog"] and the URL stays on /<username>/).
  */
 function findDmDockContainerForEditor(editor, root) {
   let cur = editor?.parentNode ?? null;
-  let fallback = null;
+  let trayFallback = null;
+  let fixedFallback = null;
+  let chatStyleFallback = null;
   for (let depth = 0; depth < 30 && cur; depth += 1) {
     const tag = String(cur.tagName ?? '').toUpperCase();
     if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN') break;
     if (cur.getAttribute?.('role') === 'main') break;
     if (hasDockChrome(cur)) return cur;
-    if (!fallback && hasComposerTrayIcons(cur)) fallback = cur;
+    if (!trayFallback && hasComposerTrayIcons(cur)) trayFallback = cur;
+    if (!fixedFallback && isFixedPositionNode(cur) && !cur.querySelector?.('main, header')) {
+      fixedFallback = cur;
+    }
+    const styleAttr = String(cur.getAttribute?.('style') ?? '');
+    if (!chatStyleFallback && /--x-width\s*:|--chat-composer/i.test(styleAttr) && !cur.querySelector?.('main, header')) {
+      chatStyleFallback = cur;
+    }
     cur = cur.parentNode;
   }
-  // If we found the composer tray outside <main>, walk up a few more levels so
-  // the container includes the dock's message list above the composer.
-  if (fallback && !editor.closest?.('main, [role="main"]')) {
-    let up = fallback;
+  if (fixedFallback) return fixedFallback;
+  if (chatStyleFallback) {
+    // Walk up 1–2 levels past the composer style wrapper if we're still inside a dock pane.
+    let up = chatStyleFallback;
     for (let i = 0; i < 6 && up?.parentNode; i += 1) {
-      const pTag = String(up.parentNode.tagName ?? '').toUpperCase();
-      if (pTag === 'BODY' || pTag === 'HTML') break;
-      up = up.parentNode;
+      const p = up.parentNode;
+      const pTag = String(p.tagName ?? '').toUpperCase();
+      if (pTag === 'BODY' || pTag === 'HTML' || pTag === 'MAIN') break;
+      if (p.querySelector?.('main, header')) break;
+      if (hasDockChrome(p)) return p;
+      up = p;
+    }
+    return up;
+  }
+  // If we found the composer tray outside <main>, walk up so the container
+  // includes the dock's message list and header above the composer.
+  if (trayFallback && !editor.closest?.('main, [role="main"]')) {
+    let up = trayFallback;
+    for (let i = 0; i < 10 && up?.parentNode; i += 1) {
+      const p = up.parentNode;
+      const pTag = String(p.tagName ?? '').toUpperCase();
+      if (pTag === 'BODY' || pTag === 'HTML' || pTag === 'MAIN') break;
+      if (p.querySelector?.('main, header')) break;
+      if (hasDockChrome(p)) return p;
+      up = p;
     }
     return up;
   }
   return null;
+}
+
+/**
+ * Walk up from a composer on `/direct/` (or any non-dock page) to find a broad
+ * conversation container that encloses BOTH the message list above the box and
+ * the Send button beside it — never collapsing down to a tiny `editor.parentNode`.
+ */
+function findThreadPanelForEditor(editor, root) {
+  const mainScope = editor.closest?.('main, [role="main"], section');
+  if (mainScope) return mainScope;
+  let cur = editor?.parentNode ?? null;
+  let best = null;
+  for (let depth = 0; depth < 24 && cur; depth += 1) {
+    const tag = String(cur.tagName ?? '').toUpperCase();
+    if (tag === 'BODY' || tag === 'HTML') break;
+    if (cur.querySelector?.('nav[role="navigation"]')) break;
+    if (cur.querySelector?.('[role="grid"], [role="article"], [role="log"]')) {
+      return cur;
+    }
+    if (hasComposerTrayIcons(cur) || qsa(cur, 'button, [role="button"]').length >= 1) {
+      best = cur;
+    }
+    cur = cur.parentNode;
+  }
+  return best ?? root?.body ?? root ?? editor.parentNode;
 }
 
 /**
@@ -462,55 +574,92 @@ export function findDmDockCloseButton(container) {
 }
 
 /**
+ * Collect candidate editable nodes across `root` (including open shadow roots
+ * if any exist). Deduplicates while preserving document order.
+ */
+function collectEditableCandidates(root) {
+  const seen = new Set();
+  const out = [];
+  const addFrom = (scope) => {
+    for (const el of qsa(scope, '[contenteditable="true"], [contenteditable="plaintext-only"], textarea')) {
+      if (!seen.has(el)) {
+        seen.add(el);
+        out.push(el);
+      }
+    }
+  };
+  addFrom(root);
+  // Open shadow root scan (defensive, zero cost when none exist).
+  for (const el of qsa(root, '*')) {
+    if (el?.shadowRoot) addFrom(el.shadowRoot);
+  }
+  return out;
+}
+
+/**
  * Find the active DM surface (`dialog`, `direct_page`, or floating `dock`) and
- * its composer node. Never picks a post comment box.
+ * its composer node on ANY Instagram page. Never picks post comment boxes,
+ * search boxes, or bio fields.
  */
 export function findDmSurface(root, pathname = '') {
   if (!root) return null;
   const onDirect = String(pathname || root?.location?.pathname || '').startsWith('/direct');
-  const candidates = [
-    ...qsa(root, '[contenteditable="true"]'),
-    ...qsa(root, 'textarea'),
-  ];
+  const candidates = collectEditableCandidates(root);
 
-  for (const editor of candidates) {
+  const matches = [];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const editor = candidates[index];
     if (!isNodeVisible(editor)) continue;
     if (isCommentEditor(editor)) continue;
     const tag = String(editor.tagName ?? '').toUpperCase();
-    const aria = collapse(editor.getAttribute?.('aria-label') ?? '').toLowerCase();
-    const ariaPh = collapse(editor.getAttribute?.('aria-placeholder') ?? '').toLowerCase();
-    const ph = collapse(editor.getAttribute?.('placeholder') ?? '').toLowerCase();
     const isLexical = editor.getAttribute?.('data-lexical-editor') === 'true';
-    const hasMessageCue = /^(message|رسالة|مراسلة)\b/.test(aria)
-      || /^(message|رسالة|مراسلة)\b/.test(ariaPh)
-      || /^(message|رسالة|مراسلة)\b/.test(ph);
+    const isTextboxRole = String(editor.getAttribute?.('role') ?? '').toLowerCase() === 'textbox';
+    const hasMessageCue = hasMessageEditorCue(editor);
 
-    // For <textarea>, require an explicit Message placeholder/aria-label so we
-    // never confuse a bio/comment textarea with a DM box.
-    if (tag === 'TEXTAREA' && !hasMessageCue) continue;
+    // For <textarea>, require an explicit Message placeholder/aria-label (or
+    // being directly on /direct/) so we never confuse a bio/comment textarea
+    // with a DM box.
+    if (tag === 'TEXTAREA' && !hasMessageCue && !onDirect) continue;
 
     const dialog = editor.closest?.('[role="dialog"]');
-    if (dialog) return { kind: 'dialog', container: dialog, editor };
-
-    if (onDirect) {
-      const mainScope = editor.closest?.('main, [role="main"], section');
-      if (mainScope) return { kind: 'direct_page', container: mainScope, editor };
+    if (dialog) {
+      matches.push({ kind: 'dialog', container: dialog, editor, priority: 100 + (hasMessageCue ? 20 : 0) + (isLexical ? 10 : 0), index });
+      continue;
     }
 
     const dock = findDmDockContainerForEditor(editor, root);
-    if (dock && (hasMessageCue || isLexical)) {
-      return { kind: 'dock', container: dock, editor };
+    if (dock && (hasMessageCue || isLexical || isTextboxRole)) {
+      matches.push({ kind: 'dock', container: dock, editor, priority: 90 + (hasMessageCue ? 20 : 0) + (isLexical ? 10 : 0), index });
+      continue;
     }
 
-    if (hasMessageCue) {
-      const container = dock
-        ?? editor.closest?.('main, [role="main"], section')
-        ?? editor.parentNode
-        ?? root;
-      return { kind: onDirect ? 'direct_page' : 'dock', container, editor };
+    if (onDirect) {
+      const container = findThreadPanelForEditor(editor, root);
+      matches.push({ kind: 'direct_page', container, editor, priority: 95 + (hasMessageCue ? 20 : 0) + (isLexical ? 10 : 0), index });
+      continue;
+    }
+
+    // Universal any-page fallback: even if Instagram changed dock chrome or
+    // rendered an unexpected wrapper on any page, accept any visible non-comment
+    // editor with a message cue OR a visible Lexical/textbox composer!
+    if (hasMessageCue || isLexical || isTextboxRole) {
+      const container = dock ?? findThreadPanelForEditor(editor, root);
+      matches.push({
+        kind: 'dock',
+        container,
+        editor,
+        priority: (hasMessageCue ? 70 : 40) + (isLexical ? 15 : 0) + (isTextboxRole ? 5 : 0),
+        index,
+      });
     }
   }
-  return null;
+
+  if (matches.length === 0) return null;
+  // Prefer highest confidence; tie-break toward the last (bottom-most/newest)
+  // visible composer in document order.
+  matches.sort((a, b) => (b.priority - a.priority) || (b.index - a.index));
+  const best = matches[0];
+  return { kind: best.kind, container: best.container, editor: best.editor };
 }
 
 /**
@@ -628,25 +777,72 @@ function isButtonInteractive(button) {
   return true;
 }
 
-/**
- * Find the Send button inside the active DM container first, falling back to
- * the document (excluding profile `<header>` and `<nav>`). Supports text labels,
- * `aria-label`, `svg[aria-label]`, and `<svg><title>Send</title></svg>`, and
- * skips hidden or `aria-disabled="true"` buttons so we wait for React to enable
- * Send before clicking.
- */
-export function findSendButton(root, dmContainer = null) {
-  if (dmContainer) {
-    for (const hit of findButtonsByLabel(dmContainer, [Label.SEND, Label.SEND_MESSAGE])) {
-      if (isButtonInteractive(hit.button)) return hit;
+function isSendLikeButton(button, allowSendMessage = false) {
+  if (!isButtonInteractive(button)) return null;
+  const pureVisible = nonSvgButtonText(button);
+  const fullText = collapse(button.textContent ?? '');
+  const aria = collapse(button.getAttribute?.('aria-label') ?? '');
+  const titleAttr = collapse(button.getAttribute?.('title') ?? '');
+  const svgs = svgLabelsOf(button);
+  const wanted = allowSendMessage ? [Label.SEND, Label.SEND_MESSAGE] : [Label.SEND];
+
+  for (const text of [pureVisible, fullText, aria, titleAttr, ...svgs]) {
+    if (!text) continue;
+    const kind = labelKind(text);
+    if (kind && wanted.includes(kind)) return { button, kind };
+    if (SEND_BUTTON_RE.test(text)) {
+      if (!allowSendMessage && /^send\s+(a\s+)?message$/i.test(text)) continue;
+      return { button, kind: Label.SEND };
     }
   }
-  if (!root) return null;
-  for (const hit of findButtonsByLabel(root, [Label.SEND])) {
-    if (hit.button.closest?.('header, nav')) continue;
-    if (isButtonInteractive(hit.button)) return hit;
-  }
   return null;
+}
+
+/**
+ * Find the Send button on ANY page where a DM composer is open:
+ *  1. Inside the active DM container (floating dock, dialog, or Direct pane),
+ *  2. Walking up 1–8 ancestors around the composer textbox itself (the composer
+ *     bar beside the textbox),
+ *  3. Falling back across the full document (excluding profile `<header>`,
+ *     `<nav>`, and feed `<article>` cards so post Share buttons are never hit).
+ *
+ * Matches visible text, `aria-label`, `title`, `svg[aria-label]`, and
+ * `<svg><title>` (including `"Send"`, `"Send message"`, `"Press enter to send"`,
+ * and Arabic `"إرسال"`), skipping hidden or `aria-disabled="true"` controls.
+ */
+export function findSendButton(root, dmContainer = null, editor = null) {
+  const searchScope = (scope, { allowSendMessage = false, excludeChrome = false } = {}) => {
+    if (!scope) return null;
+    for (const button of qsa(scope, 'button, [role="button"]')) {
+      if (excludeChrome && button.closest?.('header, nav, article')) continue;
+      if (editor && (button === editor || editor.contains?.(button))) continue;
+      const hit = isSendLikeButton(button, allowSendMessage);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  // 1. Composer bar ancestors right beside the textbox (fastest & most accurate).
+  if (editor) {
+    let cur = editor.parentNode;
+    for (let depth = 0; depth < 8 && cur; depth += 1) {
+      const tag = String(cur.tagName ?? '').toUpperCase();
+      if (tag === 'BODY' || tag === 'HTML') break;
+      const hit = searchScope(cur, { allowSendMessage: true, excludeChrome: true });
+      if (hit) return hit;
+      cur = cur.parentNode;
+    }
+  }
+
+  // 2. Active DM container (dock / dialog / direct thread panel).
+  if (dmContainer) {
+    const hit = searchScope(dmContainer, { allowSendMessage: true, excludeChrome: false });
+    if (hit) return hit;
+  }
+
+  // 3. Page-wide fallback (excluding profile header, nav, and feed articles).
+  if (!root) return null;
+  return searchScope(root, { allowSendMessage: false, excludeChrome: true });
 }
 
 const NON_MESSAGE_ROW_PATTERNS = [
@@ -711,28 +907,68 @@ export function threadBubbles(root, scopeOverride = null) {
 /**
  * Inspect a DM container (floating dock or `/direct/t/` panel) to determine
  * which Instagram username(s) its header / "View profile" links identify.
+ *
+ * Ignores links inside message bubbles (`[role="article"]`), navigation chrome,
+ * and inbox thread-list sidebars (`Chats` / `Thread list`), and optionally
+ * skips `viewerUsername` so the logged-in user's own avatar link never looks
+ * like a mismatched recipient.
  */
-export function dmContainerUserMatch(container, username) {
+export function dmContainerUserMatch(container, username, options = {}) {
   const target = String(username ?? '').trim().replace(/^@+/, '').toLowerCase();
+  const viewer = String(options?.viewerUsername ?? '').trim().replace(/^@+/, '').toLowerCase();
   if (!container || !target) return { matched: false, foundUsers: [] };
+
+  const inSidebarOrBubble = (node) => {
+    if (!node?.closest) return false;
+    if (node.closest('[role="article"], nav, [role="navigation"], [role="tablist"]')) return true;
+    // Only skip explicit inbox sidebar containers ("Chats", "Thread list"),
+    // NEVER active conversation panels like "Chat with <user>".
+    let cur = node.parentNode;
+    for (let depth = 0; depth < 12 && cur && cur !== container; depth += 1) {
+      const al = collapse(cur.getAttribute?.('aria-label') ?? '').toLowerCase();
+      if (al === 'chats' || al === 'thread list' || al === 'messages' || al === 'الدردشات' || al === 'قائمة المحادثات') {
+        return true;
+      }
+      cur = cur.parentNode;
+    }
+    return false;
+  };
+
   const foundSet = new Set();
   for (const link of qsa(container, 'a[href]')) {
-    // Ignore links inside received/shared message bubbles and inbox sidebars.
-    if (link.closest?.('[role="article"], [aria-label*="Thread" i], [aria-label*="Chat" i], nav')) continue;
+    if (inSidebarOrBubble(link)) continue;
     const rawHref = link.getAttribute?.('href') ?? link.href ?? '';
     let path = rawHref;
     if (/^https?:\/\//i.test(rawHref)) {
       try { path = new URL(rawHref).pathname; } catch { /* leave as-is */ }
     }
     const u = usernameFromPath(path);
-    if (u) foundSet.add(u.toLowerCase());
+    if (u) {
+      const lower = u.toLowerCase();
+      if (viewer && lower === viewer) continue;
+      foundSet.add(lower);
+    }
   }
   if (foundSet.has(target)) return { matched: true, foundUsers: [...foundSet] };
+
   for (const heading of qsa(container, 'h1, h2, h3, [role="heading"]')) {
-    if (heading.closest?.('[role="article"]')) continue;
+    if (inSidebarOrBubble(heading)) continue;
     const t = collapse(heading.textContent).replace(/^@+/, '').toLowerCase();
     if (t === target) return { matched: true, foundUsers: [...foundSet, target] };
   }
+
+  for (const img of qsa(container, 'img[alt]')) {
+    if (inSidebarOrBubble(img)) continue;
+    const alt = collapse(img.getAttribute?.('alt') ?? '');
+    const m = /^@?([a-z0-9._]+)['’]s profile picture$/i.exec(alt);
+    if (m) {
+      const lower = m[1].toLowerCase();
+      if (viewer && lower === viewer) continue;
+      foundSet.add(lower);
+      if (lower === target) return { matched: true, foundUsers: [...foundSet] };
+    }
+  }
+
   return { matched: false, foundUsers: [...foundSet] };
 }
 
@@ -749,18 +985,18 @@ export function isProfileUnavailable(root) {
  * belongs to `username`. Prevents a multi-person DM run from ever sending
  * Person B's message into Person A's still-open conversation.
  */
-export function directThreadMatchesUser(root, username) {
+export function directThreadMatchesUser(root, username, options = {}) {
   const target = String(username ?? '').trim().replace(/^@+/, '').toLowerCase();
   if (!root || !target) return false;
   const surface = findDmSurface(root);
   if (surface?.container) {
-    if (dmContainerUserMatch(surface.container, target).matched) return true;
+    if (dmContainerUserMatch(surface.container, target, options).matched) return true;
   }
   const openDock = findOpenDmDock(root);
-  if (openDock && dmContainerUserMatch(openDock, target).matched) return true;
+  if (openDock && dmContainerUserMatch(openDock, target, options).matched) return true;
   const dialogs = findDialogs(root);
   const scope = dialogs.length > 0 ? dialogs[dialogs.length - 1] : (root.querySelector?.('main, [role="main"]') ?? root);
-  return dmContainerUserMatch(scope, target).matched;
+  return dmContainerUserMatch(scope, target, options).matched;
 }
 
 /** The unfollow/confirm dialog Instagram opens after an Unfollow click. */
@@ -814,13 +1050,40 @@ function overflowYOf(node) {
 
 function isNodeVisible(node) {
   if (!node) return false;
+  let cur = node;
+  for (let depth = 0; cur && depth < 32; depth += 1) {
+    const tag = String(cur.tagName ?? '').toUpperCase();
+    if (tag === 'HTML' || tag === '#DOCUMENT') break;
+    if (cur.hidden === true || cur.hasAttribute?.('hidden') === true) return false;
+    if (cur.style?.display === 'none' || cur.style?.visibility === 'hidden') return false;
+    const inlineStyle = String(cur.getAttribute?.('style') ?? '');
+    if (inlineStyle && /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i.test(inlineStyle)) {
+      return false;
+    }
+    try {
+      if (typeof getComputedStyle === 'function') {
+        const style = getComputedStyle(cur);
+        if (style?.display === 'none' || style?.visibility === 'hidden') return false;
+        if (depth === 0 && style?.opacity === '0') return false;
+      }
+    } catch { /* shim */ }
+    cur = cur.parentNode;
+  }
+  // In a real browser (where document.body has non-zero layout geometry),
+  // reject elements with zero bounding rect or zero client rects so collapsed /
+  // offscreen hidden composers never shadow the live visible one.
   try {
-    if (typeof getComputedStyle === 'function') {
-      const style = getComputedStyle(node);
-      if (style?.display === 'none' || style?.visibility === 'hidden' || style?.opacity === '0') return false;
+    const bodyRect = node.ownerDocument?.body?.getBoundingClientRect?.();
+    if (bodyRect && bodyRect.width > 0) {
+      if (typeof node.getClientRects === 'function' && node.getClientRects().length === 0) {
+        return false;
+      }
+      if (typeof node.getBoundingClientRect === 'function') {
+        const rect = node.getBoundingClientRect();
+        if (rect && (rect.width <= 0 || rect.height <= 0)) return false;
+      }
     }
   } catch { /* shim */ }
-  if (node.style?.display === 'none' || node.style?.visibility === 'hidden') return false;
   return true;
 }
 

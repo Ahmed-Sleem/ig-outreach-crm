@@ -846,6 +846,7 @@ async function runOutreach(ctx) {
     try {
       answer = await api.sendWithNavigation(command, {
         username: fresh.username,
+        viewerUsername: workspaceRow?.viewerUsername ?? null,
         message,
         allowExisting: Boolean(policy.allowExistingThread),
         pacing: ctx.pacing ?? null,

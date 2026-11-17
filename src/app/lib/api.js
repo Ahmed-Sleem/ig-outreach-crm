@@ -659,15 +659,127 @@ export function createCommandChannel({
      */
     async sendWithNavigation(type, payload = {}, options = {}) {
       const tabId = options.tabId;
-      let current = await this.send(type, payload, options);
+
+      /**
+       * Send EXECUTE_DM while watching for a hard page navigation from a
+       * profile onto `/direct/...` (clicking `Message` sometimes triggers a
+       * full document reload that tears down the profile's content script).
+       * Detecting that transition immediately avoids hanging for the full
+       * 120-second EXECUTE_DM timeout, while checking `PING.busy` guarantees
+       * we NEVER interrupt an in-flight SPA pushState send.
+       */
+      const sendWatchingDirectNav = async (cmdPayload, opts) => {
+        if (
+          type !== CommandType.EXECUTE_DM
+          || cmdPayload?.alreadyOpened
+          || tabId === null
+          || tabId === undefined
+          || typeof tabs.tabById !== 'function'
+        ) {
+          return { answer: await this.send(type, cmdPayload, opts), hardNavToDirect: false };
+        }
+        const startTab = await tabs.tabById(tabId);
+        const startUrl = String(startTab?.url ?? '');
+        if (/instagram\.com\/direct\//i.test(startUrl)) {
+          return { answer: await this.send(type, cmdPayload, opts), hardNavToDirect: false };
+        }
+
+        const callerSignal = opts.signal ?? null;
+        const navAbort = typeof AbortController === 'function' ? new AbortController() : null;
+        const onCallerAbort = () => navAbort?.abort?.();
+        if (callerSignal && navAbort) {
+          if (callerSignal.aborted) navAbort.abort();
+          else callerSignal.addEventListener?.('abort', onCallerAbort, { once: true });
+        }
+
+        let finished = false;
+        let hardNavToDirect = false;
+        let wakeWatcher = null;
+        const pollMs = Math.max(150, Number(opts.navPollMs) || 600);
+        const graceMs = Math.max(200, Number(opts.navGraceMs) || 1200);
+        const watchSleep = (ms) => new Promise((resolve) => {
+          if (finished || navAbort?.signal?.aborted) { resolve(); return; }
+          let settled = false;
+          const done = () => { if (!settled) { settled = true; wakeWatcher = null; resolve(); } };
+          wakeWatcher = done;
+          Promise.resolve(sleep(ms)).then(done, done);
+        });
+
+        const watchLoop = (async () => {
+          while (!finished && !navAbort?.signal?.aborted) {
+            await watchSleep(pollMs);
+            if (finished || navAbort?.signal?.aborted) return;
+            const liveTab = await tabs.tabById(tabId);
+            if (finished || navAbort?.signal?.aborted || !liveTab) return;
+            const liveUrl = String(liveTab.url ?? '');
+            if (!/instagram\.com\/direct\//i.test(liveUrl)) continue;
+
+            // Tab transitioned from profile -> /direct/...! Give an SPA
+            // content script a brief beat to finish or report busy.
+            const sawLoading = liveTab.status === 'loading';
+            await watchSleep(graceMs);
+            if (finished || navAbort?.signal?.aborted) return;
+
+            const afterTab = await tabs.tabById(tabId);
+            if (finished || navAbort?.signal?.aborted || !afterTab) return;
+            if (!/instagram\.com\/direct\//i.test(String(afterTab.url ?? ''))) continue;
+
+            // Only probe once the mailbox command was already claimed by the
+            // old content script (otherwise we'd overwrite an unclaimed row).
+            const pendingCmd = await storage.get(bridge().keys.commandKey);
+            if (pendingCmd) continue;
+
+            const targetTabId = stampedTabs.has(Number(tabId)) ? Number(tabId) : null;
+            const ping = await bridge().postCommand(CommandType.PING, {}, {
+              timeoutMs: 1_500,
+              targetTabId,
+            });
+            if (finished || navAbort?.signal?.aborted) return;
+
+            // If PING answered `busy: true`, the SAME content script survived
+            // via SPA pushState and is actively typing/sending — hands off!
+            if (ping?.ok && ping.result?.busy === true) {
+              continue;
+            }
+            // Either no content script answered (page reloaded, not yet
+            // injected) OR a fresh idle script answered (`busy: false`), OR
+            // Chrome reported a full `loading` transition — resume cleanly on
+            // the new `/direct/` page immediately!
+            if (sawLoading || !ping?.ok || ping.result?.busy === false) {
+              hardNavToDirect = true;
+              navAbort?.abort?.();
+              return;
+            }
+          }
+        })();
+
+        try {
+          const answer = await this.send(type, cmdPayload, {
+            ...opts,
+            signal: navAbort ? navAbort.signal : callerSignal,
+          });
+          return { answer, hardNavToDirect };
+        } finally {
+          finished = true;
+          wakeWatcher?.();
+          if (callerSignal && navAbort) {
+            callerSignal.removeEventListener?.('abort', onCallerAbort);
+          }
+          await watchLoop.catch(() => {});
+        }
+      };
+
+      let run = await sendWatchingDirectNav(payload, options);
+      let current = run.answer;
       const firstReason = current?.reason ?? null;
       const visited = new Set();
       let hops = 0;
-      const maxHops = Number(options.maxHops ?? 2);
+      const maxHops = Number(options.maxHops ?? 3);
       let resumedHardDirectNav = false;
 
       while (
         !current?.ok
+        && !options.signal?.aborted
         && tabId !== null
         && tabId !== undefined
         && hops < maxHops
@@ -685,14 +797,15 @@ export function createCommandChannel({
             return { ...current, reason: `${current.reason} — and the tab could not be moved there (${moved.reason})` };
           }
           await sleep(options.settleMs ?? 2000);
-          current = await this.send(type, payload, { ...options, tabId });
+          run = await sendWatchingDirectNav(payload, { ...options, tabId });
+          current = run.answer;
           continue;
         }
 
         // Desktop Instagram sometimes triggers a full page navigation to
-        // /direct/t/<threadId>/ right after clicking Message / Send message,
-        // tearing down the profile's content script mid-command. If the tab is
-        // now sitting on /direct/t/, wait for it to finish loading and resume
+        // /direct/t/<threadId>/ (or /direct/...) right after clicking Message /
+        // Send message, tearing down the profile's content script mid-command.
+        // Wait for the new /direct/ page to finish loading and resume
         // EXECUTE_DM once directly inside the open conversation.
         const outcome = current?.value?.outcome;
         if (
@@ -704,12 +817,12 @@ export function createCommandChannel({
           && typeof tabs.tabById === 'function'
         ) {
           const liveTab = await tabs.tabById(tabId);
-          if (liveTab?.url && /instagram\.com\/direct\/t\//i.test(liveTab.url)) {
+          if (liveTab?.url && /instagram\.com\/direct\//i.test(liveTab.url)) {
             resumedHardDirectNav = true;
             hops += 1;
             await tabs.waitForLoad(tabId, { timeoutMs: 12_000 });
-            await sleep(options.settleMs ?? 1500);
-            current = await this.send(type, payload, { ...options, tabId });
+            await sleep(options.settleMs ?? 1200);
+            current = await this.send(type, { ...payload, alreadyOpened: true }, { ...options, tabId });
             continue;
           }
         }
