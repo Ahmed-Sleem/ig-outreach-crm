@@ -38,7 +38,11 @@ export const LABEL_TEXT = Object.freeze({
   [Label.SEND_MESSAGE]: ['Send message', 'Send Message', 'إرسال رسالة'],
   [Label.OPTIONS]: ['Options', 'More options', 'خيارات', 'المزيد من الخيارات'],
   [Label.CLOSE]: ['Close', 'إغلاق'],
-  [Label.SEND]: ['Send', 'Send a message', 'Press enter to send', 'Press Enter to send', 'إرسال', 'إرسال الرسالة', 'ارسال'],
+  [Label.SEND]: [
+    'Send', 'Send a message', 'Press enter to send', 'Press Enter to send',
+    'إرسال', 'إرسال الرسالة', 'ارسال',
+    'Envoyer', 'Enviar', 'Senden', 'Gönder', 'Invia', 'Отправить', 'Kirim', '发送', '送信', '보내기',
+  ],
   [Label.UNFOLLOW]: ['Unfollow', 'إلغاء المتابعة'],
   [Label.CANCEL]: ['Cancel', 'إلغاء'],
   [Label.TRY_AGAIN_LATER]: ['Try Again Later', 'حاول لاحقًا', 'حاولي لاحقًا'],
@@ -343,7 +347,8 @@ export function findOptionsDialogSendMessage(root) {
 const UNRELATED_EDITOR_RE = /\b(comment|reply to|search|caption|bio|note|notes|find)\b|تعليق|رد على|بحث|إضافة تعليق|اكتب تعليق|коммент|поиск/i;
 const MESSAGE_CUE_RE = /\b(messages?|write a message|send a message|type a message|chat)\b|رسالة|مراسلة|اكتب رسالة|сообщени|envoyer|enviar|nachricht|mesaj/i;
 const COMPOSER_TRAY_RE = /^(choose an emoji|voice clip|add photo or video|choose a gif|like|send|press enter to send|إرسال|مقطع صوتي|إضافة صورة)/i;
-const SEND_BUTTON_RE = /^(send(\s+(a\s+)?message)?|press\s+enter\s+to\s+send|إرسال(\s+(الرسالة|رسالة))?|ارسال)$/i;
+const SEND_BUTTON_RE = /^(send(\s+(a\s+)?message)?|press\s+enter\s+to\s+send|إرسال(\s+(الرسالة|رسالة))?|ارسال|envoyer|enviar|senden|gönder|invia|отправить|kirim|发送|送信|보내기)$/i;
+const NON_SEND_TRAY_RE = /\b(emoji|voice|microphone|audio|photo|video|gallery|image|gif|sticker|like|heart|thumbs|camera|attach|file|plus|add|more|close|expand|go back|back|call|info|conversation|details|options)\b|صوت|مقطع صوتي|صورة|فيديو|ملصق|إعجاب|رموز|إغلاق|توسيع|رجوع|خيارات/i;
 
 function editorLabelText(editor) {
   if (!editor) return '';
@@ -581,7 +586,8 @@ function collectEditableCandidates(root) {
   const seen = new Set();
   const out = [];
   const addFrom = (scope) => {
-    for (const el of qsa(scope, '[contenteditable="true"], [contenteditable="plaintext-only"], textarea')) {
+    for (const el of qsa(scope, '[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], textarea')) {
+      if (String(el.getAttribute?.('contenteditable') ?? '').toLowerCase() === 'false') continue;
       if (!seen.has(el)) {
         seen.add(el);
         out.push(el);
@@ -774,6 +780,14 @@ function isButtonInteractive(button) {
   if (!isNodeVisible(button)) return false;
   if (button.disabled === true) return false;
   if (String(button.getAttribute?.('aria-disabled') ?? '').toLowerCase() === 'true') return false;
+  if (button.style?.pointerEvents === 'none') return false;
+  const inlineStyle = String(button.getAttribute?.('style') ?? '');
+  if (inlineStyle && /(?:^|;)\s*pointer-events\s*:\s*none\b/i.test(inlineStyle)) return false;
+  try {
+    if (typeof getComputedStyle === 'function' && getComputedStyle(button)?.pointerEvents === 'none') {
+      return false;
+    }
+  } catch { /* shim */ }
   return true;
 }
 
@@ -798,19 +812,30 @@ function isSendLikeButton(button, allowSendMessage = false) {
   return null;
 }
 
+function isKnownNonSendTrayButton(button) {
+  const combined = collapse([
+    nonSvgButtonText(button),
+    button.getAttribute?.('aria-label'),
+    button.getAttribute?.('title'),
+    ...svgLabelsOf(button),
+  ].filter(Boolean).join(' '));
+  return Boolean(combined && NON_SEND_TRAY_RE.test(combined));
+}
+
 /**
  * Find the Send button on ANY page where a DM composer is open:
- *  1. Inside the active DM container (floating dock, dialog, or Direct pane),
- *  2. Walking up 1–8 ancestors around the composer textbox itself (the composer
+ *  1. Walking up 1–8 ancestors around the composer textbox itself (the composer
  *     bar beside the textbox),
+ *  2. Inside the active DM container (floating dock, dialog, or Direct pane),
  *  3. Falling back across the full document (excluding profile `<header>`,
- *     `<nav>`, and feed `<article>` cards so post Share buttons are never hit).
- *
- * Matches visible text, `aria-label`, `title`, `svg[aria-label]`, and
- * `<svg><title>` (including `"Send"`, `"Send message"`, `"Press enter to send"`,
- * and Arabic `"إرسال"`), skipping hidden or `aria-disabled="true"` controls.
+ *     `<nav>`, and feed `<article>` cards so post Share buttons are never hit),
+ *  4. When `allowPositional` is enabled (only AFTER verified text is in the
+ *     composer), detecting an explicit `type="submit"` or a lone non-media
+ *     trailing button right beside `editor` inside the composer bar (handles
+ *     unlabelled SVG icon A/B tests and unlisted locales).
  */
-export function findSendButton(root, dmContainer = null, editor = null) {
+export function findSendButton(root, dmContainer = null, editor = null, options = {}) {
+  const allowPositional = Boolean(options?.allowPositional);
   const searchScope = (scope, { allowSendMessage = false, excludeChrome = false } = {}) => {
     if (!scope) return null;
     for (const button of qsa(scope, 'button, [role="button"]')) {
@@ -841,8 +866,63 @@ export function findSendButton(root, dmContainer = null, editor = null) {
   }
 
   // 3. Page-wide fallback (excluding profile header, nav, and feed articles).
-  if (!root) return null;
-  return searchScope(root, { allowSendMessage: false, excludeChrome: true });
+  if (root) {
+    const hit = searchScope(root, { allowSendMessage: false, excludeChrome: true });
+    if (hit) return hit;
+  }
+
+  // 4. Positional composer-bar fallback (ONLY when caller confirms text is
+  //    already typed into `editor` and explicit label lookup found nothing).
+  if (allowPositional && editor) {
+    const edRect = typeof editor.getBoundingClientRect === 'function' ? editor.getBoundingClientRect() : null;
+    const hasLayout = Boolean(edRect && edRect.width > 0 && edRect.height > 0);
+    let cur = editor.parentNode;
+    for (let depth = 0; depth < 6 && cur; depth += 1) {
+      const tag = String(cur.tagName ?? '').toUpperCase();
+      if (tag === 'BODY' || tag === 'HTML' || tag === 'MAIN') break;
+      const buttons = qsa(cur, 'button, [role="button"]').filter((b) => {
+        if (b === editor || editor.contains?.(b)) return false;
+        if (b.closest?.('header, nav, article')) return false;
+        return isButtonInteractive(b);
+      });
+      if (buttons.length === 0) {
+        cur = cur.parentNode;
+        continue;
+      }
+      // Explicit submit button right beside the composer.
+      const submitBtn = buttons.find((b) => String(b.getAttribute?.('type') ?? '').toLowerCase() === 'submit');
+      if (submitBtn) return { button: submitBtn, kind: Label.SEND, positional: true };
+
+      // Check if media tray buttons (Voice Clip / Photo / GIF) have already
+      // swapped out for a single trailing send control.
+      const hasMediaTray = buttons.some((b) => /\b(voice|microphone|photo|video|gif|sticker)\b|مقطع صوتي|إضافة صورة/i.test(collapse([
+        b.getAttribute?.('aria-label'),
+        ...svgLabelsOf(b),
+      ].filter(Boolean).join(' '))));
+      if (hasMediaTray) {
+        cur = cur.parentNode;
+        continue;
+      }
+
+      const candidates = buttons.filter((b) => {
+        if (isKnownNonSendTrayButton(b)) return false;
+        if (hasLayout && typeof b.getBoundingClientRect === 'function') {
+          const r = b.getBoundingClientRect();
+          if (r && r.width > 0 && r.height > 0) {
+            const edCy = edRect.top + edRect.height / 2;
+            const bCy = r.top + r.height / 2;
+            if (Math.abs(bCy - edCy) > Math.max(48, edRect.height * 1.5)) return false;
+          }
+        }
+        return true;
+      });
+      if (candidates.length === 1) {
+        return { button: candidates[0], kind: Label.SEND, positional: true };
+      }
+      cur = cur.parentNode;
+    }
+  }
+  return null;
 }
 
 const NON_MESSAGE_ROW_PATTERNS = [

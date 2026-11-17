@@ -35,8 +35,10 @@ import {
   caretToEnd,
   composeMessage,
   executeDm,
+  newestIsOurs,
   openDm,
   readComposerText,
+  splitGraphemes,
 } from '../src/content/actions.js';
 import { createContentRuntime, createHandlers } from '../src/content/main.js';
 import {
@@ -1466,4 +1468,326 @@ describe('Deep DM reliability (any-page discovery, Lexical isolated world, hard-
     view.destroy?.();
   });
 });
+
+/* -------------------------------------------------------------------------- *
+ * 5. Audit pass 2: Human grapheme typing, multilingual/positional Send,
+ *    multi-line <br> verification, delayed Message hydration & /direct/ skip.
+ * -------------------------------------------------------------------------- */
+
+describe('Audit pass 2: human typing, all-scenarios Send, and edge-case resilience', () => {
+  test('human typing sends one grapheme per keystroke with realistic cadence, emojis, Arabic, and single newline breaks', async () => {
+    const ctx = makeCtx('/direct/t/555111/');
+    const doc = ctx.document;
+    const main = doc.createElement('main');
+    const editor = doc.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    editor.setAttribute('role', 'textbox');
+    editor.setAttribute('aria-label', 'Message');
+    editor.setAttribute('data-lexical-editor', 'true');
+    const p = doc.createElement('p');
+    editor.append(p);
+    main.append(editor);
+    doc.body.append(main);
+
+    const insertedChunks = [];
+    let lineBreakCalls = 0;
+    const keydowns = [];
+    editor.addEventListener('keydown', (e) => keydowns.push(e.key));
+
+    const origExec = doc.execCommand.bind(doc);
+    doc.execCommand = (cmd, ui, val) => {
+      if (cmd === 'insertText') insertedChunks.push(val);
+      if (cmd === 'insertLineBreak') lineBreakCalls += 1;
+      return origExec(cmd, ui, val);
+    };
+
+    const msg = 'Hi 👋🏽!\nأهلاً';
+    const out = await composeMessage(ctx, { document: doc, message: msg, pathname: '/direct/t/555111/' });
+    assert.equal(out.ok, true, `expected human compose to succeed: ${out.reason}`);
+    assert.equal(out.typedHuman, true);
+    assert.deepEqual(insertedChunks, [...splitGraphemes('Hi 👋🏽!'), ...splitGraphemes('أهلاً')]);
+    assert.ok(insertedChunks.includes('👋🏽'), 'emoji with skin-tone modifier must stay one intact grapheme');
+    assert.equal(lineBreakCalls, 1, 'multi-line message must insert exactly ONE line break');
+    assert.ok(!keydowns.includes('Enter'), 'must NOT fire redundant Shift+Enter keydown when execCommand(insertLineBreak) succeeded');
+    assert.ok(keydowns.length >= insertedChunks.length, 'keydown telemetry fires per grapheme');
+    assert.ok(ctx.waits.length >= insertedChunks.length, 'inter-keystroke pacing runs between graphemes');
+  });
+
+  test('human typing aborts immediately mid-sentence when Stop is triggered', async () => {
+    const ctx = makeCtx('/direct/t/555222/');
+    const doc = ctx.document;
+    const main = doc.createElement('main');
+    const editor = doc.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    editor.setAttribute('role', 'textbox');
+    editor.setAttribute('aria-label', 'Message');
+    editor.setAttribute('data-lexical-editor', 'true');
+    main.append(editor);
+    doc.body.append(main);
+
+    const controller = new AbortController();
+    let count = 0;
+    const origExec = doc.execCommand.bind(doc);
+    doc.execCommand = (cmd, ui, val) => {
+      if (cmd === 'insertText') {
+        count += 1;
+        if (count === 4) controller.abort();
+      }
+      return origExec(cmd, ui, val);
+    };
+
+    const out = await composeMessage(ctx, {
+      document: doc,
+      message: 'This is a long message that should stop immediately after four characters.',
+      pathname: '/direct/t/555222/',
+      signal: controller.signal,
+    });
+    assert.equal(out.ok, false);
+    assert.equal(out.outcome, ActionOutcome.STOPPED);
+    assert.equal(count, 4, 'must halt right after the abort without typing the rest of the sentence');
+  });
+
+  test('human typing fast-fails on first dropped grapheme into Chromium ISOLATED-world paste fallback', async () => {
+    const ctx = makeCtx('/direct/t/555333/');
+    const doc = ctx.document;
+    const main = doc.createElement('main');
+    const editor = doc.createElement('div');
+    editor.setAttribute('contenteditable', 'true');
+    editor.setAttribute('role', 'textbox');
+    editor.setAttribute('aria-label', 'Message');
+    editor.setAttribute('data-lexical-editor', 'true');
+    main.append(editor);
+    doc.body.append(main);
+
+    let insertCalls = 0;
+    doc.execCommand = (cmd) => {
+      if (cmd === 'insertText') {
+        insertCalls += 1;
+        return true; // silently drops text without committing
+      }
+      return true;
+    };
+
+    const prevClip = globalThis.ClipboardEvent;
+    const prevDt = globalThis.DataTransfer;
+    try {
+      globalThis.DataTransfer = class FakeDT {
+        constructor() { this.map = new Map(); }
+        setData(k, v) { this.map.set(k, v); }
+        getData(k) { return this.map.get(k) ?? ''; }
+      };
+      globalThis.ClipboardEvent = class FakeClip {
+        constructor(type, init) { this.type = type; this.clipboardData = init?.clipboardData; }
+      };
+      editor.addEventListener('paste', (ev) => {
+        const pasted = ev?.clipboardData?.getData?.('text/plain') ?? '';
+        if (pasted) editor.textContent = pasted;
+      });
+
+      const out = await composeMessage(ctx, {
+        document: doc,
+        message: 'A twenty-word message that should fast-fail after grapheme #1!',
+        pathname: '/direct/t/555333/',
+      });
+      assert.equal(out.ok, true, `expected fast-fail paste fallback to succeed: ${out.reason}`);
+      assert.equal(insertCalls, 1, 'must break out after grapheme #1 instead of typing all 62 chars into the void');
+      assert.equal(readComposerText(editor), 'A twenty-word message that should fast-fail after grapheme #1!');
+    } finally {
+      globalThis.ClipboardEvent = prevClip;
+      globalThis.DataTransfer = prevDt;
+    }
+  });
+
+  test('<textarea> DM composer types progressively character-by-character with input events', async () => {
+    const ctx = makeCtx('/direct/t/555444/');
+    const doc = ctx.document;
+    const main = doc.createElement('main');
+    const ta = doc.createElement('textarea');
+    ta.setAttribute('placeholder', 'Message...');
+    main.append(ta);
+    doc.body.append(main);
+
+    const seenValues = [];
+    ta.addEventListener('input', () => seenValues.push(ta.value));
+
+    const out = await composeMessage(ctx, { document: doc, message: 'Hey!', pathname: '/direct/t/555444/' });
+    assert.equal(out.ok, true, `expected textarea compose to succeed: ${out.reason}`);
+    assert.equal(out.typedHuman, true);
+    assert.deepEqual(seenValues, ['H', 'He', 'Hey', 'Hey!']);
+  });
+
+  test('HTML5 boolean [contenteditable=""] composer is discovered while [contenteditable="false"] is skipped', () => {
+    const ctx = makeCtx('/direct/t/555555/');
+    const doc = ctx.document;
+    const main = doc.createElement('main');
+    const readOnly = doc.createElement('div');
+    readOnly.setAttribute('contenteditable', 'false');
+    readOnly.setAttribute('aria-label', 'Message');
+    const editable = doc.createElement('div');
+    editable.setAttribute('contenteditable', '');
+    editable.setAttribute('role', 'textbox');
+    editable.setAttribute('aria-placeholder', 'Message...');
+    main.append(readOnly, editable);
+    doc.body.append(main);
+
+    const surface = findDmSurface(doc, '/direct/t/555555/');
+    assert.ok(surface, 'expected DM surface to be discovered');
+    assert.equal(surface.editor, editable, 'must pick boolean contenteditable="" and skip contenteditable="false"');
+  });
+
+  test('multilingual Send buttons (FR/ES/DE/TR/IT/AR) and unlabelled positional Send icon are located reliably', () => {
+    for (const label of ['Envoyer', 'Enviar', 'Senden', 'Gönder', 'Invia', 'إرسال']) {
+      const ctx = makeCtx('/direct/t/555666/');
+      const doc = ctx.document;
+      const bar = doc.createElement('div');
+      const editor = doc.createElement('div');
+      editor.setAttribute('contenteditable', 'true');
+      editor.setAttribute('aria-label', 'Message');
+      const sendBtn = doc.createElement('div');
+      sendBtn.setAttribute('role', 'button');
+      sendBtn.textContent = label;
+      bar.append(editor, sendBtn);
+      doc.body.append(bar);
+
+      const hit = findSendButton(doc, bar, editor);
+      assert.ok(hit, `expected Send button to match locale label "${label}"`);
+      assert.equal(hit.button, sendBtn);
+    }
+
+    // Unlabelled SVG Send icon inside composer bar (only matched with allowPositional: true,
+    // while Voice Clip / Photo / Emoji / pointer-events:none buttons are strictly ignored!).
+    const ctx2 = makeCtx('/direct/t/555667/');
+    const doc2 = ctx2.document;
+    const bar2 = doc2.createElement('div');
+    const emojiBtn = makeIconButton(doc2, 'Choose an emoji');
+    const editor2 = doc2.createElement('div');
+    editor2.setAttribute('contenteditable', 'true');
+    editor2.setAttribute('aria-label', 'Message');
+    const voiceBtn = makeIconButton(doc2, 'Voice Clip');
+    const disabledSend = doc2.createElement('button');
+    disabledSend.textContent = 'Send';
+    disabledSend.style.pointerEvents = 'none';
+    const mysterySendIcon = doc2.createElement('div');
+    mysterySendIcon.setAttribute('role', 'button');
+    mysterySendIcon.append(doc2.createElement('svg'));
+    bar2.append(emojiBtn, editor2, voiceBtn, disabledSend, mysterySendIcon);
+    doc2.body.append(bar2);
+
+    assert.equal(findSendButton(doc2, bar2, editor2, { allowPositional: false }), null, 'disabled pointer-events:none Send must be rejected');
+    assert.equal(findSendButton(doc2, bar2, editor2, { allowPositional: true }), null, 'positional fallback must wait while media tray (Voice Clip) is still mounted');
+    // Simulate Instagram swapping out Voice Clip after text lands in editor:
+    bar2.children = bar2.children.filter((c) => c !== voiceBtn);
+    const positional = findSendButton(doc2, bar2, editor2, { allowPositional: true });
+    assert.ok(positional, 'positional fallback must find the lone unlabelled trailing icon button once media tray swaps out');
+    assert.equal(positional.button, mysterySendIcon);
+  });
+
+  test('newestIsOurs verifies multi-line <br> bubbles whose textContent joins lines without spaces', () => {
+    const ctx = makeCtx('/direct/t/555777/');
+    const doc = ctx.document;
+    const dock = doc.createElement('div');
+    const bubble = doc.createElement('div');
+    bubble.setAttribute('role', 'article');
+    const s1 = doc.createElement('span');
+    s1.textContent = 'Hi Sara,';
+    const br = doc.createElement('br');
+    const s2 = doc.createElement('span');
+    s2.textContent = 'Love your pottery!';
+    bubble.append(s1, br, s2);
+    // Simulate a node where textContent drops the break ("Hi Sara,Love your pottery!")
+    // and innerText isn't populated.
+    Object.defineProperty(bubble, 'innerText', { get: () => '' });
+    dock.append(bubble);
+    doc.body.append(dock);
+
+    assert.equal(bubble.textContent, 'Hi Sara,Love your pottery!');
+    assert.equal(newestIsOurs(doc, 'Hi Sara,\nLove your pottery!', dock, null), true);
+    assert.equal(newestIsOurs(doc, 'Love your pottery!\nHi Sara,', dock, null), false, 'lines must appear in order');
+  });
+
+  test('openDm waits briefly for delayed Message button hydration after Follow renders instead of jumping to Options', async () => {
+    const ctx = makeCtx('/delayed_creator/');
+    const doc = ctx.document;
+    const header = doc.createElement('header');
+    const follow = doc.createElement('button');
+    follow.textContent = 'Follow';
+    const options = makeIconButton(doc, 'Options');
+    header.append(follow, options);
+    doc.body.append(header);
+
+    // Hydrate the Message button at t >= 400ms (after headerReady triggers).
+    let hydrated = false;
+    const baseWait = ctx.wait;
+    ctx.wait = async (ms) => {
+      await baseWait(ms);
+      if (!hydrated && ctx._t >= 400) {
+        hydrated = true;
+        const msgBtn = doc.createElement('div');
+        msgBtn.setAttribute('role', 'button');
+        msgBtn.textContent = 'Message';
+        msgBtn.addEventListener('click', () => {
+          doc.body.append(buildFloatingDock(doc, { username: 'delayed_creator' }).dock);
+        });
+        header.append(msgBtn);
+      }
+    };
+
+    const opened = await openDm(ctx, {
+      document: doc,
+      location: ctx.location,
+      username: 'delayed_creator',
+      readyTimeoutMs: 2000,
+    });
+    assert.equal(opened.ok, true, `expected openDm to succeed: ${opened.reason}`);
+    assert.equal(opened.via, 'header-message', 'must click delayed header Message button instead of Options menu');
+  });
+
+  test('EXECUTE_DM with alreadyOpened:true on /direct/t/ dismisses Notifications modal and short-circuits on Invite sent', async () => {
+    const ctx = makeCtx('/direct/t/999000111/');
+    const doc = ctx.document;
+
+    // Notifications modal overlays the thread initially
+    const notif = doc.createElement('div');
+    notif.setAttribute('role', 'dialog');
+    const h = doc.createElement('span');
+    h.textContent = 'Turn on Notifications';
+    const notNow = doc.createElement('button');
+    notNow.textContent = 'Not Now';
+    notNow.addEventListener('click', () => {
+      notif.parentNode.children = notif.parentNode.children.filter((c) => c !== notif);
+    });
+    notif.append(h, notNow);
+    doc.body.append(notif);
+
+    // Main thread renders "Invite sent" banner (no composer!)
+    const main = doc.createElement('main');
+    const banner = doc.createElement('div');
+    banner.textContent = 'Invite sent. You can send more messages after your invite is accepted.';
+    main.append(banner);
+    doc.body.append(main);
+
+    const runtime = createContentRuntime({
+      document: doc,
+      getSelection: () => doc.selection,
+      location: ctx.location,
+      cookieString: 'ds_user_id=99; csrftoken=abc',
+      wait: ctx.wait,
+      now: ctx.now,
+      random: () => 0.5,
+    });
+    const handlers = createHandlers(runtime);
+    const out = await handlers[CommandType.EXECUTE_DM]({
+      username: 'private_creator',
+      message: 'Hello!',
+      alreadyOpened: true,
+    });
+
+    assert.equal(out.ok, false);
+    assert.equal(out.outcome, ActionOutcome.SKIPPED);
+    assert.equal(out.inviteAlreadySent, true, 'must return inviteAlreadySent instead of falling through to openDm');
+    assert.equal(doc.querySelectorAll('[role="dialog"]').length, 0, 'Notifications popup must be dismissed');
+  });
+});
+
+
 

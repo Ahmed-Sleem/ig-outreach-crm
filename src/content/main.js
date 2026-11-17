@@ -54,6 +54,7 @@ import {
   usernameFromPath,
 } from './selectors.js';
 import {
+  dismissNotificationsPrompt,
   executeDm,
   executeFollow,
   executeUnfollow,
@@ -1028,9 +1029,10 @@ export function createHandlers(runtime, deps = {}) {
 
           // When the dashboard just followed a hard navigation to /direct/...
           // after clicking Message on the profile, the composer may still be
-          // hydrating on this page — wait for it right here instead of
-          // bouncing back to the profile.
+          // hydrating on this page — dismiss any Notifications modal and wait
+          // right here instead of bouncing back to the profile.
           if (alreadyOpened && !curSurface?.editor) {
+            await dismissNotificationsPrompt(dmCtx, runtime.document, runtime.signal);
             const hydrateMs = Math.max(readyTimeoutMs, 6000);
             const hydrated = await waitFor(dmCtx, () => {
               const s = findDmSurface(runtime.document, String(runtime.location?.pathname ?? runtime.pathname ?? ''));
@@ -1042,6 +1044,16 @@ export function createHandlers(runtime, deps = {}) {
               if (r) return { restriction: r };
               return null;
             }, { timeoutMs: hydrateMs, intervalMs: 150, signal: runtime.signal, label: 'DM composer on page' });
+            if (hydrated.found && hydrated.value?.restriction) {
+              const r = hydrated.value.restriction;
+              if (r.kind === 'invite_sent') {
+                return { ok: false, outcome: 'skipped', reason: r.reason, inviteAlreadySent: true, username: targetUsername };
+              }
+              if (r.kind === 'unavailable') {
+                return { ok: false, outcome: 'skipped', reason: r.reason, dmUnavailable: true, username: targetUsername };
+              }
+              return { ok: false, outcome: 'not_done', reason: r.reason, sendFailed: true, username: targetUsername };
+            }
             if (hydrated.found && hydrated.value?.surface) {
               curSurface = hydrated.value.surface;
             }

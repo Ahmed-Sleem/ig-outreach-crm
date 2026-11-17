@@ -631,6 +631,54 @@ function dispatchLexicalBeforeInput(ctx, target, text, inputType = 'insertText')
   }
 }
 
+/** Split text into Unicode grapheme clusters so emojis & Arabic marks stay intact. */
+export function splitGraphemes(text) {
+  const raw = String(text ?? '');
+  if (!raw) return [];
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      return [...seg.segment(raw)].map((s) => s.segment);
+    }
+  } catch { /* fallback */ }
+  return Array.from(raw);
+}
+
+/**
+ * Realistic human inter-keystroke delay in milliseconds:
+ *  - ~50–125 ms average per character (triangular distribution, natural rhythm)
+ *  - slight word-boundary pause after space
+ *  - brief thinking beat after sentence/clause punctuation
+ */
+function humanKeystrokeDelay(ch, rng) {
+  const tri = (rng() + rng()) / 2; // peaks around 0.5, tails at 0..1
+  let ms = 48 + Math.round(tri * 78);
+  if (ch === ' ') ms += 20 + Math.round(rng() * 55);
+  else if (/[.,!?;:،؟…]/.test(ch)) ms += 75 + Math.round(rng() * 130);
+  else if (rng() < 0.04) ms += 90 + Math.round(rng() * 140); // occasional natural hesitation
+  return ms;
+}
+
+/** Dispatch a realistic `keydown` / `keyup` event for a single typed character. */
+function dispatchCharKey(ctx, target, type, key, extra = {}) {
+  const view = target?.ownerDocument?.defaultView ?? ctx?.window ?? globalThis.window ?? undefined;
+  const KeyCtor = view?.KeyboardEvent ?? globalThis.KeyboardEvent;
+  const init = {
+    key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view,
+    ...extra,
+  };
+  try {
+    if (typeof KeyCtor === 'function') target.dispatchEvent?.(new KeyCtor(type, init));
+    else target.dispatchEvent?.({ type, ...init });
+  } catch {
+    try { target.dispatchEvent?.({ type, ...init }); } catch { /* shim */ }
+  }
+}
+
 /** Dispatch a real Enter key sequence on a Lexical composer. */
 function dispatchEnterKey(ctx, target) {
   const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window ?? undefined;
@@ -665,15 +713,18 @@ function dispatchEscapeKey(ctx, document) {
 }
 
 /**
- * Type a message into the composer and VERIFY it before anything is sent.
+ * Type a message into the composer like a human and VERIFY it before anything
+ * is sent.
  *
  * The sequence is click/focus (activates Lexical's internal selection),
  * caret inside `<p>` + `selectionchange` + frame settle, clear any pre-existing
  * draft with a post-clear beat so Lexical never swallows the next insertText,
- * insert line by line (with Chromium ISOLATED-world Lexical fallbacks:
- * plain-text `paste`, `beforeinput(insertFromPaste + targetRanges)`, and
- * `beforeinput(insertText + targetRanges)` if `execCommand` did not stick),
- * then read the composer back. A doubled or partial draft is refused before Send.
+ * type grapheme-by-grapheme with natural keystroke cadence & `keydown`/`keyup`
+ * telemetry (or line-by-line when `humanTyping: false`), with automatic
+ * Chromium ISOLATED-world Lexical fallbacks (`ClipboardEvent('paste')`,
+ * `beforeinput(insertFromPaste + StaticRange)`, `beforeinput(insertText + StaticRange)`)
+ * if `execCommand` did not commit, then read the composer back. A doubled or
+ * partial draft is refused before Send.
  */
 export async function composeMessage(ctx, options = {}) {
   const { document, message, editor = null, signal = null, pathname = '' } = options;
@@ -682,8 +733,14 @@ export async function composeMessage(ctx, options = {}) {
   if (text.length > 1000) return refusal(`the message is ${text.length} bytes; Instagram's composer limit is 1000`);
 
   const found = findComposer(ctx, { document, pathname });
-  const target = editor ?? found.editor;
+  let target = editor ?? found.editor;
   if (!target) return refusal(found.reason);
+
+  const isLexical = target.getAttribute?.('data-lexical-editor') === 'true';
+  const useHumanTyping = options.humanTyping !== undefined
+    ? Boolean(options.humanTyping)
+    : (!ctx.wait || isLexical || hasMessageEditorCue(target));
+  const rng = randomOf(ctx);
 
   ctx.virtualCursor?.label?.('Typing message…');
   const rect = typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : null;
@@ -698,16 +755,56 @@ export async function composeMessage(ctx, options = {}) {
   if (String(target.tagName ?? '').toUpperCase() === 'TEXTAREA') {
     const view = target?.ownerDocument?.defaultView ?? ctx.window ?? globalThis.window;
     const setter = Object.getOwnPropertyDescriptor(view?.HTMLTextAreaElement?.prototype ?? {}, 'value')?.set;
-    if (setter) setter.call(target, text);
-    else target.value = text;
-    try { target.dispatchEvent?.(new (view?.Event ?? Event)('input', { bubbles: true })); } catch { /* shim */ }
-    await tickOf(ctx)(80, { signal });
+    const setVal = (val) => {
+      if (setter) setter.call(target, val);
+      else target.value = val;
+    };
+    const fireTextareaInput = (ch) => {
+      try {
+        const InputCtor = view?.InputEvent ?? globalThis.InputEvent;
+        if (typeof InputCtor === 'function') {
+          target.dispatchEvent?.(new InputCtor('input', {
+            bubbles: true,
+            composed: true,
+            inputType: 'insertText',
+            data: ch,
+          }));
+          return;
+        }
+      } catch { /* shim */ }
+      try { target.dispatchEvent?.(new (view?.Event ?? Event)('input', { bubbles: true })); } catch { /* shim */ }
+    };
+
+    if (useHumanTyping) {
+      let acc = '';
+      setVal('');
+      for (const ch of splitGraphemes(text)) {
+        if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
+        dispatchCharKey(ctx, target, 'keydown', ch === '\n' ? 'Enter' : ch, ch === '\n' ? { shiftKey: true } : {});
+        acc += ch;
+        setVal(acc);
+        fireTextareaInput(ch);
+        dispatchCharKey(ctx, target, 'keyup', ch === '\n' ? 'Enter' : ch, ch === '\n' ? { shiftKey: true } : {});
+        await tickOf(ctx)(humanKeystrokeDelay(ch, rng), { signal });
+      }
+    } else {
+      setVal(text);
+      fireTextareaInput(text);
+      await tickOf(ctx)(80, { signal });
+    }
     const rendered = readComposerText(target);
     const expected = expectedComposerText(text);
     if (rendered !== expected) {
       return refusal(`the composer holds "${rendered}" but the message was "${expected}"; nothing was sent`, { rendered, expected });
     }
-    return success({ rendered, lines: text.split('\n').length, rtl: isRtlElement(target), editor: target, container: found.surface?.container ?? null });
+    return success({
+      rendered,
+      lines: text.split('\n').length,
+      rtl: isRtlElement(target),
+      editor: target,
+      container: found.surface?.container ?? null,
+      typedHuman: useHumanTyping,
+    });
   }
 
   if (readComposerText(target)) {
@@ -733,19 +830,85 @@ export async function composeMessage(ctx, options = {}) {
   }
 
   const lines = text.split('\n');
-  for (let index = 0; index < lines.length; index += 1) {
-    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
-    if (index > 0) {
-      const broke = document.execCommand?.('insertLineBreak');
-      if (broke === false) {
-        dispatchLexicalBeforeInput(ctx, target, null, 'insertLineBreak');
+  let keystrokeAbortedToFallback = false;
+  let typedGraphemes = 0;
+
+  if (useHumanTyping) {
+    for (let index = 0; index < lines.length && !keystrokeAbortedToFallback; index += 1) {
+      if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
+      // Re-resolve the live composer if React remounted the node mid-typing.
+      if (target.isConnected === false) {
+        const refreshed = findDmSurface(document, pathname)?.editor;
+        if (refreshed) {
+          target = refreshed;
+          caretToEnd(ctx, target);
+          await waitForEditorFrame(ctx, signal);
+        }
+      }
+      if (index > 0) {
+        // Avoid firing Shift+Enter keydown BEFORE execCommand('insertLineBreak')
+        // because Lexical listens to both keydown(Shift+Enter) and
+        // beforeinput(insertLineBreak) and would insert two blank lines!
+        const broke = document.execCommand?.('insertLineBreak');
+        if (broke === false) {
+          const biOk = dispatchLexicalBeforeInput(ctx, target, null, 'insertLineBreak');
+          if (!biOk) {
+            dispatchCharKey(ctx, target, 'keydown', 'Enter', { code: 'Enter', keyCode: 13, which: 13, shiftKey: true });
+            dispatchCharKey(ctx, target, 'keyup', 'Enter', { code: 'Enter', keyCode: 13, which: 13, shiftKey: true });
+          }
+        }
+        await tickOf(ctx)(130 + Math.round(rng() * 140), { signal });
+      }
+      const graphemes = splitGraphemes(lines[index]);
+      for (let g = 0; g < graphemes.length; g += 1) {
+        if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
+        if (
+          document.activeElement
+          && document.activeElement !== document.body
+          && document.activeElement !== target
+          && !target.contains?.(document.activeElement)
+        ) {
+          caretToEnd(ctx, target);
+          await waitForEditorFrame(ctx, signal);
+        }
+        const ch = graphemes[g];
+        dispatchCharKey(ctx, target, 'keydown', ch);
+        const inserted = document.execCommand?.('insertText', false, ch);
+        if (inserted === false) {
+          dispatchLexicalBeforeInput(ctx, target, ch, 'insertText');
+        }
+        dispatchCharKey(ctx, target, 'keyup', ch);
+        typedGraphemes += 1;
+
+        // Fast-fail check on the first non-whitespace grapheme: if Chrome /
+        // Lexical silently dropped execCommand, break immediately to the
+        // Chromium ISOLATED-world paste/beforeinput fallback ladder instead
+        // of spending seconds typing into the void.
+        if (typedGraphemes === 1 && ch.trim()) {
+          await waitForEditorFrame(ctx, signal);
+          if (!readComposerText(target)) {
+            keystrokeAbortedToFallback = true;
+            break;
+          }
+        }
+        await tickOf(ctx)(humanKeystrokeDelay(ch, rng), { signal });
       }
     }
-    const inserted = document.execCommand?.('insertText', false, lines[index]);
-    if (inserted === false) {
-      dispatchLexicalBeforeInput(ctx, target, lines[index], 'insertText');
+  } else {
+    for (let index = 0; index < lines.length; index += 1) {
+      if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
+      if (index > 0) {
+        const broke = document.execCommand?.('insertLineBreak');
+        if (broke === false) {
+          dispatchLexicalBeforeInput(ctx, target, null, 'insertLineBreak');
+        }
+      }
+      const inserted = document.execCommand?.('insertText', false, lines[index]);
+      if (inserted === false) {
+        dispatchLexicalBeforeInput(ctx, target, lines[index], 'insertText');
+      }
+      await tickOf(ctx)(60 + Math.round(rng() * 90), { signal });
     }
-    await tickOf(ctx)(60 + Math.round(randomOf(ctx)() * 90), { signal });
   }
   await waitForEditorFrame(ctx, signal);
 
@@ -800,13 +963,47 @@ export async function composeMessage(ctx, options = {}) {
   if (rendered !== expected) {
     return refusal(`the composer holds "${rendered}" but the message was "${expected}"; nothing was sent`, { rendered, expected });
   }
-  return success({ rendered, lines: lines.length, rtl: isRtlElement(target), editor: target, container: found.surface?.container ?? null });
+  return success({
+    rendered,
+    lines: lines.length,
+    rtl: isRtlElement(target),
+    editor: target,
+    container: found.surface?.container ?? null,
+    typedHuman: useHumanTyping && !keystrokeAbortedToFallback,
+  });
 }
 
 /** The newest bubble in the open thread, or null. */
 export function newestBubble(document, container = null) {
   const bubbles = threadBubbles(document, container);
   return bubbles.length ? bubbles[bubbles.length - 1] : null;
+}
+
+/** True when `rawText` contains `message`, including `<br>`-separated multi-line bubbles. */
+function textMatchesMessage(rawText, message) {
+  const hay = collapse(String(rawText ?? '').replace(/[\u200B-\u200F\uFEFF]/g, ''));
+  if (!hay) return false;
+  const wanted = expectedComposerText(message);
+  if (!wanted) return false;
+  if (hay.includes(wanted)) return true;
+  // Multi-line bubbles rendered as `<span>line 1</span><br><span>line 2</span>`
+  // collapse without a space in `.textContent` ("line 1line 2"). Verify every
+  // non-empty line appears in order.
+  const lines = String(message ?? '').replace(/\r\n?/g, '\n').split('\n').map((l) => collapse(l)).filter(Boolean);
+  if (lines.length <= 1) return false;
+  let pos = 0;
+  for (const line of lines) {
+    const idx = hay.indexOf(line, pos);
+    if (idx === -1) return false;
+    pos = idx + line.length;
+  }
+  return true;
+}
+
+function readableBubbleText(node) {
+  if (!node) return '';
+  if (typeof node.innerText === 'string' && node.innerText.trim()) return node.innerText;
+  return node.textContent ?? '';
 }
 
 /**
@@ -821,18 +1018,17 @@ export function newestIsOurs(document, message, container = null, editor = null)
   const wanted = expectedComposerText(message);
   if (!wanted) return false;
   const bubble = newestBubble(document, container);
-  if (bubble && collapse(bubble.textContent).includes(wanted)) return true;
+  if (bubble && textMatchesMessage(readableBubbleText(bubble), message)) return true;
 
   const checkLeafTextIn = (scope, excludeChrome = false) => {
     if (!scope || typeof scope.querySelectorAll !== 'function') return false;
     for (const node of [...scope.querySelectorAll('[dir="auto"], span, p, div')]) {
       if (editor && (node === editor || editor.contains?.(node) || node.contains?.(editor))) continue;
-      if (node.closest?.('button, [role="button"], [contenteditable="true"], [contenteditable="plaintext-only"]')) continue;
+      if (node.closest?.('button, [role="button"], [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]')) continue;
       if (excludeChrome && node.closest?.('header, nav, article')) continue;
       const children = node.children ?? [];
-      if (children.length > 2) continue;
-      const txt = collapse(node.textContent);
-      if (txt && txt.includes(wanted)) return true;
+      if (children.length > 4) continue;
+      if (textMatchesMessage(readableBubbleText(node), message)) return true;
     }
     return false;
   };
@@ -847,7 +1043,7 @@ export function newestIsOurs(document, message, container = null, editor = null)
     for (const node of [...(document.querySelectorAll?.('[role="article"], [role="row"]') ?? [])]) {
       if (editor && (node === editor || editor.contains?.(node) || node.contains?.(editor))) continue;
       if (node.closest?.('header, nav')) continue;
-      if (collapse(node.textContent).includes(wanted)) return true;
+      if (textMatchesMessage(readableBubbleText(node), message)) return true;
     }
   }
   return false;
@@ -981,6 +1177,9 @@ export async function openDm(ctx, options = {}) {
 
   // 2. Locate the profile header Message button, waiting for SPA profile hydration
   //    when needed.
+  await dismissNotificationsPrompt(ctx, document, signal);
+  if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+
   let hit = findProfileMessageButton(document);
   if (!hit && readyTimeoutMs > 0) {
     ctx.virtualCursor?.label?.('Waiting for profile…');
@@ -989,7 +1188,8 @@ export async function openDm(ctx, options = {}) {
       const msg = findProfileMessageButton(document);
       if (msg) return msg;
       // If the profile header already rendered Follow/Following or Options, we
-      // know the header mounted (may still hide Message behind Options).
+      // know the header mounted (may still hydrate Message right after Follow
+      // or hide Message behind Options).
       const rel = readRelationshipState(document);
       const opt = findProfileOptionsButton(document);
       if (rel.button || opt) return { headerReady: true };
@@ -1004,12 +1204,19 @@ export async function openDm(ctx, options = {}) {
     }
     if (hydrated.found && hydrated.value?.button) {
       hit = hydrated.value;
-    } else {
-      // Give Instagram one short extra beat in case Message renders right after Follow.
-      if (hydrated.found && hydrated.value?.headerReady) {
-        await tickOf(ctx)(250, { signal });
+    } else if (hydrated.found && hydrated.value?.headerReady) {
+      // Poll briefly (up to 900ms) for a delayed Message button render right
+      // after Follow/Options before falling back to the Options menu.
+      const delayedMsg = await waitFor(ctx, () => {
+        if (isActionBlocked(document) || isProfileUnavailable(document)) return { earlyExit: true };
+        return findProfileMessageButton(document);
+      }, { timeoutMs: Math.min(900, readyTimeoutMs), intervalMs: 150, signal, label: 'delayed profile Message button' });
+      if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+      if (delayedMsg.found && delayedMsg.value?.button) {
+        hit = delayedMsg.value;
+      } else {
+        hit = findProfileMessageButton(document);
       }
-      hit = findProfileMessageButton(document);
     }
   }
 
@@ -1143,15 +1350,15 @@ export async function openDm(ctx, options = {}) {
   });
 }
 
-/** Dismiss Instagram's benign "Turn on Notifications" modal if it overlays Direct. */
-async function dismissNotificationsPrompt(ctx, document, signal = null) {
+/** Dismiss benign Instagram modals ("Turn on Notifications", "Save your login info"). */
+export async function dismissNotificationsPrompt(ctx, document, signal = null) {
   for (const dialog of findDialogs(document)) {
     const txt = collapse(dialog.textContent ?? '');
-    if (!/turn on notifications|تشغيل الإشعارات/i.test(txt)) continue;
+    if (!/turn on notifications|save your login info|تشغيل الإشعارات|حفظ معلومات تسجيل الدخول|activer les notifications|activar notificaciones/i.test(txt)) continue;
     const buttons = [...(dialog.querySelectorAll?.('button, [role="button"]') ?? [])];
-    const notNow = buttons.find((b) => /^(not now|ليس الآن)$/i.test(collapse(b.textContent ?? b.getAttribute?.('aria-label') ?? '')));
+    const notNow = buttons.find((b) => /^(not now|ليس الآن|plus tard|ahora no|jetzt nicht|agora não|şimdi değil)$/i.test(collapse(b.textContent ?? b.getAttribute?.('aria-label') ?? '')));
     if (notNow) {
-      await humanClick(ctx, notNow, { signal, settleMs: 40, label: 'Dismissing notifications prompt…' });
+      await humanClick(ctx, notNow, { signal, settleMs: 40, label: 'Dismissing popup…' });
       await tickOf(ctx)(150, { signal });
       return true;
     }
@@ -1166,9 +1373,10 @@ async function dismissNotificationsPrompt(ctx, document, signal = null) {
  * Refuses to send into a thread that already has messages unless `allowExisting`
  * is set, catches restriction notices, waits for React/Lexical to render the
  * Send button after typing, searches the composer bar + DM container + page
- * for the Send button, supports Enter-to-send for Lexical/message composers
- * (plus backup Enter if clicking Send fails to clear a Lexical box), and
- * verifies delivery inside the active thread.
+ * (including positional fallback for unlabelled icon Send buttons once text is
+ * verified), supports Enter-to-send for Lexical/message composers (plus backup
+ * Enter if clicking Send fails to clear a Lexical box), and verifies delivery
+ * inside the active thread.
  */
 export async function executeDm(ctx, options = {}) {
   const {
@@ -1229,16 +1437,24 @@ export async function executeDm(ctx, options = {}) {
     return refusal('the composer doubled the message after verification; nothing was sent');
   }
 
+  // Natural human beat after finishing typing before moving to Send.
+  if (composed.typedHuman) {
+    await tickOf(ctx)(160 + Math.round(randomOf(ctx)() * 220), { signal });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  }
+
   // React/Lexical swaps Voice Clip / Photo / GIF for the Send button a frame or
   // two AFTER text lands in the composer. Wait briefly for Send to mount,
   // searching the composer bar beside `editor`, the DM container, and the page.
-  let send = findSendButton(document, activeContainer, editor);
+  // Because verified non-empty text is now in `editor`, positional fallback is
+  // safe for unlabelled Send icon A/B tests too.
+  let send = findSendButton(document, activeContainer, editor, { allowPositional: true });
   const isLexicalEditor = editor.getAttribute?.('data-lexical-editor') === 'true';
   const canSubmitWithEnter = isLexicalEditor || hasMessageEditorCue(editor);
   if (!send && (canSubmitWithEnter || sendButtonTimeoutMs > 0)) {
     const waitedSend = await waitFor(ctx, () => {
       if (isActionBlocked(document)) return { blocked: true };
-      return findSendButton(document, activeContainer, editor);
+      return findSendButton(document, activeContainer, editor, { allowPositional: true });
     }, {
       timeoutMs: canSubmitWithEnter ? sendButtonTimeoutMs : Math.min(sendButtonTimeoutMs, 200),
       intervalMs: 100,
@@ -1255,7 +1471,8 @@ export async function executeDm(ctx, options = {}) {
   // Real-browser Lexical self-heal: if execCommand wrote raw DOM text without
   // Lexical committing it into its internal state (`[data-lexical-text="true"]`
   // is missing AND Send never mounted), clear the uncommitted draft and paste
-  // via real ClipboardEvent('paste') so Lexical commits it and mounts Send!
+  // via real ClipboardEvent('paste') / beforeinput('insertFromPaste') so
+  // Lexical commits it and mounts Send!
   if (
     !send
     && isLexicalEditor
@@ -1269,17 +1486,31 @@ export async function executeDm(ctx, options = {}) {
     await tickOf(ctx)(60, { signal });
     caretToEnd(ctx, editor);
     await waitForEditorFrame(ctx, signal);
-    if (dispatchPlainTextPaste(editor, message)) {
+    const pasted = dispatchPlainTextPaste(editor, message);
+    await waitForEditorFrame(ctx, signal);
+    if (!readComposerText(editor)) {
+      dispatchLexicalBeforeInput(ctx, editor, message, 'insertFromPaste');
       await waitForEditorFrame(ctx, signal);
+    }
+    if (!readComposerText(editor)) {
+      dispatchLexicalBeforeInput(ctx, editor, message, 'insertText');
+      await waitForEditorFrame(ctx, signal);
+    }
+    if (pasted || readComposerText(editor)) {
       const rescued = await waitFor(ctx, () => {
         if (isActionBlocked(document)) return { blocked: true };
-        return findSendButton(document, activeContainer, editor);
+        return findSendButton(document, activeContainer, editor, { allowPositional: true });
       }, { timeoutMs: Math.min(1000, sendButtonTimeoutMs || 1000), intervalMs: 100, signal, label: 'Send button after paste' });
       if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
       if (rescued.value?.blocked || isActionBlocked(document)) {
         return halted(ActionOutcome.STOPPED, 'Instagram blocked sending this message; the run must stop', { severity: 'account' });
       }
       if (rescued.found && rescued.value?.button) send = rescued.value;
+    }
+    const postHealText = readComposerText(editor);
+    const expected = expectedComposerText(message);
+    if (postHealText !== expected) {
+      return refusal(`the composer holds "${postHealText}" after recovery but the message was "${expected}"; nothing was sent`, { rendered: postHealText, expected });
     }
   }
 

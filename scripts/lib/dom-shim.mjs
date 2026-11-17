@@ -87,13 +87,21 @@ class Element {
     return this.children.map((c) => c.textContent ?? '').join('');
   }
 
-  /** Rendered text: <br> and block boxes become newlines, as a browser shows them. */
+  /** Rendered text: <br> and block boxes become newlines; inline siblings stay joined, as a browser shows them. */
   get innerText() {
     if (this._text !== null) return this._text;
     if (this.tagName === 'br') return '\n';
-    return this.children
-      .map((child) => (child instanceof Element ? child.innerText : String(child.textContent ?? '')))
-      .join(this.tagName === 'div' || this.tagName === 'p' ? '\n' : '');
+    const BLOCKS = new Set(['div', 'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'blockquote', 'pre']);
+    let out = '';
+    for (let i = 0; i < this.children.length; i += 1) {
+      const child = this.children[i];
+      const isBlock = child instanceof Element && BLOCKS.has(child.tagName);
+      const part = child instanceof Element ? child.innerText : String(child.textContent ?? '');
+      if (isBlock && out && !out.endsWith('\n')) out += '\n';
+      out += part;
+      if (isBlock && i < this.children.length - 1 && !out.endsWith('\n')) out += '\n';
+    }
+    return out;
   }
 
   set innerHTML(v) { this._rawHtml = String(v); this.children = []; this._text = null; }
