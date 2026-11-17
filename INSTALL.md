@@ -58,7 +58,7 @@ dashboard opens in its own tab.
 1. Log in to Instagram in a normal tab, as usual. The extension only ever acts on
    pages inside your own browser session.
 2. Click the toolbar icon → **Open dashboard**. The top-right connection pill automatically detects your logged-in Instagram tab (if you have not opened Instagram yet, click the pill to open it).
-3. In **Collect**, choose a sub-tab (**From an account**, **From a post**, **From a hashtag**, or **From open tab**), enter a target handle or link, and press **Collect**. Your Instagram tab comes forward and runs visibly with human cursor movement and scrolling (zero Instagram API calls). Nothing is written to your library yet — you get a **Preview** first.
+3. In **Collect**, choose a sub-tab (**From an account** or **From a post**), enter a target handle or link, and press **Collect**. Your Instagram tab comes forward and runs visibly with human cursor movement and scrolling (zero Instagram API calls). Nothing is written to your library yet — you get a **Preview** first.
 4. Review the preview, pick a bucket (the ready **Default** bucket is pre-selected, or choose **+ Create new bucket…** inline), and press **Save**.
 5. Open **Your people** to browse **All people**, **Default**, and every custom bucket as its own tab. Click **+ New bucket** at any time to create another bucket tab, or click any row to inspect details and toggle bucket memberships.
 6. Open **Outreach** and select the dedicated **Follow**, **Messages**, or **Unfollow** sub-tab, pick a bucket, and press **Plan (dry run)**. This costs nothing and touches no tab: it shows how many people are ready, the governor's remaining budget, and whether the active window is open.
@@ -87,7 +87,7 @@ Open **Settings** (top-right `⋯` menu) and:
 
 | Surface | What it does |
 |---|---|
-| **Tab 1 · Collect** | Four separated sub-tabs (**From an account**, **From a post**, **From a hashtag**, **From open tab**) driving visible human browser automation into a preview, ready to save into **Default** or a new bucket. |
+| **Tab 1 · Collect** | Two focused sub-tabs (**From an account** and **From a post**) driving visible human browser automation into a preview, ready to save into **Default** or a new bucket. |
 | **Tab 2 · Your people** | Ranked, virtualised CRM organised into bucket tabs (**All people**, ready **Default** bucket, and every custom bucket you create as its own tab) with search, warmth filters, and a lead drawer with one-click bucket toggles. |
 | **Tab 3 · Outreach** | Three cleanly separated sub-tabs — **Follow**, **Messages** (including Message studio & pool health), and **Unfollow** — with bucket filtering, dry-run planning, governor quota meters, and live run logs. |
 | **Top bar** | Brand, three-tab switcher (**Collect**, **Your people**, **Outreach**), interactive connection status pill, and overflow menu (**Settings**, **Backup & export**). |

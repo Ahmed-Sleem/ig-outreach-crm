@@ -152,10 +152,11 @@ const IGNORED_BUTTON_TAGS = new Set(['SVG', 'TITLE', 'STYLE', 'SCRIPT']);
  * becomes `"FollowingDown chevron icon"`. Skipping SVG/title subtrees recovers
  * the exact human-visible label (`"Following"`) across English & Arabic.
  */
-export function visibleButtonText(node) {
+/** Non-SVG visible text inside a button (returns '' for icon-only buttons). */
+function nonSvgButtonText(node) {
   if (!node) return '';
   const kids = node.childNodes ?? node.children;
-  if (!kids || kids.length === 0) return String(node.textContent ?? '');
+  if (!kids || kids.length === 0) return collapse(node.textContent ?? '');
   const parts = [];
   const walk = (cur) => {
     if (!cur) return;
@@ -179,7 +180,12 @@ export function visibleButtonText(node) {
     }
   };
   walk(node);
-  const joined = collapse(parts.join(' '));
+  return collapse(parts.join(' '));
+}
+
+export function visibleButtonText(node) {
+  if (!node) return '';
+  const joined = nonSvgButtonText(node);
   return joined || collapse(node.textContent);
 }
 
@@ -203,12 +209,12 @@ export function findButtonsByLabel(root, kinds) {
   const wanted = new Set(kinds);
   const out = [];
   for (const button of qsa(root, 'button, [role="button"]')) {
-    const visible = visibleButtonText(button);
-    let kind = labelKind(visible) ?? labelKind(button.textContent);
+    const pureVisible = nonSvgButtonText(button);
+    let kind = labelKind(pureVisible) ?? labelKind(button.textContent);
     if (!kind) {
       kind = labelKind(button.getAttribute?.('aria-label'));
     }
-    if (!kind && !visible) {
+    if (!kind && !pureVisible) {
       for (const lbl of svgLabelsOf(button)) {
         kind = labelKind(lbl);
         if (kind) break;
@@ -243,13 +249,22 @@ export function findProfileMessageButton(root) {
   const headers = qsa(root, 'header').filter((h) => !h.closest?.('[role="dialog"]'));
   for (const hdr of headers) {
     const hit = findButtonByLabel(hdr, [Label.MESSAGE, Label.SEND_MESSAGE]);
-    if (hit) return hit;
+    if (hit && isNodeVisible(hit.button)) return hit;
   }
-  // Minimal DOM fallback (only when no profile <header> exists at all).
-  if (headers.length === 0) {
+  // Responsive/narrow layout fallback: check directly inside <main> outside
+  // feed <article> cards, dialogs, and nav.
+  const mains = qsa(root, 'main, [role="main"]').filter((m) => !m.closest?.('[role="dialog"]'));
+  for (const main of mains) {
+    for (const hit of findButtonsByLabel(main, [Label.MESSAGE, Label.SEND_MESSAGE])) {
+      if (hit.button.closest?.('article, nav, [role="dialog"]')) continue;
+      if (isNodeVisible(hit.button)) return hit;
+    }
+  }
+  // Minimal DOM fallback (only when no profile <header> or <main> exists at all).
+  if (headers.length === 0 && mains.length === 0) {
     for (const hit of findButtonsByLabel(root, [Label.MESSAGE, Label.SEND_MESSAGE])) {
       if (hit.button.closest?.('nav, [role="dialog"]')) continue;
-      return hit;
+      if (isNodeVisible(hit.button)) return hit;
     }
   }
   return null;
@@ -265,7 +280,14 @@ export function findProfileOptionsButton(root) {
   const headers = qsa(root, 'header').filter((h) => !h.closest?.('[role="dialog"]'));
   for (const hdr of headers) {
     const hit = findButtonByLabel(hdr, [Label.OPTIONS]);
-    if (hit) return hit;
+    if (hit && isNodeVisible(hit.button)) return hit;
+  }
+  const mains = qsa(root, 'main, [role="main"]').filter((m) => !m.closest?.('[role="dialog"]'));
+  for (const main of mains) {
+    for (const hit of findButtonsByLabel(main, [Label.OPTIONS])) {
+      if (hit.button.closest?.('article, nav, [role="dialog"]')) continue;
+      if (isNodeVisible(hit.button)) return hit;
+    }
   }
   return null;
 }
@@ -532,55 +554,97 @@ const DM_SEND_FAILED_PATTERNS = [
   /تعذر\s+إرسال\s+الرسالة/,
 ];
 
+/** Collect non-composer chrome text from a DM container for restriction matching. */
+function dmChromeText(scope, { includeArticles = false } = {}) {
+  if (!scope) return '';
+  const parts = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (typeof node === 'string') { parts.push(node); return; }
+    if (node.nodeType === 3) { parts.push(String(node.nodeValue ?? node.textContent ?? '')); return; }
+    const tag = String(node.tagName ?? '').toUpperCase();
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'SVG') return;
+    if (node.getAttribute?.('contenteditable') === 'true' || tag === 'TEXTAREA') return;
+    if (!includeArticles && node.getAttribute?.('role') === 'article') return;
+    const kids = node.childNodes ?? node.children;
+    if (kids && kids.length > 0) {
+      for (const child of kids) walk(child);
+    } else if (node._text !== undefined && node._text !== null) {
+      parts.push(String(node._text));
+    } else if (node.textContent) {
+      parts.push(String(node.textContent));
+    }
+  };
+  walk(scope);
+  return collapse(parts.join(' '));
+}
+
 /**
  * Inspect an active DM container (dock, Direct thread panel, or dialog) for
  * Instagram messaging restriction notices, invite-sent locks, or send errors.
+ * Ignores text inside the composer (and inside received/sent message bubbles
+ * for account-restriction notices) so a user's own draft cannot self-trigger.
  */
 export function detectDmRestriction(scope) {
   if (!scope) return null;
-  const text = collapse(scope.textContent ?? '');
-  if (!text) return null;
-  for (const re of DM_UNAVAILABLE_PATTERNS) {
-    if (re.test(text)) {
-      return {
-        kind: 'unavailable',
-        reason: 'Instagram says you cannot message this account (message requests restricted or followers-only).',
-      };
+  const chromeText = dmChromeText(scope, { includeArticles: false });
+  if (chromeText) {
+    for (const re of DM_UNAVAILABLE_PATTERNS) {
+      if (re.test(chromeText)) {
+        return {
+          kind: 'unavailable',
+          reason: 'Instagram says you cannot message this account (message requests restricted or followers-only).',
+        };
+      }
+    }
+    for (const re of DM_INVITE_SENT_PATTERNS) {
+      if (re.test(chromeText)) {
+        return {
+          kind: 'invite_sent',
+          reason: 'A message invite was already sent to this account and has not been accepted yet.',
+        };
+      }
     }
   }
-  for (const re of DM_INVITE_SENT_PATTERNS) {
-    if (re.test(text)) {
-      return {
-        kind: 'invite_sent',
-        reason: 'A message invite was already sent to this account and has not been accepted yet.',
-      };
-    }
-  }
-  for (const re of DM_SEND_FAILED_PATTERNS) {
-    if (re.test(text)) {
-      return {
-        kind: 'send_failed',
-        reason: 'Instagram reported that the message failed to send.',
-      };
+  const statusText = dmChromeText(scope, { includeArticles: true });
+  if (statusText) {
+    for (const re of DM_SEND_FAILED_PATTERNS) {
+      if (re.test(statusText)) {
+        return {
+          kind: 'send_failed',
+          reason: 'Instagram reported that the message failed to send.',
+        };
+      }
     }
   }
   return null;
 }
 
+function isButtonInteractive(button) {
+  if (!button) return false;
+  if (!isNodeVisible(button)) return false;
+  if (button.disabled === true) return false;
+  if (String(button.getAttribute?.('aria-disabled') ?? '').toLowerCase() === 'true') return false;
+  return true;
+}
+
 /**
  * Find the Send button inside the active DM container first, falling back to
  * the document (excluding profile `<header>` and `<nav>`). Supports text labels,
- * `aria-label`, `svg[aria-label]`, and `<svg><title>Send</title></svg>`.
+ * `aria-label`, `svg[aria-label]`, and `<svg><title>Send</title></svg>`, and
+ * skips hidden or `aria-disabled="true"` buttons so we wait for React to enable
+ * Send before clicking.
  */
 export function findSendButton(root, dmContainer = null) {
   if (dmContainer) {
-    const inside = findButtonByLabel(dmContainer, [Label.SEND, Label.SEND_MESSAGE]);
-    if (inside) return inside;
+    for (const hit of findButtonsByLabel(dmContainer, [Label.SEND, Label.SEND_MESSAGE])) {
+      if (isButtonInteractive(hit.button)) return hit;
+    }
   }
   if (!root) return null;
   for (const hit of findButtonsByLabel(root, [Label.SEND])) {
     if (hit.button.closest?.('header, nav')) continue;
-    return hit;
+    if (isButtonInteractive(hit.button)) return hit;
   }
   return null;
 }

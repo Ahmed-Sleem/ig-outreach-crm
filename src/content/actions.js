@@ -471,7 +471,7 @@ export function readComposerText(editor) {
  * arrive" rather than "did the DOM keep my newline elements".
  */
 export function expectedComposerText(message) {
-  return collapse(String(message ?? '').split('\n').join(' '));
+  return collapse(String(message ?? '').replace(/\r\n?/g, '\n').split('\n').join(' '));
 }
 
 /** True when the rendered text is the message written twice. */
@@ -543,7 +543,7 @@ function dispatchEscapeKey(ctx, document) {
  */
 export async function composeMessage(ctx, options = {}) {
   const { document, message, editor = null, signal = null, pathname = '' } = options;
-  const text = String(message ?? '');
+  const text = String(message ?? '').replace(/\r\n?/g, '\n');
   if (!text.trim()) return refusal('the message is empty');
   if (text.length > 1000) return refusal(`the message is ${text.length} bytes; Instagram's composer limit is 1000`);
 
@@ -581,6 +581,17 @@ export async function composeMessage(ctx, options = {}) {
     // Lexical can suppress an immediate insertText on the same tick after
     // handled selectAll/delete; let one short frame settle first.
     await tickOf(ctx)(60, { signal });
+    if (readComposerText(target) && typeof globalThis.InputEvent === 'function') {
+      try {
+        document.execCommand?.('selectAll');
+        target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
+          inputType: 'deleteContentBackward',
+          bubbles: true,
+          cancelable: true,
+        }));
+        await tickOf(ctx)(60, { signal });
+      } catch { /* shim */ }
+    }
     if (readComposerText(target)) {
       return refusal('the composer still holds text after clearing it; refusing to type on top of someone else\'s draft');
     }
@@ -591,7 +602,18 @@ export async function composeMessage(ctx, options = {}) {
   const lines = text.split('\n');
   for (let index = 0; index < lines.length; index += 1) {
     if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'stopped while composing', { stoppedByOwner: true });
-    if (index > 0) document.execCommand?.('insertLineBreak');
+    if (index > 0) {
+      const broke = document.execCommand?.('insertLineBreak');
+      if (broke === false && typeof globalThis.InputEvent === 'function') {
+        try {
+          target.dispatchEvent?.(new globalThis.InputEvent('beforeinput', {
+            inputType: 'insertLineBreak',
+            bubbles: true,
+            cancelable: true,
+          }));
+        } catch { /* shim */ }
+      }
+    }
     const inserted = document.execCommand?.('insertText', false, lines[index]);
     if (inserted === false && typeof globalThis.InputEvent === 'function') {
       try {
@@ -923,6 +945,30 @@ export async function openDm(ctx, options = {}) {
   }
 
   const surface = opened.value.surface;
+
+  // Give a freshly opened DM container a brief thread-history settle beat (and
+  // wait out any loading spinner) so delayed message bubbles or restriction
+  // banners hydrate BEFORE we check existingThread or begin typing.
+  if (surface.container?.querySelector?.('[role="progressbar"]')) {
+    await waitFor(ctx, () => {
+      if (isActionBlocked(document)) return { blocked: true };
+      const r = detectDmRestriction(surface.container);
+      if (r) return { restriction: r };
+      if (!surface.container.querySelector?.('[role="progressbar"]')) return { ready: true };
+      return null;
+    }, { timeoutMs: Math.min(2500, timeoutMs), intervalMs: 120, signal, label: 'thread history to finish loading' });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+    if (isActionBlocked(document)) {
+      return halted(ActionOutcome.STOPPED, 'Instagram blocked opening this chat; the run must stop', { severity: 'account' });
+    }
+  } else {
+    await tickOf(ctx)(250, { signal });
+    if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
+  }
+
+  const settledRestriction = detectDmRestriction(surface.container);
+  if (settledRestriction) return restrictionToOutcome(settledRestriction);
+
   // The editor stays here: a DOM node cannot cross the storage bridge, and the
   // caller only needs to know the composer is open.
   return success({
@@ -1035,11 +1081,26 @@ export async function executeDm(ctx, options = {}) {
 
   ctx.virtualCursor?.label?.('Verifying delivery…');
 
+  const resolveLiveEditor = () => {
+    if (editor && editor.isConnected !== false) return editor;
+    return findDmSurface(document, effectivePath)?.editor ?? null;
+  };
+
   const cleared = await waitFor(ctx, () => {
     if (isActionBlocked(document)) return { blocked: true };
+    const live = resolveLiveEditor();
+    if (newestIsOurs(document, message, activeContainer, live ?? editor)) {
+      return { cleared: true, alreadyDelivered: true };
+    }
     const r = detectDmRestriction(activeContainer);
-    if (r) return { restriction: r };
-    return readComposerText(editor) === '' ? { cleared: true } : null;
+    if (r) {
+      // On cold invites, Instagram delivers our message and immediately swaps
+      // the composer for "Invite sent" — that confirms delivery, NOT a skip!
+      if (r.kind === 'invite_sent') return { cleared: true, inviteConfirmed: true };
+      return { restriction: r };
+    }
+    if (!live || readComposerText(live) === '') return { cleared: true };
+    return null;
   }, { timeoutMs: settleMs, signal, label: 'composer cleared after send' });
 
   if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
@@ -1050,19 +1111,31 @@ export async function executeDm(ctx, options = {}) {
     return restrictionToOutcome(cleared.value.restriction);
   }
   if (!cleared.found) {
-    return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'Send was clicked but the composer still holds the message', rendered: readComposerText(editor) };
+    const live = resolveLiveEditor();
+    return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'Send was clicked but the composer still holds the message', rendered: readComposerText(live ?? editor) };
   }
 
-  const delivered = await waitFor(ctx, () => {
-    if (isActionBlocked(document)) return { blocked: true };
-    const r = detectDmRestriction(activeContainer);
-    if (r) return { restriction: r };
-    return newestIsOurs(document, message, activeContainer, editor) ? { delivered: true } : null;
-  }, {
-    timeoutMs: Math.max(1500, settleMs - cleared.elapsedMs),
-    signal,
-    label: 'message bubble in thread',
-  });
+  let delivered = cleared.value?.alreadyDelivered
+    ? { found: true, elapsedMs: 0, value: { delivered: true } }
+    : await waitFor(ctx, () => {
+      if (isActionBlocked(document)) return { blocked: true };
+      const live = resolveLiveEditor();
+      if (newestIsOurs(document, message, activeContainer, live ?? editor)) {
+        return { delivered: true };
+      }
+      const r = detectDmRestriction(activeContainer);
+      if (r && (r.kind === 'unavailable' || r.kind === 'send_failed')) {
+        return { restriction: r };
+      }
+      if (r?.kind === 'invite_sent' && !live) {
+        return { delivered: true, inviteSent: true };
+      }
+      return null;
+    }, {
+      timeoutMs: Math.max(1500, settleMs - cleared.elapsedMs),
+      signal,
+      label: 'message bubble in thread',
+    });
 
   if (signal?.aborted) return halted(ActionOutcome.STOPPED, 'Stopped by owner.', { stoppedByOwner: true });
   if (delivered.value?.blocked || isActionBlocked(document)) {
@@ -1072,12 +1145,17 @@ export async function executeDm(ctx, options = {}) {
     return restrictionToOutcome(delivered.value.restriction);
   }
   if (!delivered.found) {
-    return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer cleared but the message never appeared in the thread' };
+    if (cleared.value?.inviteConfirmed) {
+      delivered = { found: true, elapsedMs: delivered.elapsedMs, value: { delivered: true, inviteSent: true } };
+    } else {
+      return { ok: false, outcome: ActionOutcome.NOT_DONE, reason: 'the composer cleared but the message never appeared in the thread' };
+    }
   }
   return success({
     clearedMs: cleared.elapsedMs,
     deliveredMs: delivered.elapsedMs,
     surfaceKind: surface?.kind ?? null,
+    inviteSent: Boolean(delivered.value?.inviteSent || cleared.value?.inviteConfirmed),
     seen: threadShowsSeen(document, activeContainer),
     rtl: composed.rtl,
   });

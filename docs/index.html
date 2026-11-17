@@ -39,16 +39,21 @@ h2{font:700 30px var(--hand);color:var(--red);margin:3rem 0 1rem}
 .c:nth-child(2){transform:rotate(1.2deg)}.c:nth-child(1){transform:rotate(-1.2deg)}
 .c b{display:block;font:800 1.35rem var(--serif);color:var(--red);margin-bottom:.3rem}
 .c p{font-size:.95rem}
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+.shot{margin:0;border:3px solid var(--red);border-radius:14px;background:#f8eedb;overflow:hidden;box-shadow:4px 4px 0 var(--ink)}
+.shot img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top center;border-bottom:2px solid var(--red)}
+.shot figcaption{padding:.55rem .75rem;font:700 19px var(--hand);color:var(--red);line-height:1.15}
+.shot figcaption span{display:block;font:400 .85rem/1.35 var(--serif);color:var(--ink);margin-top:.15rem}
 ol{padding-left:1.4rem;max-width:56ch;font-size:1rem}li{margin:.4rem 0}
 code{background:#e5472b22;padding:0 .3rem;border-radius:4px;font-size:.9em}
 .end{text-align:center;margin-top:3.5rem}
 .end h3{font:800 clamp(1.8rem,5vw,2.6rem) var(--serif);color:var(--red);margin-bottom:1rem}
 footer{font:500 18px var(--hand);text-align:center;margin-top:2rem;color:#7a6556}
-@media(max-width:760px){.hero{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.book{margin:0 54px 3rem;padding:2rem 1.2rem 3rem;border-width:8px}.c{transform:none!important}.rail{width:38px}}
+@media(max-width:760px){.hero{grid-template-columns:1fr}.cards,.shots{grid-template-columns:1fr}.book{margin:0 54px 3rem;padding:2rem 1.2rem 3rem;border-width:8px}.c{transform:none!important}.rail{width:38px}}
 @media(prefers-reduced-motion:reduce){.pop{animation:none}.btn{transition:none}}
 </style></head><body>
 <div class="rail l" aria-hidden="true"></div><div class="rail r" aria-hidden="true"></div>
-<nav><a href="#what">what</a><a href="#how">how</a><a href="#get">get it</a></nav>
+<nav><a href="#what">what</a><a href="#peek">peek</a><a href="#how">how</a><a href="#get">get it</a></nav>
 <main class="book">
 <section class="hero">
 <div>
@@ -76,8 +81,24 @@ footer{font:500 18px var(--hand);text-align:center;margin-top:2rem;color:#7a6556
 <h2 id="what">3 things it does</h2>
 <div class="cards">
 <div class="c"><b>What it is</b><p>A local CRM that lives in Chrome. Collect people from accounts or posts, organise them into buckets, and track every follow &amp; DM.</p></div>
-<div class="c"><b>How it works</b><p>It drives your visible Instagram tab like a real person — natural mouse movement, real scrolling, real clicks — with zero private API calls.</p></div>
-<div class="c"><b>Why it works</b><p>Hard daily limits, randomized delays, and local-only storage. No servers, no sign-up, no spreadsheets — your data stays on your machine.</p></div>
+<div class="c"><b>How it works</b><p>It drives your visible Instagram tab like a real person — natural mouse movement, real scrolling, floating chat dock &amp; Lexical DM typing — with zero private API calls.</p></div>
+<div class="c"><b>Why it works</b><p>Hard daily limits, randomized delays, automatic per-account skip on restricted profiles, and local-only storage. No servers, no sign-up — your data stays on your machine.</p></div>
+</div>
+
+<h2 id="peek">peek inside</h2>
+<div class="shots">
+<figure class="shot">
+<a href="./screenshots/01-collect.png" target="_blank" rel="noopener"><img src="./screenshots/01-collect.png" alt="Collect screen showing From an account and From a post sub-tabs" loading="lazy"></a>
+<figcaption>1. Collect<span>Pull warm leads from any account or post, preview first, then save.</span></figcaption>
+</figure>
+<figure class="shot">
+<a href="./screenshots/03-library.png" target="_blank" rel="noopener"><img src="./screenshots/03-library.png" alt="Your people library table with bucket tabs and warmth filters" loading="lazy"></a>
+<figcaption>2. Your people<span>Bucket tabs, warmth ranking, search, and full lead provenance.</span></figcaption>
+</figure>
+<figure class="shot">
+<a href="./screenshots/05-outreach.png" target="_blank" rel="noopener"><img src="./screenshots/05-outreach.png" alt="Outreach Messages sub-tab with dry-run queue preview and spintax message studio" loading="lazy"></a>
+<figcaption>3. Outreach<span>Follow, Messages &amp; Unfollow with dry runs, spintax studio, and strict caps.</span></figcaption>
+</figure>
 </div>
 
 <h2 id="how">Install in 1 minute</h2>

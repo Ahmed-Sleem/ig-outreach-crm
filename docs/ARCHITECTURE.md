@@ -10,7 +10,7 @@ one active task at a time while the dashboard is open.
 
 ```text
 DASHBOARD TAB  (chrome-extension://<id>/app/index.html)
-├── Tab 1  Collect: 4 sub-tabs (From an account, From a post, From a hashtag, From open tab) + Preview & Save
+├── Tab 1  Collect: 2 sub-tabs (From an account, From a post) + Preview & Save
 ├── Tab 2  Your people: bucket tabs (All people, ready Default, user buckets + New bucket), virtual table, dossier drawer
 ├── Tab 3  Outreach: 3 separated sub-tabs (Follow, Messages + Message studio, Unfollow), quota meters, live run log
 ├── src/core/*      pure engines: scoring, lifecycle, random, governor, templates, linter
@@ -48,7 +48,7 @@ src/
 │   ├── main.js                  # message router: browser-DOM collect, follow, message, unfollow (zero IG API calls)
 │   ├── probe.js                 # DOM-first signed-in viewer detection (zero IG API calls)
 │   ├── human.js                 # cubic Bezier pointer path, human wheel scrolling & scroll-up/down nudge
-│   ├── browser-collector.js     # 100% browser-driven 2026 DOM collection (followers, likers, comments, hashtags, dialogs)
+│   ├── browser-collector.js     # 100% browser-driven 2026 DOM collection (followers, following, likers, commenters, dialogs)
 │   ├── adapters.js              # pure row/pagination helpers (not invoked in live browser runs)
 │   ├── actions.js               # real-UI follow, unfollow and Lexical DM composer + verification
 │   ├── selectors.js             # single source of exact English and Arabic 2026 Instagram DOM selectors
@@ -77,7 +77,7 @@ src/
     │   ├── virtual-list.js      # windowed rows for tables of tens of thousands of leads
     │   └── export-utils.js      # BOM CSV with formula guard, .igcrm.json backup, printable HTML
     └── views/
-        ├── tab1-collector.js    # 4 source sub-tabs, single-task collector, preview & bucket save
+        ├── tab1-collector.js    # 2 source sub-tabs (From an account, From a post), single-task collector, preview & bucket save
         ├── tab-people.js        # bucket sub-tabs (All people, Default, custom), virtual table, dossier drawer
         ├── tab2-outreach.js     # 3 separated sub-tabs (Follow, Messages + studio, Unfollow), quota meters
         ├── backup-export.js     # restore points, exports, importers
@@ -137,7 +137,7 @@ browser tab — never through forged `/api/v1/` or `/graphql` collection endpoin
   open Instagram tab's own cookies (`ds_user_id`), navigation profile link, and
   embedded hydration scripts — zero network probes.
 - **Human collection (`human.js` + `browser-collector.js`)** focuses the Instagram
-  tab visibly, navigates to the profile/post/hashtag, moves a subtle Shadow-DOM
+  tab visibly, navigates to the profile or post, moves a subtle Shadow-DOM
   cursor along cubic Bezier curves with smoothstep acceleration, clicks the real
   Followers / Following / Likes / Next controls, scrolls dialogs in variable
   micro-steps with reading pauses, stops before `"Suggested for you"` boundaries,

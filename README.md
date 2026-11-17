@@ -4,7 +4,7 @@
 
 > **Download page:** [https://ahmed-sleem.github.io/ig-outreach-crm/](https://ahmed-sleem.github.io/ig-outreach-crm/)
 
-![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-818%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-blue) ![Manifest](https://img.shields.io/badge/Chrome-MV3-lightgrey) ![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-green) ![Tests](https://img.shields.io/badge/tests-843%20passing-brightgreen)
 
 ## Why
 
@@ -34,7 +34,8 @@ Building reliable Instagram tooling in 2026 meant testing several common approac
 | **Naive `chrome.tabs.sendMessage` + service worker** | Promises hang silently whenever Instagram navigates or reloads mid-action, and MV3 kills idle workers during long outreach waits. | Persistent `chrome.storage.local` mailbox with `storage.onChanged` wake-up, per-command reply keys, `targetTabId` multi-tab routing, and concurrent mid-run `STOP`. |
 | **Raw `textContent` & hardcoded CSS classes** | 2026 Instagram randomises class names and puts `<svg><title>Down chevron icon</title></svg>` inside `"Following"` buttons (`"FollowingDown chevron icon"`), hides icon-only `"Send"` buttons behind `aria-label`, and uses `/<user>/p/<code>/` URLs. | Strip SVG/title subtrees for button matching, check `aria-label` on icon buttons, scope relationship checks to profile `<header>`, and recognise profile-prefixed post URLs. |
 | **Clicking the first `followers` link or scrolling the first `overflow` div** | 2026 profiles render a trap link `<a href=".../followers/mutualOnly">Followed by …</a>` above the real modal, wrap Followers in a decoy `height:auto` div, append a second `"Suggested for you"` scroller inside Following, and stack Likes modals on top of Post modals. | Explicitly skip `mutualOnly`, pick the deepest scrollable container holding real user links before `"Suggested for you"`, and match modal headings strictly so Post modals are never mistaken for Likes/Followers. |
-| **Checking `[role="article"]` / generic `[role="row"]` in Direct DMs** | 2026 Comet Direct renders threads in `[role="grid"] [role="row"]` — and puts a `"View profile"` intro card and encryption banner inside empty new threads (which looked like an existing conversation). | Support Comet `[role="grid"] [role="row"]` while filtering out `"View profile"` cards, timestamps, and system notices, and verify the open thread actually matches the target handle before sending. |
+| **Checking `[role="article"]` / generic `[role="row"]` in Direct DMs** | 2026 Comet Direct renders threads in either the floating bottom-right chat dock (non-dialog, `[role="article"]` bubbles) or `/direct/t/` (`[role="grid"] [role="row"]`), hides `Send message` inside the `•••` Options menu on some profiles, leaves previous users' docks open after SPA navigation, and puts a `"View profile"` intro card and encryption banner inside empty threads. | Handle both the floating dock and `/direct/t/`, fall back to `•••` Options → `Send message`, close stale mismatched docks first, wait for dock hydration, filter out `"View profile"` cards/timestamps/system notices, type line-by-line into Lexical with safe paste/`beforeinput` fallbacks, and verify delivery (including `"Invite sent"` confirmation). |
+| **Stopping the whole run on a single broken or restricted account** | One private, deleted, or DM-restricted profile in the middle of a queue aborted the rest of the outreach run. | Built-in per-account skip-on-failure across **Follow**, **Messages**, and **Unfollow**: skips individual unavailable/restricted/already-handled accounts cleanly while still halting immediately on owner Stop, real action blocks, lost sessions, closed tabs, or repeated systemic page failures. |
 | **Blocking single-command loop & unified Stop handling** | Awaiting a long collection blocked Dashboard `STOP` until timeout, and treating owner-initiated Stop the same as a platform refusal tripped the 48-hour circuit breaker. | Run long commands asynchronously while control commands (`STOP`/`PING`) execute immediately, and cleanly separate owner stops (`STOPPED`) from real Instagram action blocks. |
 
 ## What it is / what it is not
@@ -151,7 +152,7 @@ you.
 ```bash
 git clone https://github.com/Ahmed-Sleem/ig-outreach-crm.git
 cd ig-outreach-crm
-npm test                       # 818 tests, no dependencies
+npm test                       # 843 tests, no dependencies
 npm run verify                 # 24 checks: shape, hygiene, code invariants, links, tests
 node scripts/build.mjs         # writes the loadable folder to build/extension/
 node scripts/check-package.mjs build/extension   # verifies it the way Chrome would load it
@@ -169,8 +170,8 @@ in [INSTALL.md](INSTALL.md).
 | Icon and asset generation | Done |
 | Core engines and local storage | Done, unit-tested |
 | Browser-driven Instagram collection & session detection | Done — 100% visible human DOM automation (zero Instagram API calls), unit-tested |
-| Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, real-UI + Bezier cursor, unit-tested |
-| Dashboard & extension UI | Done — 3 top-level tabs (**Collect**, **Your people** with bucket tabs + ready Default bucket, **Outreach** with **Follow / Messages / Unfollow** sub-tabs), styled to match the landing page; unit-tested and responsive-checked (360–1440px) |
+| Follow, accept-detect and DM execution | Done — governor-capped, duplicate-suppressed, 2026 desktop floating-dock + `•••` Options + `/direct/t/` Lexical DM flow, per-account skip resilience, real-UI + Bezier cursor, unit-tested |
+| Dashboard & extension UI | Done — 3 top-level tabs (**Collect** with **From an account** / **From a post**, **Your people** with bucket tabs + ready Default bucket, **Outreach** with **Follow / Messages / Unfollow** sub-tabs), warm cream/vermilion editorial theme matching the landing page; unit-tested and responsive-checked (360–1440px) |
 | GitHub Pages download site | Done — minimal landing page in `docs/index.html` with direct extension zip download and Pages deploy workflow in `.github/workflows/pages.yml` |
 | Loadable `build/extension/` build | Done — `node scripts/build.mjs`, passes the package check |
 | README screenshots | Done for `01`–`07` (layout reference captured in Chromium with fictional demo data); `08-in-page-pill.png` is owner-captured — see `docs/screenshots/TODO.md` |
@@ -197,6 +198,7 @@ docs/                  # GitHub Pages landing page (index.html + extension zip),
 |---|---|
 | [INSTALL.md](INSTALL.md) | Build, load, first-run walkthrough, the safety model, and what is not proven. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime topology, module map, data model, and why there is no background service worker. |
+| [docs/DM_AND_RESILIENCE.md](docs/DM_AND_RESILIENCE.md) | 2026 desktop DM paths (floating dock, `•••` Options, `/direct/t/`, Lexical composer) and universal per-account skip-vs-stop rules. |
 | [docs/SAFETY.md](docs/SAFETY.md) | The account-risk model, the limits the code enforces, and what the tool refuses to do. |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Upstream projects this code adapts, pinned by commit, with their licences. |
 | [SECURITY.md](SECURITY.md) | How to report a problem privately, and the three properties the code defends. |

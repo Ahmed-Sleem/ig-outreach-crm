@@ -33,8 +33,9 @@ jobs:
         run: |
           node scripts/build.mjs
           node scripts/check-package.mjs build/extension
-          mkdir -p _site
+          mkdir -p _site/screenshots
           cp docs/index.html _site/index.html
+          cp docs/screenshots/*.png _site/screenshots/
           touch _site/.nojekyll
           (cd build/extension && zip -r ../../_site/ig-outreach-crm-extension.zip .)
 

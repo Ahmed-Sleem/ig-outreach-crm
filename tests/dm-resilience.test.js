@@ -686,6 +686,116 @@ describe('DM human flow & exception paths', () => {
     assert.equal(sendCount, 2);
     assert.deepEqual(waitForLoadCalls, [42]);
   });
+
+  test('Re-audit #1: cold invite that immediately swaps composer for "Invite sent" after Send reports DONE (not skipped!)', async () => {
+    const ctx = makeCtx('/cold_prospect/');
+    const sent = [];
+    const { dock, editor, threadBody } = buildFloatingDock(ctx.document, {
+      username: 'cold_prospect',
+      sendButtonMode: 'none',
+    });
+    const sendBtn = makeRoleButton(ctx.document, 'Send', () => {
+      const text = readComposerText(editor);
+      sent.push(text);
+      const bubble = ctx.document.createElement('div');
+      bubble.setAttribute('role', 'article');
+      bubble.textContent = text;
+      threadBody.append(bubble);
+      // Instagram swaps the composer for "Invite sent" on cold invites!
+      editor.remove();
+      sendBtn.remove();
+      const notice = ctx.document.createElement('div');
+      notice.textContent = 'Invite sent. You can send more messages after your invite is accepted.';
+      dock.append(notice);
+    });
+    dock.append(sendBtn);
+    ctx.document.body.append(dock);
+
+    const dm = await executeDm(ctx, {
+      document: ctx.document,
+      username: 'cold_prospect',
+      message: 'Hi! Would love to connect.',
+    });
+    assert.equal(dm.ok, true, JSON.stringify(dm));
+    assert.equal(dm.outcome, ActionOutcome.DONE);
+    assert.deepEqual(sent, ['Hi! Would love to connect.']);
+  });
+
+  test('Re-audit #2: icon-only button with svg[aria-label="Options"] + different <title> is still found', () => {
+    const ctx = makeCtx('/icon_test/');
+    const header = ctx.document.createElement('header');
+    const btn = ctx.document.createElement('div');
+    btn.setAttribute('role', 'button');
+    const svg = ctx.document.createElement('svg');
+    svg.setAttribute('aria-label', 'Options');
+    const title = ctx.document.createElement('title');
+    title.textContent = 'More';
+    svg.append(title);
+    btn.append(svg);
+    header.append(btn);
+    ctx.document.body.append(header);
+
+    const found = findProfileOptionsButton(ctx.document);
+    assert.ok(found);
+    assert.equal(found.kind, Label.OPTIONS);
+  });
+
+  test('Re-audit #3: findSendButton skips aria-disabled="true" Send buttons until enabled', () => {
+    const ctx = makeCtx('/studio_noor/');
+    const { dock } = buildFloatingDock(ctx.document, { username: 'studio_noor', sendButtonMode: 'none' });
+    const disabledSend = makeRoleButton(ctx.document, 'Send');
+    disabledSend.setAttribute('aria-disabled', 'true');
+    dock.append(disabledSend);
+    ctx.document.body.append(dock);
+
+    assert.equal(findSendButton(ctx.document, dock), null);
+    disabledSend.removeAttribute('aria-disabled');
+    assert.equal(findSendButton(ctx.document, dock)?.button, disabledSend);
+  });
+
+  test('Re-audit #4: openDm waits out a [role="progressbar"] spinner so delayed thread history is not missed', async () => {
+    const ctx = makeCtx('/delayed_history/');
+    buildProfileHeader(ctx.document, {
+      username: 'delayed_history',
+      onMessageClick: () => {
+        const { dock, threadBody } = buildFloatingDock(ctx.document, {
+          username: 'delayed_history',
+          existingMessages: [],
+        });
+        const spinner = ctx.document.createElement('div');
+        spinner.setAttribute('role', 'progressbar');
+        threadBody.append(spinner);
+        ctx.document.body.append(dock);
+        // Simulate history arriving after 250ms and removing the spinner.
+        const origWait = ctx.wait;
+        let resolved = false;
+        ctx.wait = async (ms) => {
+          await origWait(ms);
+          if (!resolved && ctx._t >= 200) {
+            resolved = true;
+            spinner.remove();
+            const oldMsg = ctx.document.createElement('div');
+            oldMsg.setAttribute('role', 'article');
+            oldMsg.textContent = 'Older conversation message';
+            threadBody.append(oldMsg);
+          }
+        };
+      },
+    });
+
+    const opened = await openDm(ctx, { document: ctx.document, location: ctx.location, username: 'delayed_history' });
+    assert.equal(opened.ok, true);
+    assert.equal(opened.existingThread, true, 'must detect existing thread after progressbar finishes');
+  });
+
+  test('Re-audit #5: detectDmRestriction ignores composer draft text so own message cannot self-trigger', () => {
+    const ctx = makeCtx('/studio_noor/');
+    const { dock, editor } = buildFloatingDock(ctx.document, { username: 'studio_noor' });
+    editor.textContent = "Sorry, my previous message failed to send — invite sent again!";
+    ctx.document.body.append(dock);
+
+    assert.equal(detectDmRestriction(dock), null);
+  });
 });
 
 /* ---------------- 4. Universal default skip-vs-stop across ALL 3 modes */
